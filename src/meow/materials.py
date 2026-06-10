@@ -206,6 +206,122 @@ class AnisotropicMaterial(MaterialBase):
         return super()._lumadd(sim, env, unit)
 
 
+def _coerce_eps_tensors(arr: np.ndarray) -> np.ndarray:
+    """Normalize sampled permittivities to a stack of 3x3 tensors (N, 3, 3)."""
+    arr = np.asarray(arr, dtype=np.complex128)
+    if arr.ndim == 1:
+        arr = arr[:, None, None] * np.eye(3, dtype=np.complex128)
+    elif arr.ndim == 2 and arr.shape[1] == 3:
+        out = np.zeros((arr.shape[0], 3, 3), dtype=np.complex128)
+        out[:, np.arange(3), np.arange(3)] = arr
+        arr = out
+    elif arr.ndim != 3 or arr.shape[1:] != (3, 3):
+        msg = (
+            "eps should be given as an (N,) array (isotropic), an (N, 3) "
+            "array (tensor diagonals) or an (N, 3, 3) array of permittivity "
+            f"tensors sampled at N wavelengths. Got shape {arr.shape}."
+        )
+        raise ValueError(msg)
+    arr.setflags(write=False)
+    return arr
+
+
+EpsTensors: TypeAlias = Annotated[NDArray, AfterValidator(_coerce_eps_tensors)]
+"""A stack of 3x3 complex permittivity tensors, one per sampled wavelength."""
+
+
+class SampledAnisotropicMaterial(MaterialBase):
+    """A material with a wavelength-sampled dielectric permittivity tensor.
+
+    The permittivity is given at sampled wavelengths ``wls`` and can be
+    specified per sample as a scalar (isotropic), a 3-element tensor diagonal
+    or a full 3x3 tensor; it is always stored as an (N, 3, 3) stack. Calling
+    ``eps_tensor(env)`` linearly interpolates every tensor component at the
+    environment wavelength, so the material is fully dispersive.
+    """
+
+    wls: Annotated[NDArray, Dim(1), DType("float64")] = Field(
+        description="the (sorted) wavelengths at which eps is sampled"
+    )
+    eps: EpsTensors = Field(
+        description=(
+            "the relative dielectric permittivity tensors sampled at wls. "
+            "Can be given as an (N,) array (isotropic), an (N, 3) array "
+            "(tensor diagonals) or a full (N, 3, 3) array."
+        )
+    )
+
+    @model_validator(mode="after")
+    def _validate_sampling(self) -> Self:
+        if self.wls.shape[0] != self.eps.shape[0]:
+            msg = (
+                f"length of wls ({self.wls.shape[0]}) does not match the "
+                f"number of sampled eps tensors ({self.eps.shape[0]})."
+            )
+            raise ValueError(msg)
+        if np.any(np.diff(self.wls) <= 0):
+            msg = "wls should be strictly increasing."
+            raise ValueError(msg)
+        return self
+
+    @classmethod
+    def from_n(
+        cls,
+        name: str,
+        wls: Any,
+        n: Any,
+        meta: dict[str, Any] | None = None,
+    ) -> Self:
+        """Create a SampledAnisotropicMaterial from sampled refractive indices.
+
+        Args:
+            name: the name of the material.
+            wls: the wavelengths at which the refractive index is sampled.
+            n: the sampled refractive index: an (N,) array (isotropic) or an
+                (N, 3) array of tensor diagonals ``(n_xx, n_yy, n_zz)``.
+            meta: metadata for the material.
+        """
+        n = np.asarray(n, dtype=np.complex128)
+        return cls(name=name, wls=wls, eps=n**2, meta=meta or {})
+
+    def eps_tensor(self, env: Environment) -> np.ndarray:
+        """Interpolate the 3x3 permittivity tensor at the environment wavelength."""
+        if not isinstance(env, Environment):
+            env = Environment(**env)
+        wl = np.asarray(env.wl, dtype=np.float64)
+        eps = np.empty((*wl.shape, 3, 3), dtype=np.complex128)
+        for i in range(3):
+            for j in range(3):
+                eps[..., i, j] = np.interp(
+                    wl, self.wls, np.real(self.eps[:, i, j])
+                ) + 1j * np.interp(wl, self.wls, np.imag(self.eps[:, i, j]))
+        return eps
+
+    @property
+    def is_isotropic(self) -> bool:
+        """Whether every sampled tensor is a multiple of the identity."""
+        diag = self.eps[:, np.arange(3), np.arange(3)]
+        return bool(
+            np.all(self.eps == _coerce_eps_tensors(diag))
+            and np.all(diag == diag[:, :1])
+        )
+
+    def __call__(self, env: Environment) -> np.ndarray:
+        """Effective scalar index (average of the interpolated tensor diagonal)."""
+        eps = self.eps_tensor(env)
+        diag = eps[..., np.arange(3), np.arange(3)]
+        return np.squeeze(np.sqrt(np.mean(diag, axis=-1)))
+
+    def _lumadd(self, sim: Any, env: Environment, unit: float) -> str:
+        if not self.is_isotropic:
+            msg = (
+                "The Lumerical backend does not support anisotropic materials. "
+                f"Material {self.name!r} has an anisotropic permittivity tensor."
+            )
+            raise NotImplementedError(msg)
+        return super()._lumadd(sim, env, unit)
+
+
 class SampledMaterial(MaterialBase):
     """A material with a sampled refractive index."""
 
@@ -279,9 +395,13 @@ class SampledMaterial(MaterialBase):
 
 
 Material: TypeAlias = (
-    IndexMaterial | SampledMaterial | TidyMaterial | AnisotropicMaterial
+    IndexMaterial
+    | SampledMaterial
+    | TidyMaterial
+    | AnisotropicMaterial
+    | SampledAnisotropicMaterial
 )
-"""A material: `IndexMaterial`, `SampledMaterial`, `TidyMaterial`, or `AnisotropicMaterial`."""  # noqa: E501
+"""A material: `IndexMaterial`, `SampledMaterial`, `TidyMaterial`, `AnisotropicMaterial`, or `SampledAnisotropicMaterial`."""  # noqa: E501
 Materials: TypeAlias = list[Material]
 """A list of `Material` objects."""
 MATERIALS: dict[str, MaterialBase] = {}

@@ -17,11 +17,15 @@ from meow.eme.interface import (
 )
 from meow.eme.parallel import (
     GroupResult,
+    GroupSpectrumResult,
     JobExecutor,
     acompute_s_matrix_parallel,
+    acompute_s_matrix_spectrum,
     chunk_cell_indices,
     compute_group_result,
+    compute_group_spectrum,
     compute_s_matrix_parallel,
+    compute_s_matrix_spectrum,
     slurm_executor,
 )
 from meow.eme.propagation import (
@@ -44,12 +48,15 @@ from meow.eme.solve import (
 
 __all__ = [
     "GroupResult",
+    "GroupSpectrumResult",
     "JobExecutor",
     "PassivityMethod",
     "acompute_s_matrix_parallel",
+    "acompute_s_matrix_spectrum",
     "cascade_s_matrices",
     "chunk_cell_indices",
     "compute_group_result",
+    "compute_group_spectrum",
     "compute_interface_s_matrices",
     "compute_interface_s_matrix",
     "compute_mode_amplitudes",
@@ -58,6 +65,7 @@ __all__ = [
     "compute_s_matrix",
     "compute_s_matrix_parallel",
     "compute_s_matrix_sax",
+    "compute_s_matrix_spectrum",
     "downselect_s",
     "enforce_passivity",
     "l2r_matrices",

@@ -197,3 +197,43 @@ def test_fde_full_tensor() -> None:
         neff = np.real(modes[0].neff)
         assert np.isfinite(neff)
         assert 1.0 < neff < 3.2
+
+
+def test_sampled_anisotropic_material() -> None:
+    wls = np.array([1.4, 1.5, 1.6])
+    eps_diag = np.stack([4.0 - wls, 5.0 - wls, 6.0 - wls], axis=1)
+    mat = mw.SampledAnisotropicMaterial(name="sam_diag", wls=wls, eps=eps_diag)
+    assert mat.eps.shape == (3, 3, 3)
+    assert not mat.is_isotropic
+    # exact at sample points, linear in between
+    assert np.allclose(
+        np.diag(mat.eps_tensor(mw.Environment(wl=1.5, T=25.0))), eps_diag[1]
+    )
+    mid = mat.eps_tensor(mw.Environment(wl=1.45, T=25.0))
+    assert np.allclose(np.diag(mid), 0.5 * (eps_diag[0] + eps_diag[1]))
+
+
+def test_sampled_anisotropic_material_specs_and_validation() -> None:
+    wls = np.array([1.5, 1.6])
+    iso = mw.SampledAnisotropicMaterial(name="sam_iso", wls=wls, eps=[4.0, 4.1])
+    assert iso.is_isotropic
+    assert iso.eps.shape == (2, 3, 3)
+    full = mw.SampledAnisotropicMaterial(
+        name="sam_full", wls=wls, eps=np.broadcast_to(np.eye(3) * 4, (2, 3, 3))
+    )
+    assert full.eps.shape == (2, 3, 3)
+    with pytest.raises(ValidationError):  # length mismatch
+        mw.SampledAnisotropicMaterial(name="sam_bad", wls=wls, eps=[4.0, 4.1, 4.2])
+    with pytest.raises(ValidationError):  # unsorted wavelengths
+        mw.SampledAnisotropicMaterial(name="sam_bad2", wls=[1.6, 1.5], eps=[4.0, 4.1])
+
+
+def test_sampled_anisotropic_from_n_and_roundtrip() -> None:
+    wls = np.array([1.5, 1.6])
+    n = np.array([[2.13, 2.21, 2.21], [2.12, 2.20, 2.20]])
+    mat = mw.SampledAnisotropicMaterial.from_n("sam_n", wls, n)
+    assert np.allclose(
+        np.diag(mat.eps_tensor(mw.Environment(wl=1.5, T=25.0))), n[0] ** 2
+    )
+    rt = mw.SampledAnisotropicMaterial.model_validate(mat.model_dump())
+    assert rt == mat

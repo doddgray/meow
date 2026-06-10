@@ -227,3 +227,98 @@ def test_slurm_executor_requires_submitit(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(ImportError, match="pip install submitit"):
         mw.slurm_executor()
+
+
+def test_spectrum_matches_serial_per_wavelength(
+    taper: tuple[list[mw.Cell], mw.Environment],
+) -> None:
+    """Each sweep point of the parallel spectrum matches a serial solve."""
+    cells, env = taper
+    wls = np.array([1.5, 1.6])
+    spectra = mw.compute_s_matrix_spectrum(
+        cells,
+        env,
+        wls=wls,
+        num_modes=NUM_MODES,
+        executor=ThreadPoolExecutor(max_workers=2),
+    )
+    assert len(spectra) == len(wls)
+    for wl, (S, pm) in zip(wls, spectra, strict=True):
+        env_i = mw.Environment(wl=float(wl), T=25.0)
+        css = [mw.CrossSection.from_cell(cell=c, env=env_i) for c in cells]
+        modes = [mw.compute_modes(cs, num_modes=NUM_MODES) for cs in css]
+        S_ref, pm_ref = mw.compute_s_matrix(modes, cells=cells)
+        assert pm == pm_ref
+        np.testing.assert_allclose(np.asarray(S), np.asarray(S_ref), atol=1e-9)
+
+
+def test_spectrum_frequency_sweep_equivalence(
+    taper: tuple[list[mw.Cell], mw.Environment],
+) -> None:
+    """Sweeping optical frequency gives the same result as wavelengths."""
+    from scipy.constants import c
+
+    cells, env = taper
+    wls = np.array([1.5, 1.6])
+    kwargs = {"num_modes": NUM_MODES, "executor": ThreadPoolExecutor(max_workers=2)}
+    by_wl = mw.compute_s_matrix_spectrum(cells, env, wls=wls, **kwargs)
+    by_freq = mw.compute_s_matrix_spectrum(cells, env, freqs=c / (wls * 1e-6), **kwargs)
+    for (S_wl, _), (S_f, _) in zip(by_wl, by_freq, strict=True):
+        np.testing.assert_allclose(np.asarray(S_wl), np.asarray(S_f), atol=1e-12)
+
+
+def test_spectrum_requires_exactly_one_sweep(
+    taper: tuple[list[mw.Cell], mw.Environment],
+) -> None:
+    cells, env = taper
+    with pytest.raises(ValueError, match="exactly one"):
+        mw.compute_s_matrix_spectrum(cells, env)
+    with pytest.raises(ValueError, match="exactly one"):
+        mw.compute_s_matrix_spectrum(cells, env, wls=[1.5], freqs=[193e12])
+
+
+def test_group_spectrum_contains_only_frequency_dependent_matrices(
+    taper: tuple[list[mw.Cell], mw.Environment],
+) -> None:
+    """A spectrum job returns per-wavelength neffs + interface matrices only."""
+    cells, env = taper
+    wls = np.array([1.5, 1.55, 1.6])
+    result = mw.compute_group_spectrum(
+        [c.model_dump() for c in cells[:2]], env.model_dump(), 0, wls, NUM_MODES
+    )
+    assert result.start == 0
+    np.testing.assert_allclose(result.wls, wls)
+    assert len(result.per_wl) == len(wls)
+    neffs0 = [np.asarray(r.neffs[0]) for r in result.per_wl]
+    # dispersion: the fundamental neff changes across the sweep
+    assert not np.isclose(neffs0[0][0], neffs0[-1][0])
+    for r in result.per_wl:
+        assert len(r.interfaces) == 1
+
+
+def test_async_spectrum_matches_sync(
+    taper: tuple[list[mw.Cell], mw.Environment],
+) -> None:
+    import asyncio
+
+    cells, env = taper
+    wls = np.array([1.5, 1.6])
+    sync = mw.compute_s_matrix_spectrum(
+        cells,
+        env,
+        wls=wls,
+        num_modes=NUM_MODES,
+        executor=ThreadPoolExecutor(max_workers=2),
+    )
+
+    async def main() -> list:
+        return await mw.acompute_s_matrix_spectrum(
+            cells,
+            env,
+            wls=wls,
+            num_modes=NUM_MODES,
+            executor=ThreadPoolExecutor(max_workers=2),
+        )
+
+    for (S_s, _), (S_a, _) in zip(sync, asyncio.run(main()), strict=True):
+        np.testing.assert_allclose(np.asarray(S_s), np.asarray(S_a), atol=1e-12)

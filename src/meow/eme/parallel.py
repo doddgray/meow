@@ -39,6 +39,7 @@ from typing import Any, Protocol, runtime_checkable
 import jax.numpy as jnp
 import numpy as np
 import sax
+from scipy.constants import c
 
 from meow.cell import Cell
 from meow.cross_section import CrossSection
@@ -155,6 +156,251 @@ def compute_group_result(
         S, _ = compute_interface_s_matrix(modes_l, modes_r, **(interface_kwargs or {}))
         interfaces.append(np.asarray(S))
     return GroupResult(start=start, neffs=neffs, interfaces=interfaces)
+
+
+@dataclass
+class GroupSpectrumResult:
+    """The result of one slice-group job swept over wavelength.
+
+    The modes of the group's cells are re-solved at every sweep wavelength
+    inside the job, so only the frequency-dependent effective indices and
+    interface S-matrices ever leave the job - no mode field data.
+    """
+
+    start: int
+    """Index of the first cell of the group within the full chain."""
+    wls: np.ndarray = field(default_factory=lambda: np.empty(0))
+    """The swept wavelengths."""
+    per_wl: list[GroupResult] = field(default_factory=list)
+    """The :class:`GroupResult` of this group at each wavelength."""
+
+
+def compute_group_spectrum(
+    cells_data: list[dict[str, Any] | Cell],
+    env_data: dict[str, Any] | Environment,
+    start: int,
+    wls: Any,
+    num_modes: int = 10,
+    compute_modes_kwargs: dict[str, Any] | None = None,
+    interface_kwargs: dict[str, Any] | None = None,
+) -> GroupSpectrumResult:
+    """Solve one slice group at every sweep wavelength.
+
+    This is the function executed by each parallel job for a spectrum
+    calculation: it runs the frequency-dependent mode simulations of its
+    cells (dispersive materials are evaluated at each wavelength through
+    the environment) and returns the per-wavelength effective indices and
+    interface S-matrices.
+
+    Args:
+        cells_data: the (serialized) cells of this group, in chain order.
+        env_data: the (serialized) simulation environment.
+        start: index of the first cell of the group within the full chain.
+        wls: the wavelengths to sweep.
+        num_modes: number of modes to compute per cell.
+        compute_modes_kwargs: extra kwargs for ``compute_modes``.
+        interface_kwargs: extra kwargs for ``compute_interface_s_matrix``.
+    """
+    cells: list[dict[str, Any] | Cell] = [Cell.model_validate(c) for c in cells_data]
+    env_dict = Environment.model_validate(env_data).model_dump()
+    wls = np.asarray(wls, dtype=np.float64)
+    per_wl = [
+        compute_group_result(
+            cells,
+            {**env_dict, "wl": float(wl)},
+            start,
+            num_modes,
+            compute_modes_kwargs,
+            interface_kwargs,
+        )
+        for wl in wls
+    ]
+    return GroupSpectrumResult(start=start, wls=wls, per_wl=per_wl)
+
+
+def _resolve_wls(wls: Any | None, freqs: Any | None) -> np.ndarray:
+    """Resolve a sweep given as wavelengths [um] or optical frequencies [Hz]."""
+    if (wls is None) == (freqs is None):
+        msg = "Specify exactly one of wls (wavelengths in um) or freqs (in Hz)."
+        raise ValueError(msg)
+    if freqs is not None:
+        return c / np.asarray(freqs, dtype=np.float64) * 1e6
+    return np.asarray(wls, dtype=np.float64)
+
+
+def compute_s_matrix_spectrum(
+    cells: list[Cell],
+    env: Environment,
+    *,
+    wls: Any | None = None,
+    freqs: Any | None = None,
+    num_modes: int = 10,
+    max_interfaces_per_job: int = 2,
+    executor: JobExecutor | None = None,
+    max_workers: int | None = None,
+    sax_backend: sax.Backend = "klu",
+    neff_atol: float = 1e-6,
+    compute_modes_kwargs: dict[str, Any] | None = None,
+    interface_kwargs: dict[str, Any] | None = None,
+) -> list[sax.SDenseMM]:
+    """Compute EME S-matrix spectra using concurrent slice-group jobs.
+
+    The sweep can be given either as wavelengths (``wls``, in um) or as
+    optical frequencies (``freqs``, in Hz). Each concurrent job (local
+    subprocess or slurm task) solves the frequency-dependent modes of its
+    slice group at every sweep point and returns only the per-frequency
+    effective indices and interface S-matrices; the full S-matrix at each
+    sweep point is then cascaded in the calling process.
+
+    Args:
+        cells: the cells of the EME chain.
+        env: the simulation environment (its ``wl`` is overridden per point).
+        wls: the wavelengths to sweep [um].
+        freqs: the optical frequencies to sweep [Hz] (alternative to wls).
+        num_modes: number of modes to compute per cell.
+        max_interfaces_per_job: how many interfaces each job computes.
+        executor: where to run the jobs (see :func:`compute_s_matrix_parallel`).
+        max_workers: max number of local subprocesses (only used when no
+            executor is given).
+        sax_backend: SAX backend used to cascade the S-matrices.
+        neff_atol: tolerance of the shared-cell consistency check.
+        compute_modes_kwargs: extra kwargs for ``compute_modes``.
+        interface_kwargs: extra kwargs for ``compute_interface_s_matrix``.
+
+    Returns:
+        A list of ``(S, port_map)`` tuples, one per sweep point, in the
+        order of the given ``wls``/``freqs`` array.
+    """
+    wls_arr = _resolve_wls(wls, freqs)
+    groups = chunk_cell_indices(len(cells), max_interfaces_per_job)
+    if executor is None:
+        with ProcessPoolExecutor(
+            max_workers=max_workers, mp_context=mp.get_context("spawn")
+        ) as own_executor:
+            jobs = _submit_spectrum_jobs(
+                own_executor,
+                cells,
+                env,
+                groups,
+                wls_arr,
+                num_modes,
+                compute_modes_kwargs,
+                interface_kwargs,
+            )
+            results = [job.result() for job in jobs]
+    else:
+        jobs = _submit_spectrum_jobs(
+            executor,
+            cells,
+            env,
+            groups,
+            wls_arr,
+            num_modes,
+            compute_modes_kwargs,
+            interface_kwargs,
+        )
+        results = [job.result() for job in jobs]
+    return _assemble_spectrum(
+        results, cells, env, wls_arr, sax_backend=sax_backend, neff_atol=neff_atol
+    )
+
+
+async def acompute_s_matrix_spectrum(
+    cells: list[Cell],
+    env: Environment,
+    *,
+    wls: Any | None = None,
+    freqs: Any | None = None,
+    num_modes: int = 10,
+    max_interfaces_per_job: int = 2,
+    executor: JobExecutor | None = None,
+    max_workers: int | None = None,
+    sax_backend: sax.Backend = "klu",
+    neff_atol: float = 1e-6,
+    compute_modes_kwargs: dict[str, Any] | None = None,
+    interface_kwargs: dict[str, Any] | None = None,
+) -> list[sax.SDenseMM]:
+    """Async version of :func:`compute_s_matrix_spectrum`."""
+    wls_arr = _resolve_wls(wls, freqs)
+    groups = chunk_cell_indices(len(cells), max_interfaces_per_job)
+    own_executor: ProcessPoolExecutor | None = None
+    if executor is None:
+        executor = own_executor = ProcessPoolExecutor(
+            max_workers=max_workers, mp_context=mp.get_context("spawn")
+        )
+    try:
+        jobs = _submit_spectrum_jobs(
+            executor,
+            cells,
+            env,
+            groups,
+            wls_arr,
+            num_modes,
+            compute_modes_kwargs,
+            interface_kwargs,
+        )
+        results = list(
+            await asyncio.gather(*(asyncio.to_thread(job.result) for job in jobs))
+        )
+    finally:
+        if own_executor is not None:
+            own_executor.shutdown()
+    return _assemble_spectrum(
+        results, cells, env, wls_arr, sax_backend=sax_backend, neff_atol=neff_atol
+    )
+
+
+def _submit_spectrum_jobs(
+    executor: JobExecutor,
+    cells: list[Cell],
+    env: Environment,
+    groups: list[tuple[int, int]],
+    wls: np.ndarray,
+    num_modes: int,
+    compute_modes_kwargs: dict[str, Any] | None,
+    interface_kwargs: dict[str, Any] | None,
+) -> list[Any]:
+    cells_data = [cell.model_dump() for cell in cells]
+    env_data = env.model_dump()
+    return [
+        executor.submit(
+            compute_group_spectrum,
+            cells_data[start : stop + 1],
+            env_data,
+            start,
+            wls,
+            num_modes,
+            compute_modes_kwargs,
+            interface_kwargs,
+        )
+        for start, stop in groups
+    ]
+
+
+def _assemble_spectrum(
+    results: list[GroupSpectrumResult],
+    cells: list[Cell],
+    env: Environment,
+    wls: np.ndarray,
+    *,
+    sax_backend: sax.Backend = "klu",
+    neff_atol: float = 1e-6,
+) -> list[sax.SDenseMM]:
+    """Assemble the per-wavelength S-matrices from the group spectra."""
+    env_dict = env.model_dump()
+    spectra = []
+    for i, wl in enumerate(wls):
+        env_wl = Environment.model_validate({**env_dict, "wl": float(wl)})
+        spectra.append(
+            _assemble_s_matrix(
+                [r.per_wl[i] for r in results],
+                cells,
+                env_wl,
+                sax_backend=sax_backend,
+                neff_atol=neff_atol,
+            )
+        )
+    return spectra
 
 
 def compute_s_matrix_parallel(
