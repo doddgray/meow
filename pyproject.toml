@@ -1,27 +1,37 @@
 [build-system]
 build-backend = "setuptools.build_meta"
-requires = ["build", "pip", "setuptools", "wheel", "pybind11"]
+requires = ["setuptools>=61", "uv", "build", "wheel"]
+
+[dependency-groups]
+dev = [
+  "build>=1.2.0",
+  "gdsfactory>=9.39",
+  "gdspy>=1.6.13",
+  "griffe>=1.5.6",
+  "ipykernel>=6.29.5",
+  "ipympl>=0.9.0",
+  "ipywidgets>=8.0.0",
+  "mkautodoc>=0.2.0",
+  "mkdocstrings-python>=2.0.3",
+  "mkinit>=1.1.0",
+  "nb-clean>=4.0.1",
+  "nbconvert>=7.16.6",
+  "nbstripout>=0.8.0",
+  "papermill>=2.6.0",
+  "pre-commit>=4.1.0",
+  "pytest-cov>=6.0.0",
+  "pytest-randomly>=3.16.0",
+  "pytest-xdist>=3.6.0",
+  "pytest>=8.3.0",
+  "ruff>=0.15.5",
+  "tmm>=0.2.0",
+  "towncrier>=24.0.0",
+  "ty==0.0.26",
+  "zensical>=0.0.11"
+]
 
 [project]
-name = "meow-sim"
-version = "0.9.0"
-authors = [
-{ name = "Rockley Photonics" },
-{ name = "Floris Laporte", email = "floris.laporte@rockleyphotonics.com" },
-]
-description = "Modeling of Eigenmodes and Overlaps in Waveguide Structures"
-requires-python = ">=3.8"
-keywords = [
-  "eigenmodes",
-  "eme",
-  "fde",
-  "modeling",
-  "overlaps",
-  "photonics",
-  "waveguides",
-]
-license = { text = "Apache Software License" }
-readme = "README.md"
+authors = [{name = "Floris Laporte", email = "floris.laporte@gmail.com"}]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
@@ -31,43 +41,143 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering",
-  "Topic :: Scientific/Engineering :: Physics",
+  "Topic :: Scientific/Engineering :: Physics"
 ]
 dependencies = [
-  "matplotlib",
-  "numpy>=1.24",
-  "packaging",
-  "pydantic>=2",
-  "sax>=0.11.1",
-  "scipy",
-  "shapely",
-  "tidy3d>=2.4.0",
-  "trimesh[easy]",
+  "jax>=0.6.0",
+  "klujax>=0.4.1",
+  "matplotlib>=3.0.0",
+  "numpy>=2.2.0",
+  "orjson>=3.0.0",
+  "pydantic>=2.10.0",
+  "pyyaml>=6.0.2",
+  "sax>=0.16.12",
+  "shapely>=2.1.0",
+  "tidy3d>=2.8.0",
+  "tqdm>=4.67.0",
+  "trimesh[easy]>=4.6.0"
+]
+description = "Modeling of Eigenmodes and Overlaps in Waveguides"
+keywords = [
+  "eigenmodes",
+  "eme",
+  "fde",
+  "modeling",
+  "overlaps",
+  "photonics",
+  "waveguides"
+]
+license = {text = "Apache Software License"}
+name = "meow-sim"
+readme = "README.md"
+requires-python = ">=3.11"
+version = "0.15.0"
+
+[[tool.bver.file]]
+src = "README.md"
+
+[[tool.bver.file]]
+src = "pyproject.toml"
+
+[[tool.bver.file]]
+src = "src/meow/__init__.py"
+
+[tool.bver.git]
+actions = ["add-all", "commit", "tag", "push"]
+
+[tool.pytest.ini_options]
+addopts = '--tb=short'
+norecursedirs = ["scripts"]
+testpaths = ["src/tests"]
+
+[tool.ruff]
+fix = true
+target-version = "py311"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]  # see https://docs.astral.sh/ruff/rules
+ignore = [
+  "ANN401",  # any-type
+  "C901",  # complex-structure
+  "COM812",  # missing-trailing-comma
+  "D105",  # undocumented-magic-method
+  "E741",  # ambiguous-variable-name
+  "ERA001",  # commented-out-code
+  "FIX001",  # line-contains-fixme
+  "FIX002",  # line-contains-todo
+  "FIX004",  # line-contains-hack
+  "N803",  # invalid-argument-name
+  "N806",  # non-lowercase-variable-in-function
+  "PLC0414",  # useless-import-alias
+  "PLC0415",  # import-outside-top-level
+  "PLR0911",  # too-many-return-statements
+  "PLR0912",  # too-many-branches
+  "PLR0913",  # too-many-arguments
+  "PLR2004",  # magic-value-comparison
+  "PLW2901",  # redefined-loop-name
+  "RET504",  # unnecessary-assign
+  "S301",  # suspicious-pickle-usage
+  "SIM300",  # yoda-conditions
+  "SIM910",  # dict-get-with-none-default
+  "SLF001",  # private-member-access
+  "TC001",  # typing-only-first-party-import
+  "TC002",  # typing-only-third-party-import
+  "TC003",  # typing-only-standard-library-import
+  "TC006",  # runtime-cast-value
+  "TD001",  # invalid-todo-tag
+  "TD002",  # missing-todo-author
+  "TD003",  # missing-todo-link
+  "TID252",  # relative-imports
+  "TRY003"  # raise-vanilla-args
+]
+select = ["ALL"]
+
+[tool.ruff.lint.per-file-ignores]
+"*.ipynb" = [
+  "ANN",  # flake8-annotations
+  "ARG001",  # unused-function-argument
+  "BLE001",  # blind-exception
+  "D",  # pydocstyle
+  "E402",  # module-import-not-at-top-of-file
+  "E501",  # line-too-long
+  "EM101",  # raw-string-in-exception
+  "F821",  # undefined-name
+  "FBT002",  # boolean-default-positional-argument
+  "FBT003",  # boolean-positional-value-in-call
+  "N816",  # mixed-case-variable-in-global-scope
+  "PLC2401",  # non-ascii-name
+  "RUF001",  # ambiguous-unicode-character-string
+  "RUF002",  # ambiguous-unicode-character-docstring
+  "RUF003",  # ambiguous-unicode-character-comment
+  "S101",  # assert
+  "SLF001",  # private-member-access
+  "T201"  # print
+]
+"src/meow/mesh.py" = [
+  "D403",  # first-word-uncapitalized
+  "N802"  # invalid-function-name
+]
+"src/meow/mode.py" = [
+  "N802"  # invalid-function-name
+]
+"src/tests/*" = [
+  "ANN201",  # missing-return-type-undocumented-public-function
+  "D",  # pydocstyle
+  "INP001",  # implicit-namespace-package
+  "PT011",  # pytest-raises-too-broad
+  "S101"  # assert
 ]
 
-[project.optional-dependencies]
-min = ["meow-sim"]
-vis = ["matplotlib", "trimesh[easy]"]
-jax = ["jax", "jaxlib"]
-klu = ["klujax>0.1.2"]
-ipy = ["ipykernel", "ipywidgets", "ipympl", "nbstripout", "tqdm"]
-gds = ["gdsfactory[cad]>=7.4.0", "klayout>0.28.2", "kweb", "kfactory"]
-dev = ["bump2version", "nbstripout", "pre-commit", "black[jupyter]", "autoimport", "isort", "sphinx", "autodoc-pydantic", "myst-nb>0.17.1", "jupyter-book", "papermill"]
-full = ["meow-sim[vis,klu,jax,ipy,gds]"]
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["meow*"]
-exclude = []
-namespaces = true
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.setuptools.package-data]
 "*" = ["*.csv"]
 
-[tool.black]
-line-length = 88
-target-version = ['py38']
-include = '\.pyi?$'
+[tool.setuptools.packages.find]
+where = ["src"]
 
-[tool.pyright]
-reportPrivateImportUsage = false
+[tool.ty.src]
+exclude = ["src/tests/**/*.ipynb"]
