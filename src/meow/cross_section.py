@@ -115,6 +115,36 @@ class CrossSection(BaseModel):
             self.mesh, self._m_full, self.materials, self.env, self.structures, "z"
         )
 
+    @cached_property
+    def eps_xy(self) -> ComplexArray2D:
+        """Return the off-diagonal permittivity eps_xy on the Ex positions."""
+        return _compute_offdiag_eps(self._m_full, self.materials, self.env, "x", "y")
+
+    @cached_property
+    def eps_xz(self) -> ComplexArray2D:
+        """Return the off-diagonal permittivity eps_xz on the Ex positions."""
+        return _compute_offdiag_eps(self._m_full, self.materials, self.env, "x", "z")
+
+    @cached_property
+    def eps_yx(self) -> ComplexArray2D:
+        """Return the off-diagonal permittivity eps_yx on the Ey positions."""
+        return _compute_offdiag_eps(self._m_full, self.materials, self.env, "y", "x")
+
+    @cached_property
+    def eps_yz(self) -> ComplexArray2D:
+        """Return the off-diagonal permittivity eps_yz on the Ey positions."""
+        return _compute_offdiag_eps(self._m_full, self.materials, self.env, "y", "z")
+
+    @cached_property
+    def eps_zx(self) -> ComplexArray2D:
+        """Return the off-diagonal permittivity eps_zx on the Ez positions."""
+        return _compute_offdiag_eps(self._m_full, self.materials, self.env, "z", "x")
+
+    @cached_property
+    def eps_zy(self) -> ComplexArray2D:
+        """Return the off-diagonal permittivity eps_zy on the Ez positions."""
+        return _compute_offdiag_eps(self._m_full, self.materials, self.env, "z", "y")
+
     def _visualize(
         self,
         *,
@@ -179,6 +209,42 @@ _COMPONENT_SLICES = {
     "y": (slice(None, None, 2), slice(1, None, 2)),  # Ey: [::2, 1::2]
     "z": (slice(None, None, 2), slice(None, None, 2)),  # Ez: [::2, ::2]
 }
+
+_COMPONENT_INDEX = {"x": 0, "y": 1, "z": 2}
+
+
+def _material_eps_component(
+    material: Material,
+    env: Environment,
+    row: Literal["x", "y", "z"],
+    col: Literal["x", "y", "z"],
+) -> np.complex128:
+    """Get a single component of the material permittivity tensor."""
+    i, j = _COMPONENT_INDEX[row], _COMPONENT_INDEX[col]
+    return np.complex128(material.eps_tensor(env)[i, j])
+
+
+def _compute_offdiag_eps(
+    m_full: IntArray2D,
+    materials: dict[Material, int],
+    env: Environment,
+    row: Literal["x", "y", "z"],
+    col: Literal["x", "y", "z"],
+) -> ComplexArray2D:
+    """Compute an off-diagonal permittivity component eps_{row,col}.
+
+    The component is sampled at the E_{row} Yee positions without subpixel
+    smoothing (each pixel takes the value of the material that rasterized
+    onto it). The background (air) contributes zero off-diagonal permittivity.
+    """
+    si, sj = _COMPONENT_SLICES[row]
+    m_comp = m_full[si, sj]
+    eps = np.zeros_like(m_comp, dtype=np.complex128)
+    for material, idx in materials.items():
+        e = _material_eps_component(material, env, row, col)
+        if e != 0:
+            eps[m_comp == idx] = e
+    return eps
 
 
 def _dual_cell_bounds(
@@ -253,8 +319,7 @@ def _compute_smoothed_n(  # noqa: PLR0915
     eps = np.full_like(m_comp, env_eps, dtype=np.complex128)
     mat_eps: dict[int, complex] = {0: env_eps}
     for material, idx in materials.items():
-        n_val = material(env)
-        e = np.complex128(n_val) ** 2
+        e = _material_eps_component(material, env, component, component)
         eps[m_comp == idx] = e
         mat_eps[idx] = e
 
@@ -376,8 +441,7 @@ def _compute_winner_takes_all_n(
     eps = np.full_like(m_comp, env_eps, dtype=np.complex128)
     mat_eps: dict[int, complex] = {0: env_eps}
     for material, idx in materials.items():
-        n_val = material(env)
-        e = np.complex128(n_val) ** 2
+        e = _material_eps_component(material, env, component, component)
         eps[m_comp == idx] = e
         mat_eps[idx] = e
 

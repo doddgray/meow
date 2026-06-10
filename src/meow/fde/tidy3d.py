@@ -40,8 +40,17 @@ def compute_modes_tidy3d(
         msg = "You need to request at least 1 mode."
         raise ValueError(msg)
 
-    od = np.zeros_like(cs.nx)  # off diagonal entry
-    eps_cross = [cs.nx**2, od, od, od, cs.ny**2, od, od, od, cs.nz**2]
+    eps_cross = [
+        cs.nx**2,
+        cs.eps_xy,
+        cs.eps_xz,
+        cs.eps_yx,
+        cs.ny**2,
+        cs.eps_yz,
+        cs.eps_zx,
+        cs.eps_zy,
+        cs.nz**2,
+    ]
 
     if np.isinf(cs.mesh.bend_radius) or np.isnan(cs.mesh.bend_radius):
         bend_radius = None

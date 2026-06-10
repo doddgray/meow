@@ -108,6 +108,7 @@ from meow.geometries import (
 )
 from meow.materials import (
     MATERIALS,
+    AnisotropicMaterial,
     IndexMaterial,
     Material,
     MaterialBase,
@@ -159,6 +160,7 @@ __all__ = [
     "MATERIALS",
     "MODELS",
     "VISUALIZATION_MAPPING",
+    "AnisotropicMaterial",
     "ArraySchema",
     "AxisDirection",
     "BaseModel",
