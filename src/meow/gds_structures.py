@@ -30,6 +30,15 @@ class GdsExtrusionRule(BaseModel):
         default=0.0,
         description="an extra buffer (grow / shrink) operation applied to the polygon",
     )
+    sidewall_angle: float = Field(
+        default=0.0,
+        description=(
+            "the sidewall angle of the extrusion (in degrees, measured from "
+            "vertical). The gds polygon defines the structure at the bottom "
+            "of the extrusion; positive angles shrink the structure with "
+            "increasing height, yielding trapezoidal cross sections."
+        ),
+    )
     mesh_order: int = Field(
         default=5, description="the mesh order of the resulting `Structure3D`"
     )
@@ -57,6 +66,7 @@ class GdsExtrusionRule(BaseModel):
                 h_min=self.h_min,
                 h_max=self.h_max,
                 axis="y",
+                sidewall_angle=self.sidewall_angle,
             ),
             mesh_order=self.mesh_order,
         )
