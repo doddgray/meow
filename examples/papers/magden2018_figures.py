@@ -230,7 +230,7 @@ def _section_sweep(
 def figure3() -> dict[str, float]:
     """Layout + EME convergence of the four adiabatic sections (Fig. 3)."""
     component = dichroic_filter()
-    n1, n2, n3, n4 = (3, 4, 6, 3) if FAST else (6, 8, 12, 6)
+    n1, n2, n3, n4 = (3, 4, 6, 3) if FAST else (6, 10, 48, 8)
     cells = device_cells(component, cells_per_section=(n1, n2, n3, n4), mesh=_mesh())
     section_slices = {
         "(1) develop WGB": slice(0, n1),
@@ -276,7 +276,7 @@ def figure3() -> dict[str, float]:
 def figure4(cutoffs: dict[str, float]) -> dict[str, float]:
     """Full-device EME spectra (model counterpart of the measured Fig. 4)."""
     component = dichroic_filter()
-    cells_per_section = (3, 4, 6, 3) if FAST else (6, 8, 12, 6)
+    cells_per_section = (3, 4, 6, 3) if FAST else (6, 10, 48, 8)
     cells = device_cells(component, cells_per_section=cells_per_section, mesh=_mesh())
     n_wl = 3 if FAST else 7
     wls = np.linspace(1.50, 1.59, n_wl)
