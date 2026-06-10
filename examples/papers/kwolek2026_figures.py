@@ -46,7 +46,7 @@ FIGDIR = Path(__file__).parent / "figures"
 WL_FH = 1.55
 WL_SH = 0.775
 RES = 0.06 if FAST else 0.03
-NUM_CELLS = 12 if FAST else 40
+NUM_CELLS = 12 if FAST else 64
 NUM_MODES = 3 if FAST else 4
 
 
@@ -116,7 +116,7 @@ def figure1() -> dict[str, float]:
     # (e) EME field propagation at FH and SH
     results: dict[str, float] = {}
     for i, (wl, label) in enumerate([(WL_FH, "FH 1550 nm"), (WL_SH, "SH 775 nm")]):
-        cells = device_cells(component, wl, num_cells=NUM_CELLS, res=RES)
+        cells = device_cells(component, wl, num_cells=NUM_CELLS, res=RES, design=design)
         env = mw.Environment(wl=wl, T=25.0)
         css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
         modes = [mw.compute_modes(cs, num_modes=NUM_MODES) for cs in css]
@@ -167,7 +167,7 @@ def figure1() -> dict[str, float]:
 
 def figure2() -> dict[str, float]:
     """Extinction-ratio and loss spectra at FH and SH (paper Fig. 2)."""
-    _, component = _design()
+    design, component = _design()
 
     n_fh = 3 if FAST else 7
     n_sh = 2 if FAST else 5
@@ -178,7 +178,9 @@ def figure2() -> dict[str, float]:
     for label, wls in [("FH", wls_fh), ("SH", wls_sh)]:
         bars, crosses = [], []
         for wl in wls:
-            cells = device_cells(component, wl, num_cells=NUM_CELLS, res=RES)
+            cells = device_cells(
+                component, wl, num_cells=NUM_CELLS, res=RES, design=design
+            )
             t_bar, t_cross = bar_cross_transmission(cells, wl, num_modes=NUM_MODES)
             bars.append(t_bar)
             crosses.append(t_cross)

@@ -117,8 +117,8 @@ class FaquadDesign:
         dbeta_dtw: float,
         l_m: float = 400.0,
         a: float = 0.004,
-        dtw_max: float = 0.08,
-        l_sep: float = 80.0,
+        dtw_max: float = 0.15,
+        l_sep: float = 150.0,
     ) -> None:
         self.kappa_0 = kappa_0
         self.g_0 = g_0
@@ -172,10 +172,17 @@ class FaquadDesign:
         return np.arccos(np.clip(cos_chi, -1.0, 1.0))
 
     def dtw(self, z: float | np.ndarray) -> np.ndarray:
-        """Top-width difference dTW(z) = kappa cot(chi) / s, clipped."""
+        """Top-width difference dTW(z) realizing the FAQUAD mixing angle.
+
+        The supermode mixing angle satisfies ``tan(chi) = kappa / delta``
+        with the *half* mismatch ``delta = (beta_A - beta_B) / 2``, so the
+        full mismatch is ``2 kappa cot(chi)`` and the top-width difference
+        is ``dTW = 2 kappa cot(chi) / s`` (clipped to the fabrication
+        limit ``dtw_max``).
+        """
         chi = self.chi(z)
         with np.errstate(divide="ignore", invalid="ignore"):
-            dbeta = self.kappa(z) / np.tan(chi)
+            dbeta = 2 * self.kappa(z) / np.tan(chi)
         dtw = np.nan_to_num(dbeta / self.dbeta_dtw, nan=0.0, posinf=np.inf)
         return np.clip(dtw, -self.dtw_max, self.dtw_max)
 
@@ -310,8 +317,8 @@ def faquad_combiner(
     dbeta_dtw: float,
     l_m: float = 400.0,
     a: float = 0.004,
-    dtw_max: float = 0.08,
-    l_sep: float = 80.0,
+    dtw_max: float = 0.15,
+    l_sep: float = 150.0,
     w_top: float = W_TOP,
     num_points: int = 121,
 ) -> gf.Component:
@@ -344,21 +351,21 @@ def faquad_combiner(
     c.add_port(
         "in_bar",
         center=(0.0, float((y_b_lo[0] + y_b_hi[0]) / 2)),
-        width=float(w_b[0]),
+        width=0.002 * round(float(w_b[0]) / 0.002),
         orientation=180,
         layer=LAYER_RIB,
     )
     c.add_port(
         "out_bar",
         center=(float(zs[-1]), float((y_b_lo[-1] + y_b_hi[-1]) / 2)),
-        width=float(w_b[-1]),
+        width=0.002 * round(float(w_b[-1]) / 0.002),
         orientation=0,
         layer=LAYER_RIB,
     )
     c.add_port(
         "out_cross",
         center=(float(zs[-1]), float((y_a_lo[-1] + y_a_hi[-1]) / 2)),
-        width=float(w_a[-1]),
+        width=0.002 * round(float(w_a[-1]) / 0.002),
         orientation=0,
         layer=LAYER_RIB,
     )
@@ -395,15 +402,43 @@ def device_mesh(res: float = 0.04) -> mw.Mesh2D:
     )
 
 
+def adaptive_cell_lengths(design: FaquadDesign, num_cells: int) -> np.ndarray:
+    """EME cell lengths concentrated where the geometry changes fastest.
+
+    Uniform slicing wastes cells on the slowly-varying constant-gap region
+    while starving the separation regions, where the laterally moving
+    waveguides need fine slicing to avoid staircase misalignment loss. Cell
+    edges are placed at equal quantiles of a density combining the local
+    gap slope with a uniform floor.
+    """
+    z = np.linspace(-design.half_length, design.half_length, 4001)
+    dg = np.abs(np.gradient(design.gap(z), z))
+    dchi = np.abs(np.gradient(design.chi(z), z))
+    # the supermode basis rotates with chi even where the gap is constant;
+    # both rates set how finely the EME staircase must sample the device.
+    density = dg / max(np.mean(dg), 1e-12) + dchi / max(np.mean(dchi), 1e-12)
+    density = density + 0.3 + 1e-12
+    cum = np.cumsum(density)
+    cum = (cum - cum[0]) / (cum[-1] - cum[0])
+    edges = np.interp(np.linspace(0.0, 1.0, num_cells + 1), cum, z)
+    return np.diff(edges)
+
+
 def device_cells(
     component: gf.Component,
     wl: float,
     num_cells: int = 24,
     res: float = 0.04,
+    design: FaquadDesign | None = None,
 ) -> list[mw.Cell]:
+    """Discretize the combiner into EME cells (adaptive if a design is given)."""
     structs = device_structures(component, wl)
     length = float(component.xmax)
-    Ls = np.full(num_cells, length / num_cells)
+    if design is None:
+        Ls = np.full(num_cells, length / num_cells)
+    else:
+        Ls = adaptive_cell_lengths(design, num_cells)
+        Ls = Ls * (length / float(np.sum(Ls)))  # absorb rounding
     return mw.create_cells(structs, device_mesh(res), Ls, z_min=0.0)
 
 
