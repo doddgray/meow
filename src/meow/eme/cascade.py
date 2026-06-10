@@ -45,8 +45,27 @@ def compute_s_matrix_sax(
     """
     propagations = propagations_fn(modes, cells, cell_lengths=cell_lengths)
     interfaces = interfaces_fn(modes)
+    return cascade_s_matrices(propagations, interfaces, sax_backend=sax_backend)
+
+
+def cascade_s_matrices(
+    propagations: dict[str, sax.SDictMM],
+    interfaces: dict[str, sax.SDenseMM],
+    *,
+    sax_backend: sax.Backend = "klu",
+) -> sax.SDenseMM:
+    """Cascade per-cell propagation and per-interface S-matrices into one S-matrix.
+
+    Args:
+        propagations: propagation S-matrices keyed as ``"p_{i}"`` per cell.
+        interfaces: interface S-matrices keyed as ``"i_{i}_{i + 1}"``.
+        sax_backend: SAX backend used for circuit evaluation.
+
+    Returns:
+        A tuple ``(S, port_map)`` in SAX dense multimode format.
+    """
     net = _get_netlist(propagations, interfaces)
-    _, analyze_fn, evaluate_fn = circuit_backends[sax_backend]  # type: ignore[reportArgumentType]  # ty: ignore[invalid-assignment]
+    _, analyze_fn, evaluate_fn = circuit_backends[sax_backend]  # type: ignore[reportArgumentType]
     # TODO: use analyze_instances instead of manually converting to scoo ?
     net["instances"] = {k: sax.scoo(v) for k, v in net["instances"].items()}
     analyzed = analyze_fn(net["instances"], net["nets"], net["ports"])
