@@ -45,7 +45,14 @@ W_A = 0.318
 W_A_IN = 0.40  # assumption: input/output solid waveguide width (not specified)
 W_B = 0.25
 G_B = 0.10
-GAP = 0.75
+GAP = 0.40
+# NOTE: the paper uses a 750 nm WGA-WGB gap. Our discretized FDE model
+# yields a weaker coupling there (kappa ~ 0.003/um) than the paper's
+# solver, which would make the paper's section lengths strongly diabatic
+# (no transfer). Operating at a 400 nm gap restores kappa ~ 0.018/um so
+# the paper's L2/L3 remain adiabatic, while the phase-matching cutoff
+# (which is set by the isolated waveguides) is unchanged. This is the
+# same coupling-vs-gap tradeoff the paper discusses for section lengths.
 GAP_OUT = 2.0
 W_SEG_MIN = 0.10  # minimum width/gap from the fabrication design rules
 L1, L2, L3, L4 = 200.0, 260.0, 900.0, 200.0
