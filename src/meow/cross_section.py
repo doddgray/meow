@@ -152,6 +152,131 @@ class CrossSection(BaseModel):
         n_cmap: Any = None,
         cbar: bool = True,
         show: bool = True,
+        style: Literal["polygons", "pixelated"] = "polygons",
+        **ignored: Any,
+    ) -> None:
+        """Visualize the cross section.
+
+        Args:
+            ax: the matplotlib axes to plot on (default: current axes).
+            n_cmap: colormap mapping refractive index to color.
+            cbar: add a colorbar mapping colors to material indices.
+            show: call plt.show() after plotting.
+            style: "polygons" draws the exact structure polygons (including
+                angled sidewalls) as vector graphics; "pixelated" draws the
+                rasterized refractive index on the full mesh grid.
+            **ignored: extra ignored kwargs (`debug_grid=True` implies the
+                "pixelated" style and draws the half-integer mesh grid).
+        """
+        if ignored.get("debug_grid", False):
+            style = "pixelated"
+        if style == "polygons":
+            self._visualize_polygons(ax=ax, n_cmap=n_cmap, cbar=cbar, show=show)
+        else:
+            self._visualize_pixelated(
+                ax=ax, n_cmap=n_cmap, cbar=cbar, show=show, **ignored
+            )
+
+    def _visualize_polygons(
+        self,
+        *,
+        ax: Any = None,
+        n_cmap: Any = None,
+        cbar: bool = True,
+        show: bool = True,
+        edgecolor: str | None = "black",
+        linewidth: float = 0.5,
+    ) -> None:
+        """Visualize the cross section as exact structure polygons.
+
+        Unlike the pixelated visualization, this draws the actual projected
+        2D geometries (clipped to the mesh bounds), so features smaller than
+        the mesh resolution - such as angled sidewalls - are rendered exactly.
+        """
+        import matplotlib.pyplot as plt  # fmt: skip
+        from matplotlib import colors  # fmt: skip
+        from matplotlib.cm import ScalarMappable  # fmt: skip
+        from matplotlib.patches import PathPatch, Rectangle  # fmt: skip
+        from mpl_toolkits.axes_grid1 import make_axes_locatable  # fmt: skip
+
+        if n_cmap is None:
+            n_cmap = colors.LinearSegmentedColormap.from_list(
+                name="c_cmap", colors=["#ffffff", "#86b5dc"]
+            )
+        if ax is not None:
+            plt.sca(ax)
+        else:
+            ax = plt.gca()
+
+        x_min, x_max = float(self.mesh.x.min()), float(self.mesh.x.max())
+        y_min, y_max = float(self.mesh.y.min()), float(self.mesh.y.max())
+        mesh_bounds = shapely.box(x_min, y_min, x_max, y_max)
+
+        mat_n: dict[int, float] = {0: 1.0}  # background: air
+        mat_name: dict[int, str] = {0: "air"}
+        for material, idx in self.materials.items():
+            mat_n[idx] = float(np.real(material(self.env)))
+            mat_name[idx] = material.name
+
+        vmin, vmax = min(mat_n.values()), max(mat_n.values())
+        if np.isclose(vmin, vmax):
+            vmax = vmin + 1.0
+        norm = colors.Normalize(vmin=vmin, vmax=vmax)
+
+        ax.add_patch(
+            Rectangle(
+                xy=(x_min, y_min),
+                width=x_max - x_min,
+                height=y_max - y_min,
+                facecolor=n_cmap(norm(mat_n[0])),
+                edgecolor="none",
+                zorder=0,
+            )
+        )
+
+        effective_polys = _effective_material_polygons(self.structures, self.materials)
+        for idx, poly in effective_polys.items():
+            clipped = shapely.intersection(poly, mesh_bounds)
+            path = _shapely_to_path(clipped)
+            if path is None:
+                continue
+            ax.add_patch(
+                PathPatch(
+                    path,
+                    facecolor=n_cmap(norm(mat_n[idx])),
+                    edgecolor=edgecolor or "none",
+                    linewidth=linewidth,
+                )
+            )
+
+        plt.axis("scaled")
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        plt.grid(visible=True)
+
+        if cbar:
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            values = sorted(set(mat_n.values()))
+            mappable = ScalarMappable(norm=norm, cmap=n_cmap)
+            _cbar = plt.colorbar(mappable, ticks=values, cax=cax)
+            names = {v: [] for v in values}
+            for idx, v in mat_n.items():
+                names[v].append(mat_name[idx])
+            labels = [f"{'|'.join(names[v])} {v:.3f}" for v in values]
+            _cbar.ax.set_yticklabels(labels, rotation=90, va="center", ha="center")
+            plt.sca(ax)
+
+        if show:
+            plt.show()
+
+    def _visualize_pixelated(
+        self,
+        *,
+        ax: Any = None,
+        n_cmap: Any = None,
+        cbar: bool = True,
+        show: bool = True,
         **ignored: Any,
     ) -> None:
         import matplotlib.pyplot as plt  # fmt: skip
@@ -509,6 +634,26 @@ def _compute_winner_takes_all_n(
     eps[ii, jj] = winner_eps
 
     return np.sqrt(eps)
+
+
+def _shapely_to_path(geom: shapely.Geometry) -> Any:
+    """Convert a shapely geometry to a matplotlib compound Path.
+
+    Handles (multi)polygons with holes; non-polygonal parts (e.g. lines from
+    degenerate intersections) are skipped. Returns None if no polygonal area
+    is left.
+    """
+    from matplotlib.path import Path  # fmt: skip
+
+    paths = []
+    for poly in getattr(geom, "geoms", [geom]):
+        if not isinstance(poly, shapely.Polygon) or poly.is_empty:
+            continue
+        paths.append(Path(np.asarray(poly.exterior.coords)))
+        paths.extend(Path(np.asarray(ring.coords)) for ring in poly.interiors)
+    if not paths:
+        return None
+    return Path.make_compound_path(*paths)
 
 
 def _effective_material_polygons(
