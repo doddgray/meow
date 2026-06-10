@@ -11,9 +11,9 @@ Generates (into ``examples/papers/figures/``):
 - ``magden2018_fig3.png``: the gdsfactory filter layout (Fig. 3a) and EME
   transmission of the quasi-even mode vs the length of each adiabatic
   section (Fig. 3b-d).
-- ``magden2018_fig4.png``: EME-simulated short-pass and long-pass spectra of
-  the full filter (the model counterpart of the measured Fig. 4a) and the
-  cutoff shift with WGA width (Fig. 4d).
+- ``magden2018_fig4.png``: short-pass and long-pass spectra of the filter
+  from the FDE-calibrated mode-evolution model (the model counterpart of
+  the measured Fig. 4a) and the cutoff shift with WGA width (Fig. 4d).
 
 Run with ``MEOW_EXAMPLE_FAST=1`` for a coarse-but-quick version (used by the
 test suite); the default settings take tens of minutes on a laptop.
@@ -31,7 +31,6 @@ import numpy as np
 import meow as mw
 from examples.papers._plot import plot_component
 from examples.papers.magden2018_dichroic import (
-    GAP,
     W_A,
     analytical_transmission,
     coupled_structures,
@@ -40,7 +39,6 @@ from examples.papers.magden2018_dichroic import (
     dichroic_filter,
     fundamental_neff,
     mesh2d,
-    port_transmissions,
     solve_modes,
     wga_structures,
     wgb_structures,
@@ -274,25 +272,29 @@ def figure3() -> dict[str, float]:
 
 
 def figure4(cutoffs: dict[str, float]) -> dict[str, float]:
-    """Full-device EME spectra (model counterpart of the measured Fig. 4)."""
-    component = dichroic_filter()
-    cells_per_section = (3, 4, 6, 3) if FAST else (6, 10, 48, 8)
-    cells = device_cells(component, cells_per_section=cells_per_section, mesh=_mesh())
-    n_wl = 3 if FAST else 7
-    wls = np.linspace(1.50, 1.59, n_wl)
-    x_split = W_A / 2 + GAP / 2  # WGA below, WGB above this lateral position
+    """Filter spectra (model counterpart of the measured Fig. 4).
 
-    t_short, t_long = [], []
+    The short/long-pass spectra follow from the mode-evolution picture: an
+    adiabatic device routes the quasi-even mode, so the port powers are the
+    coupled-mode |T_A|^2 and 1 - |T_A|^2 of the spectrally selective
+    cross-section (paper Eq. 3) with delta(lambda) and kappa(lambda)
+    computed by FDE. (A full-device EME would need impractically long
+    transitions at our model's kappa; see the module note in
+    magden2018_dichroic.py. The per-section EME convergence - the paper's
+    actual EME usage - is reproduced in figure 3.)
+    """
+    mesh = _mesh()
+    wl_c = cutoffs[f"{W_A * 1e3:.0f}"]
+    n_wl = 5 if FAST else 13
+    wls = np.linspace(wl_c - 0.04, wl_c + 0.04, n_wl)
+    deltas, kappas = [], []
     for wl in wls:
-        env = mw.Environment(wl=wl, T=25.0)
-        css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
-        modes = [mw.compute_modes(cs, num_modes=NUM_MODES) for cs in css]
-        S, pm = mw.compute_s_matrix(modes, cells=cells)
-        ts, tl = port_transmissions(np.asarray(S), pm, modes[-1], x_split + 1.0)
-        t_short.append(ts)
-        t_long.append(tl)
-    t_short = np.asarray(t_short)
-    t_long = np.asarray(t_long)
+        d, k = delta_kappa(wl, mesh=mesh)
+        deltas.append(d)
+        kappas.append(k)
+    gamma = np.asarray(deltas) / np.maximum(np.asarray(kappas), 1e-4)
+    t_short = analytical_transmission(gamma)  # power staying in WGA
+    t_long = 1.0 - t_short
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
     ax = axes[0]
@@ -310,7 +312,7 @@ def figure4(cutoffs: dict[str, float]) -> dict[str, float]:
     )
     ax.set_xlabel("wavelength [nm]")
     ax.set_ylabel("transmission [dB]")
-    ax.set_title("Fig. 4a (model): EME spectra of the full filter")
+    ax.set_title("Fig. 4a (model): mode-evolution filter spectra")
     ax.legend(fontsize=8)
     ax.grid(visible=True)
 
@@ -323,7 +325,7 @@ def figure4(cutoffs: dict[str, float]) -> dict[str, float]:
     ax.set_title("Fig. 4d: cutoff shift with WGA width")
     ax.grid(visible=True)
 
-    fig.suptitle("Magden 2018, Fig. 4: filter spectra (EME model)")
+    fig.suptitle("Magden 2018, Fig. 4: filter spectra (FDE + coupled-mode model)")
     fig.tight_layout()
     fig.savefig(FIGDIR / "magden2018_fig4.png", dpi=150)
     plt.close(fig)
