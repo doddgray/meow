@@ -46,7 +46,7 @@ FIGDIR = Path(__file__).parent / "figures"
 WL_FH = 1.55
 WL_SH = 0.775
 RES = 0.06 if FAST else 0.03
-NUM_CELLS = 12 if FAST else 32
+NUM_CELLS = 12 if FAST else 40
 NUM_MODES = 3 if FAST else 4
 
 
