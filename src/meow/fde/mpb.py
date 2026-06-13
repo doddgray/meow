@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 from pydantic import PositiveFloat, PositiveInt
+from scipy.constants import epsilon_0, mu_0
 
 from meow.cross_section import CrossSection
 from meow.fde.post_process import post_process_modes
@@ -75,34 +76,9 @@ def compute_modes_mpb(
     if resolution is None:
         resolution = 1.0 / float(np.mean(mesh.dx))
 
-    # permittivity arrays on the mesh; these are the same smoothed arrays
-    # the tidy3d backend consumes.
-    eps_xx = np.real(np.asarray(cs.nx) ** 2)
-    eps_yy = np.real(np.asarray(cs.ny) ** 2)
-    eps_zz = np.real(np.asarray(cs.nz) ** 2)
-    eps_xy = np.real(np.asarray(cs.eps_xy))
-    eps_xz = np.real(np.asarray(cs.eps_xz))
-    eps_yz = np.real(np.asarray(cs.eps_yz))
-    xs = np.asarray(mesh.x_[:], dtype=float)  # cell centers
-    ys = np.asarray(mesh.y_[:], dtype=float)
-
-    def _sample(arr: np.ndarray, x: float, y: float) -> float:
-        i = int(np.clip(np.searchsorted(xs, x), 0, arr.shape[0] - 1))
-        j = int(np.clip(np.searchsorted(ys, y), 0, arr.shape[1] - 1))
-        return float(arr[i, j])
-
-    def material_func(p: Any) -> Any:
-        x, y = p.x + x0, p.y + y0
-        diag = mp.Vector3(
-            _sample(eps_xx, x, y), _sample(eps_yy, x, y), _sample(eps_zz, x, y)
-        )
-        offdiag = mp.Vector3(
-            _sample(eps_xy, x, y), _sample(eps_xz, x, y), _sample(eps_yz, x, y)
-        )
-        return mp.Medium(epsilon_diag=diag, epsilon_offdiag=offdiag)
+    material_func, n_max = _make_material_func(cs, x0, y0)
 
     omega = 1.0 / float(cs.env.wl)  # MPB units: a = 1 um
-    n_max = float(np.sqrt(max(eps_xx.max(), eps_yy.max(), eps_zz.max())))
     n_guess = float(target_neff) if target_neff else 0.95 * n_max
 
     ms = mpb.ModeSolver(
@@ -125,6 +101,11 @@ def compute_modes_mpb(
         n_max * omega,
     )
 
+    # find_k re-inits the underlying C solver band-by-band and leaves it in a
+    # single-band state; re-initialize with all bands for field extraction.
+    ms.num_bands = int(num_modes)
+    ms.init_params(mp.NO_PARITY, True)  # noqa: FBT003
+
     # MPB grid coordinates (cell-centered) for interpolation onto our mesh
     eps_grid = ms.get_epsilon()
     nx_mp, ny_mp = eps_grid.shape[0], eps_grid.shape[1]
@@ -136,10 +117,12 @@ def compute_modes_mpb(
     modes = []
     for band, k in enumerate(ks, start=1):
         neff = float(k) / omega
-        if band > 1 or len(ks) > 1:
-            ms.solve_kpoint(mp.Vector3(0, 0, float(k)))
+        ms.solve_kpoint(mp.Vector3(0, 0, float(k)))
         E = np.squeeze(np.asarray(ms.get_efield(band, bloch_phase=False)))
         H = np.squeeze(np.asarray(ms.get_hfield(band, bloch_phase=False)))
+        # MPB uses natural units (eps0 = mu0 = 1) where |H| ~ |E| for a mode;
+        # meow expects the SI relative scale H ~ E / eta0.
+        H = H * np.sqrt(epsilon_0 / mu_0)
         fields = {}
         for name, arr in [
             ("Ex", E[..., 0]),
@@ -154,6 +137,51 @@ def compute_modes_mpb(
 
     modes = sorted(modes, key=lambda m: float(np.real(m.neff)), reverse=True)
     return post_process(modes)
+
+
+def _make_material_func(
+    cs: CrossSection, x0: float, y0: float
+) -> tuple[Callable, float]:
+    """Build an MPB material function sampling the cross-section's eps arrays.
+
+    The permittivity arrays (including off-diagonal anisotropy) are the same
+    smoothed arrays the tidy3d backend consumes; each MPB sample point takes
+    the value of the nearest mesh cell. Also returns the maximum refractive
+    index (for the ``find_k`` bracket).
+    """
+    import meep as mp  # fmt: skip
+
+    mesh = cs.mesh
+    eps_xx = np.real(np.asarray(cs.nx) ** 2)
+    eps_yy = np.real(np.asarray(cs.ny) ** 2)
+    eps_zz = np.real(np.asarray(cs.nz) ** 2)
+    eps_xy = np.real(np.asarray(cs.eps_xy))
+    eps_xz = np.real(np.asarray(cs.eps_xz))
+    eps_yz = np.real(np.asarray(cs.eps_yz))
+    xs = np.asarray(mesh.x_[:], dtype=float)  # cell centers
+    ys = np.asarray(mesh.y_[:], dtype=float)
+
+    def _nearest(coords: np.ndarray, v: float) -> int:
+        i = int(np.clip(np.searchsorted(coords, v), 0, coords.shape[0] - 1))
+        if i > 0 and abs(coords[i - 1] - v) <= abs(coords[i] - v):
+            i -= 1
+        return i
+
+    def _sample(arr: np.ndarray, x: float, y: float) -> float:
+        return float(arr[_nearest(xs, x), _nearest(ys, y)])
+
+    def material_func(p: Any) -> Any:
+        x, y = p.x + x0, p.y + y0
+        diag = mp.Vector3(
+            _sample(eps_xx, x, y), _sample(eps_yy, x, y), _sample(eps_zz, x, y)
+        )
+        offdiag = mp.Vector3(
+            _sample(eps_xy, x, y), _sample(eps_xz, x, y), _sample(eps_yz, x, y)
+        )
+        return mp.Medium(epsilon_diag=diag, epsilon_offdiag=offdiag)
+
+    n_max = float(np.sqrt(max(eps_xx.max(), eps_yy.max(), eps_zz.max())))
+    return material_func, n_max
 
 
 def _positions(mesh: Any, field: str) -> tuple[np.ndarray, np.ndarray]:

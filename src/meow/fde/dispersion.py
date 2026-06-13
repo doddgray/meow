@@ -53,7 +53,7 @@ class ModeMetrics:
     """The group index ``ng = neff - wl * dneff/dwl``."""
     beta2: float
     """Group-velocity dispersion ``beta2 = d^2(beta)/d(omega)^2`` [s^2/m]."""
-    dispersion_D: float
+    dispersion_D: float  # noqa: N815
     """Dispersion parameter ``D = -(wl/c) d^2(neff)/d(wl)^2`` [ps/(nm km)]."""
     effective_area: float
     """The (nonlinear) effective mode area [um^2]."""

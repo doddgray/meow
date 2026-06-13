@@ -107,7 +107,7 @@ def wavelength_sweep() -> dict[str, dict[str, tuple[list, list]]]:
 
 
 def convergence_and_runtime() -> dict:
-    """neff and runtime vs grid resolution for each structure/backend/wl."""
+    """Neff and runtime vs grid resolution for each structure/backend/wl."""
     out: dict = {}
     for name, (make_structs, make_mesh) in STRUCTURES.items():
         structs = make_structs()
