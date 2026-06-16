@@ -340,47 +340,36 @@ def _supermode_intensity_slice(mode: mw.Mode) -> tuple[np.ndarray, np.ndarray]:
 
 def _quasi_even_branch(
     modes_per_cell: list[list[mw.Mode]],
-    seed_mask: np.ndarray | None = None,
+    z_centers: np.ndarray,
+    z_decouple: float,
 ) -> list[mw.Mode]:
-    """Follow the quasi-even supermode psi_+ along the device.
+    """Follow the quasi-even supermode psi_+ (the adiabatic branch) along z.
 
     The adiabatic short/long-pass routing is carried by the quasi-even
-    (higher-index) supermode. At the example's weak FDE coupling the WGA and
-    WGB branches are nearly degenerate at phase matching, so tracking the
-    *input* branch by overlap follows the diabatic (WGB) path. Instead we seed
-    psi_+ as the highest-index TE mode at the phase-matching cell (the smallest
-    neff gap between the two coupled supermodes, searched within ``seed_mask``
-    - the coupling region, so the decoupled output section where WGA and the
-    widened WGB strip are also near-degenerate cannot be picked) and track it
-    by field overlap *outward* in both directions. Below the cutoff this
-    carries the field from the input WGB strip across to WGA; above the cutoff
-    it stays in WGB.
+    (higher-index) supermode. While WGA and WGB are coupled (sections 1-3,
+    ``z <= z_decouple``) psi_+ is simply the highest-index TE supermode at each
+    slice: in section 2 this switches from the input WGB mode to WGA exactly at
+    the WGA/WGB phase-matching crossing (below the cutoff), which is the
+    routing. Once the waveguides have separated (section 4) they are decoupled
+    and the merged WGB output strip can out-rank WGA, so there psi_+ is instead
+    continued by field overlap from the end of section 3 - keeping the field on
+    whichever output waveguide it reached. Above the cutoff WGA never out-ranks
+    WGB and psi_+ stays in WGB throughout.
     """
     te_per_cell = [
         [m for m in modes if m.te_fraction > 0.5] or list(modes)
         for modes in modes_per_cell
     ]
-    gaps = np.array(
-        [
-            float(np.real(te[0].neff) - np.real(te[1].neff))
-            if len(te) >= 2
-            else np.inf
-            for te in te_per_cell
-        ]
-    )
-    if seed_mask is not None:
-        gaps = np.where(seed_mask, gaps, np.inf)
-    seed = int(np.argmin(gaps))
     chosen: list[mw.Mode | None] = [None] * len(te_per_cell)
-    chosen[seed] = te_per_cell[seed][0]  # psi_+ = higher-index supermode
-
-    def best_overlap(ref: mw.Mode, candidates: list[mw.Mode]) -> mw.Mode:
-        return max(candidates, key=lambda m: abs(complex(mw.inner_product(ref, m))))
-
-    for i in range(seed + 1, len(te_per_cell)):
-        chosen[i] = best_overlap(chosen[i - 1], te_per_cell[i])
-    for i in range(seed - 1, -1, -1):
-        chosen[i] = best_overlap(chosen[i + 1], te_per_cell[i])
+    for i, zc in enumerate(z_centers):
+        if zc <= z_decouple:
+            chosen[i] = te_per_cell[i][0]  # highest-index supermode = psi_+
+        else:  # decoupled output: continue by field overlap
+            prev = chosen[i - 1]
+            chosen[i] = max(
+                te_per_cell[i],
+                key=lambda m: abs(complex(mw.inner_product(prev, m))),
+            )
     return [m for m in chosen if m is not None]
 
 
@@ -415,9 +404,7 @@ def figure4(cutoffs: dict[str, float]) -> dict[str, float]:
     z_centers = np.cumsum([c.length for c in cells]) - 0.5 * np.asarray(
         [c.length for c in cells]
     )
-    # seed the quasi-even branch only in the coupling region (sections 2-3),
-    # where the WGA/WGB phase matching happens
-    seed_mask = (z_centers >= L1) & (z_centers <= L1 + L2 + L3)
+    z_decouple = L1 + L2 + L3  # end of section 3: WGA and WGB are separated
 
     fig, axes = plt.subplots(len(wls), 1, figsize=(11, 1.9 * len(wls)), squeeze=False)
     out: dict[str, float] = {}
@@ -425,7 +412,7 @@ def figure4(cutoffs: dict[str, float]) -> dict[str, float]:
         env = mw.Environment(wl=wl, T=25.0)
         css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
         modes = [BACKEND(cs, num_modes=NUM_MODES) for cs in css]
-        branch = _quasi_even_branch(modes, seed_mask=seed_mask)
+        branch = _quasi_even_branch(modes, z_centers, z_decouple)
         columns, x_ref = [], None
         for mode in branch:
             x, col = _supermode_intensity_slice(mode)
