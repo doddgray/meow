@@ -19,9 +19,11 @@ wavelength (the filter cutoff, ~1540 nm); four adiabatic sections
 separate output ports.
 
 - `magden2018_dichroic.py`: the parametric `dichroic_filter()` PCell (paper
-  Fig. 3a: a straight three-segment WGB with WGA tipping in at section 2 and
-  bending away in section 3), the extrusion/meshing helpers and the
-  coupled-mode quantities (delta, kappa, |T_A|^2).
+  Fig. 3a: a straight three-segment WGB - constant total width and inter-ridge
+  gaps, single-ridge ports, finite 50 nm taper tips - with WGA tipping in at a
+  constant coupling gap in section 2 and bending away in section 3), the
+  extrusion/meshing helpers and the coupled-mode quantities
+  (delta, kappa, |T_A|^2).
 - `magden2018_figures.py`: reproduces Fig. 1 (modes + effective indices +
   supermode anticrossing, with psi_A/psi_B bracketed by psi_+/psi_-), Fig. 2
   (delta/kappa dispersion, transmission roll-off, extinction ratio), Fig. 3

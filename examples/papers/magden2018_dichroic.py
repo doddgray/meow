@@ -13,17 +13,23 @@ paper with gdsfactory (parametric layout) and meow (FDE mode solving + EME):
   in WGB, so adiabatic mode evolution separates short- and long-pass light.
 - The full filter consists of four adiabatic sections (paper Fig. 3a),
   with WGB running straight along the axis and WGA tipping in below it:
-  (1) a single input strip grows into the straight 3-segment WGB,
-  (2) WGA tapers up from a point at the fixed coupling gap, through the
-      phase-matching condition,
+  (1) a single input strip grows into the straight 3-segment WGB by tapering
+      the central and outer ridges simultaneously at constant total width and
+      constant inter-ridge gaps,
+  (2) WGA tapers up from a tip at a constant edge-to-edge coupling gap,
+      through the phase-matching condition,
   (3) WGA bends away from WGB, separating to a 2 um gap, and
-  (4) the 3-segment WGB merges back into a single output strip.
+  (4) the 3-segment WGB merges back into a single output strip (the reverse of
+      section 1).
   WGA is the short-pass output, WGB the long-pass output. C-band design
   lengths: L1 = L4 = 200 um, L2 = 260 um, L3 = 900 um.
 
-Where the paper leaves layout details unspecified (the input/output strip
-width, the exact section-1/4 morphology), this example documents its
-assumptions inline (matching the reference layout in the paper's Fig. 3a).
+Where the paper leaves layout details unspecified (the section-1/4
+morphology, the single-ridge port extension length), this example documents
+its assumptions inline (matching the reference layout in the paper's
+Fig. 3a). All taper tips use a finite minimum fabricable width ``W_TIP``
+(default 50 nm), and the central WGB ridge extends ``L_EXT`` past the
+outer-ridge tips so the WGB EME ports are single-ridge waveguides.
 """
 
 from __future__ import annotations
