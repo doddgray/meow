@@ -73,6 +73,13 @@ the EME ports at the WGB edges are single-ridge waveguides."""
 # delta(lambda) and kappa(lambda), as in the paper's Fig. 2b.
 GAP_OUT = 2.0
 L1, L2, L3, L4 = 200.0, 260.0, 900.0, 200.0
+KAPPA_DESIGN = 5.0e-3
+"""Design coupling |kappa| at the 750 nm gap [1/um] (~5/mm; paper Fig. 2a).
+
+The FDE coupling *overlap integral* gives the wavelength dependence (shape) of
+|kappa|, but its absolute scale in meow's normalized field units is
+convention-dependent (and the high-index-contrast overlap is only approximate),
+so the absolute coupling is anchored to this design value at the cutoff."""
 
 
 def w_b_total(w_b: float = W_B, g_b: float = G_B) -> float:
@@ -406,6 +413,20 @@ def coupled_supermode_neffs(
     return n_p, n_m
 
 
+def _fundamental_te_mode(
+    structures: list[mw.Structure3D],
+    wl: float,
+    mesh: mw.Mesh2D | None,
+    compute_modes: Callable | None,
+) -> mw.Mode:
+    """The fundamental TE mode of a cross-section (full field data)."""
+    modes = solve_modes(
+        structures, wl, mesh=mesh, num_modes=4, compute_modes=compute_modes
+    )
+    te = [m for m in modes if m.te_fraction > 0.5]
+    return (te or list(modes))[0]
+
+
 def delta_kappa(
     wl: float,
     w_a: float = W_A,
@@ -413,28 +434,76 @@ def delta_kappa(
     mesh: mw.Mesh2D | None = None,
     compute_modes: Callable | None = None,
 ) -> tuple[float, float]:
-    """Half phase mismatch delta and coupling |kappa| at one wavelength.
+    """Half phase mismatch ``delta`` [1/um] and the coupling overlap [a.u.].
 
-    ``delta = (beta_A - beta_B) / 2`` from the isolated waveguides and
-    ``|kappa| = sqrt(((beta_+ - beta_-)/2)**2 - delta**2)`` from the supermode
-    splitting of the coupled cross-section (coupled mode theory). The isolated
-    WGA and WGB use the same cross-sections as the Fig. 1e phase-matching
-    analysis, so their indices cross exactly at the cutoff wavelength.
+    ``delta = (beta_A - beta_B) / 2`` from the isolated WGA and WGB modes, and
+    the coupling overlap is the coupled-mode integral
+
+    ``kappa ~ sqrt(kappa_ab kappa_ba)``,
+    ``kappa_pq = k0 int (n^2 - n_q^2) E_p . E_q dA / sqrt(P_p P_q)``
+
+    evaluated with the isolated WGA (at x=0) and WGB (at its coupling-region
+    position) modes, where ``P`` is the modal power. Unlike a supermode-
+    splitting extraction, this overlap is **monotonic** and well-conditioned
+    (it never requires subtracting two near-equal effective indices, which for
+    the weakly coupled, segmented WGB produced a spurious peak at the cutoff).
+
+    The returned overlap is in arbitrary units (meow's field normalization is
+    convention-dependent); :func:`delta_kappa_spectrum` rescales it to the
+    physical design coupling :data:`KAPPA_DESIGN`.
     """
+    mesh = mesh or mesh2d()
     k0 = 2 * np.pi / wl
-    n_a = fundamental_neff(
-        wga_structures(w_a), wl, mesh=mesh, compute_modes=compute_modes
+    x0_b = w_a / 2 + gap + w_b_total() / 2
+    mode_a = _fundamental_te_mode(wga_structures(w_a), wl, mesh, compute_modes)
+    mode_b = _fundamental_te_mode(wgb_structures(x0=x0_b), wl, mesh, compute_modes)
+
+    delta = 0.5 * k0 * float(np.real(mode_a.neff) - np.real(mode_b.neff))
+
+    n_ox2 = float(np.real(mode_a.cs.nx[0, 0]) ** 2)  # cladding (corner) index^2
+    pert_a = np.clip(np.real(mode_a.cs.nx**2) - n_ox2, 0.0, None)  # WGA silicon
+    pert_b = np.clip(np.real(mode_b.cs.nx**2) - n_ox2, 0.0, None)  # WGB silicon
+    e_dot_e = np.real(
+        mode_a.Ex * mode_b.Ex + mode_a.Ey * mode_b.Ey + mode_a.Ez * mode_b.Ez
     )
-    n_b = fundamental_neff(
-        wgb_structures(), wl, mesh=mesh, compute_modes=compute_modes
-    )
-    n_p, n_m = coupled_supermode_neffs(
-        wl, w_a=w_a, gap=gap, mesh=mesh, compute_modes=compute_modes
-    )
-    delta = 0.5 * k0 * (n_a - n_b)
-    half_splitting = 0.5 * k0 * (n_p - n_m)
-    kappa_sq = max(half_splitting**2 - delta**2, 0.0)
-    return delta, float(np.sqrt(kappa_sq))
+    p_a = abs(float(np.real(np.sum(mode_a.Ex * mode_a.Hy - mode_a.Ey * mode_a.Hx))))
+    p_b = abs(float(np.real(np.sum(mode_b.Ex * mode_b.Hy - mode_b.Ey * mode_b.Hx))))
+    norm = np.sqrt(p_a * p_b) + 1e-30
+    kappa_ab = k0 * float(np.sum(pert_b * e_dot_e)) / norm
+    kappa_ba = k0 * float(np.sum(pert_a * e_dot_e)) / norm
+    overlap = float(np.sqrt(abs(kappa_ab * kappa_ba)))
+    return delta, overlap
+
+
+def delta_kappa_spectrum(
+    wls: np.ndarray,
+    wl_ref: float | None = None,
+    w_a: float = W_A,
+    gap: float = GAP,
+    mesh: mw.Mesh2D | None = None,
+    compute_modes: Callable | None = None,
+    kappa_ref: float = KAPPA_DESIGN,
+) -> tuple[np.ndarray, np.ndarray]:
+    """``delta(lambda)`` [1/um] and calibrated ``|kappa|(lambda)`` [1/um].
+
+    Computes the half phase mismatch and the (monotonic) coupling overlap at
+    every wavelength with :func:`delta_kappa`, then rescales the overlap so
+    that ``|kappa| = kappa_ref`` at ``wl_ref`` (the phase-matching/cutoff
+    wavelength, located where ``delta = 0`` if ``wl_ref`` is not given).
+    """
+    wls = np.asarray(wls, dtype=float)
+    deltas = np.empty_like(wls)
+    overlaps = np.empty_like(wls)
+    for i, wl in enumerate(wls):
+        deltas[i], overlaps[i] = delta_kappa(
+            float(wl), w_a=w_a, gap=gap, mesh=mesh, compute_modes=compute_modes
+        )
+    if wl_ref is None:
+        order = np.argsort(deltas)
+        wl_ref = float(np.interp(0.0, deltas[order], wls[order]))
+    overlap_ref = float(np.interp(wl_ref, wls, overlaps))
+    kappas = kappa_ref * overlaps / max(overlap_ref, 1e-30)
+    return deltas, kappas
 
 
 def analytical_transmission(gamma: np.ndarray) -> np.ndarray:

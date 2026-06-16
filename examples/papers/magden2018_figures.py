@@ -5,15 +5,17 @@ Generates (into ``examples/papers/figures/``):
 - ``magden2018_fig1.png``: coupled-mode profiles below/at/above cutoff
   (paper Fig. 1d), isolated WGA/WGB effective indices vs wavelength with the
   phase-matching cutoffs (Fig. 1e), and supermode effective indices (Fig. 1f).
-- ``magden2018_fig2.png``: half phase mismatch delta and coupling |kappa| vs
-  wavelength (Fig. 2a), analytical vs EME-simulated transmission around the
-  cutoff (Fig. 2b), and extinction ratio vs gamma (Fig. 2c).
+- ``magden2018_fig2.png``: the half phase mismatch ``delta`` (left axis,
+  1/um) and the coupling ``|kappa|`` (right axis, 1/mm) over 1530-1550 nm
+  (Fig. 2a), the quasi-even-mode power in WGA around the cutoff (Fig. 2b), and
+  the extinction ratio vs ``|gamma|`` over 0-15 (Fig. 2c).
 - ``magden2018_fig3.png``: the gdsfactory filter layout (Fig. 3a) and EME
   transmission of the quasi-even mode vs the length of each adiabatic
   section (Fig. 3b-d).
 - ``magden2018_fig4.png``: simulated top-down light propagation through the
-  full device with EME, at wavelengths spanning the cutoff (paper Fig. 4a-e):
-  short-pass light evolves into WGA, long-pass light stays in WGB.
+  full device, at the paper's nine wavelengths from 1300 to 2800 nm in a 3x3
+  grid (paper Fig. 4a-i): short-pass light evolves into WGA, long-pass light
+  stays in WGB.
 - ``magden2018_fig5.png``: short-pass and long-pass spectra of the filter
   from the FDE-calibrated mode-evolution model (the model counterpart of
   the measured Fig. 5a) and the cutoff shift with WGA width (Fig. 5d).
@@ -25,6 +27,8 @@ _backends.py``).
 
 Run with ``MEOW_EXAMPLE_FAST=1`` for a coarse-but-quick version (used by the
 test suite); the default settings take tens of minutes on a laptop.
+``MEOW_EXAMPLE_HIFI=1`` additionally overlays a (slow) full-device EME
+transmission spectrum on Fig. 5 with a larger wavelength and EME-cell budget.
 """
 
 from __future__ import annotations
@@ -41,16 +45,17 @@ from examples.papers._backends import parallel_enabled, resolve_backend
 from examples.papers._plot import plot_component
 from examples.papers.magden2018_dichroic import (
     H_SI,
+    KAPPA_DESIGN,
     L1,
     L2,
     L3,
     W_A,
     analytical_transmission,
     coupled_structures,
-    coupled_supermode_neffs,
-    delta_kappa,
+    delta_kappa_spectrum,
     device_cells,
     device_mesh,
+    device_port_transmission,
     dichroic_filter,
     fundamental_neff,
     lateral_positions,
@@ -63,10 +68,17 @@ from examples.papers.magden2018_dichroic import (
 gf.gpdk.PDK.activate()
 
 FAST = bool(int(os.environ.get("MEOW_EXAMPLE_FAST", "0")))
+# High-fidelity mode (slow): more spectral points and a full-device EME
+# transmission spectrum in Fig. 5, to approach the paper's modeled spectra.
+HIFI = bool(int(os.environ.get("MEOW_EXAMPLE_HIFI", "0")))
 FIGDIR = Path(__file__).parent / "figures"
 
 RES = 0.05 if FAST else 0.02
 NUM_MODES = 3 if FAST else 4
+
+# Fig. 5 spectral sampling and (HIFI) EME cell budget for the modeled spectra.
+FIG5_N_WL = 41 if HIFI else (5 if FAST else 13)
+FIG5_EME_CELLS = (12, 20, 80, 12) if HIFI else (6, 8, 12, 6)
 
 # FDE backend ("tidy3d"/"mpb"/"lumerical" or MEOW_PAPER_BACKEND) and whether to
 # cascade the EME with the parallel slice-group engine (MEOW_PAPER_PARALLEL).
@@ -172,8 +184,9 @@ def figure1() -> dict[str, float]:
             for wl in wls_f
         ]
     )
-    n_p_c, n_m_c = coupled_supermode_neffs(wl_c0, mesh=mesh, compute_modes=BACKEND)
-    kappa_neff = 0.5 * (n_p_c - n_m_c)  # coupling (n_eff units) at phase matching
+    # coupling in n_eff units at phase matching (the design value; see
+    # KAPPA_DESIGN / figure 2): kappa_neff = |kappa| / k0.
+    kappa_neff = KAPPA_DESIGN * wl_c0 / (2 * np.pi)
     n_avg = 0.5 * (n_as + n_bs)
     split = np.sqrt((0.5 * (n_as - n_bs)) ** 2 + kappa_neff**2)
     n_plus, n_minus = n_avg + split, n_avg - split
@@ -193,50 +206,65 @@ def figure1() -> dict[str, float]:
     return cutoffs
 
 
-def figure2(wl_c: float) -> dict[str, float]:
-    """delta/|kappa| dispersion and the resulting filter roll-off."""
+def figure2() -> dict[str, float]:
+    """delta/|kappa| dispersion and the resulting filter roll-off (Fig. 2).
+
+    Panels match the paper: (a) ``delta`` (left axis, 1/um) and ``|kappa|``
+    (right axis, 1/mm) over 1530-1550 nm; (b) the quasi-even-mode power in WGA
+    around the cutoff over 1530-1550 nm; (c) the extinction ratio vs ``|gamma|``
+    over 0-15.
+    """
     mesh = _mesh()
-    n_wl = 5 if FAST else 11
-    wls = np.linspace(wl_c - 0.02, wl_c + 0.02, n_wl)
-    deltas, kappas = [], []
-    for wl in wls:
-        d, k = delta_kappa(wl, mesh=mesh, compute_modes=BACKEND)
-        deltas.append(d)
-        kappas.append(k)
-    deltas = np.asarray(deltas)
-    # floor kappa: far from phase matching the supermode-splitting extraction
-    # of kappa degenerates (and may clamp to 0 on coarse meshes)
-    kappas = np.maximum(np.asarray(kappas), 1e-4)
-    gamma = deltas / kappas
+    n_wl = 15 if FAST else 31
+    wls = np.linspace(1.530, 1.550, n_wl)
+    # self-consistent cutoff: the wavelength where delta = 0 (phase matching),
+    # also the calibration point for |kappa|.
+    deltas, kappas = delta_kappa_spectrum(wls, mesh=mesh, compute_modes=BACKEND)
+    order = np.argsort(deltas)
+    wl_cross = float(np.interp(0.0, deltas[order], wls[order]))
+    gamma = deltas / np.maximum(kappas, 1e-9)
     t_a = analytical_transmission(gamma)
 
     fig, axes = plt.subplots(1, 3, figsize=(13, 3.6))
+
+    # (a) delta (left, 1/um) and |kappa| (right, 1/mm) on twin axes
     ax = axes[0]
-    ax.plot(wls * 1e3, deltas, "C3", label="$\\delta(\\lambda)$")
-    ax.plot(wls * 1e3, kappas, "C0", label="$|\\kappa(\\lambda)|$")
+    (l1,) = ax.plot(wls * 1e3, deltas, "C3", label="$\\delta$")
     ax.axhline(0.0, color="k", lw=0.5)
+    ax.axvline(wl_cross * 1e3, color="0.5", ls=":", lw=0.8)
     ax.set_xlabel("wavelength [nm]")
-    ax.set_ylabel("[1/um]")
-    ax.set_title("Fig. 2a: $\\delta$, $|\\kappa|$ (g = 750 nm)")
-    ax.legend(fontsize=8)
+    ax.set_ylabel("$\\delta$ [1/$\\mu$m]", color="C3")
+    ax.tick_params(axis="y", labelcolor="C3")
+    ax.set_xlim(1530, 1550)
+    ax2 = ax.twinx()
+    (l2,) = ax2.plot(wls * 1e3, kappas * 1e3, "C0", label="$|\\kappa|$")
+    ax2.set_ylabel("$|\\kappa|$ [1/mm]", color="C0")
+    ax2.tick_params(axis="y", labelcolor="C0")
+    ax.set_title("Fig. 2a: $\\delta$ and $|\\kappa|$ (g = 750 nm)")
+    ax.legend(handles=[l1, l2], fontsize=8, loc="center right")
     ax.grid(visible=True)
 
+    # (b) power in WGA (quasi-even mode) around the cutoff
     ax = axes[1]
     ax.plot(wls * 1e3, t_a, "C3", label="analytical $|T_A|^2$")
+    ax.axvline(wl_cross * 1e3, color="0.5", ls=":", lw=0.8)
     ax.set_xlabel("wavelength [nm]")
     ax.set_ylabel("transmission")
+    ax.set_xlim(1530, 1550)
     ax.set_title("Fig. 2b: power in WGA around the cutoff")
     ax.legend(fontsize=8)
     ax.grid(visible=True)
 
-    gammas = np.linspace(-10, 10, 201)
+    # (c) extinction ratio vs |gamma|
+    gammas = np.linspace(0.0, 15.0, 200)
     t = analytical_transmission(gammas)
     er = 10 * np.log10(t / (1 - t))
     ax = axes[2]
     ax.plot(gammas, er, "C0")
-    ax.set_xlabel("$\\gamma$")
+    ax.set_xlabel("$|\\gamma|$")
     ax.set_ylabel("extinction ratio [dB]")
-    ax.set_title("Fig. 2c: extinction ratio vs $\\gamma$")
+    ax.set_xlim(0, 15)
+    ax.set_title("Fig. 2c: extinction ratio vs $|\\gamma|$")
     ax.grid(visible=True)
 
     fig.suptitle("Magden 2018, Fig. 2: coupled-mode filter response")
@@ -389,15 +417,16 @@ def figure4(cutoffs: dict[str, float]) -> dict[str, float]:
     full-device EME at the example's FDE-calibrated coupling is instead
     strongly diabatic (see the module note in magden2018_dichroic.py), so the
     quantitative roll-off is taken from the coupled-mode model in figure 5.
+
+    The nine wavelengths are the paper's (1300, 1400, 1530, 1539.6 (~cutoff),
+    1550, 1700, 2100, 2500, 2800 nm), shown in a 3x3 grid: octave-wide
+    operation where light below the cutoff exits the short-pass (WGA, bottom)
+    port and everything above stays in the long-pass (WGB, top) port.
     """
     component = dichroic_filter()
     wl_c = cutoffs[f"{W_A * 1e3:.0f}"]
-    if FAST:
-        wls = [wl_c - 0.03, wl_c, wl_c + 0.03]
-        n_sec = (4, 6, 18, 4)
-    else:
-        wls = [wl_c - 0.04, wl_c - 0.02, wl_c, wl_c + 0.02, wl_c + 0.04]
-        n_sec = (8, 12, 48, 8)
+    wls = [1.30, 1.40, 1.53, 1.5396, 1.55, 1.70, 2.10, 2.50, 2.80]
+    n_sec = (4, 6, 14, 4) if FAST else (6, 8, 28, 6)
     mesh = device_mesh(res=RES)
     _, _, y_a_final = lateral_positions()
     cells = device_cells(component, cells_per_section=n_sec, mesh=mesh)
@@ -406,9 +435,9 @@ def figure4(cutoffs: dict[str, float]) -> dict[str, float]:
     )
     z_decouple = L1 + L2 + L3  # end of section 3: WGA and WGB are separated
 
-    fig, axes = plt.subplots(len(wls), 1, figsize=(11, 1.9 * len(wls)), squeeze=False)
+    fig, axes = plt.subplots(3, 3, figsize=(13, 7))
     out: dict[str, float] = {}
-    for ax, wl in zip(axes[:, 0], wls, strict=True):
+    for ax, wl in zip(axes.ravel(), wls, strict=True):
         env = mw.Environment(wl=wl, T=25.0)
         css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
         modes = [BACKEND(cs, num_modes=NUM_MODES) for cs in css]
@@ -430,19 +459,18 @@ def figure4(cutoffs: dict[str, float]) -> dict[str, float]:
         )
         ax.axhline(0.0, color="w", lw=0.4, ls=":")
         ax.axhline(y_a_final, color="w", lw=0.4, ls=":")
-        tag = " (cutoff)" if abs(wl - wl_c) < 1e-9 else ""
+        tag = " $\\approx \\lambda_C$" if abs(wl - 1.5396) < 1e-9 else ""
+        ax.set_title(f"$\\lambda$ = {wl * 1e3:.0f} nm{tag}", fontsize=9)
         ax.set_ylabel("x [um]")
-        ax.set_title(f"$\\lambda$ = {wl * 1e3:.1f} nm{tag}", fontsize=9)
+        ax.set_xlabel("z [um]")
         # lateral centroid of the output slice: < split => WGA (short-pass)
         split = y_a_final / 2
         out_col = img[:, -1]
         centroid = float(np.sum(x_ref * out_col) / max(out_col.sum(), 1e-30))
-        out[f"out_centroid_{wl * 1e3:.0f}nm"] = centroid
         out[f"out_is_short_{wl * 1e3:.0f}nm"] = float(centroid < split)
-    axes[-1, 0].set_xlabel("z [um]")
     fig.suptitle(
-        "Magden 2018, Fig. 4: adiabatic mode-evolution field "
-        "(short-pass routes to WGA below the cutoff)"
+        "Magden 2018, Fig. 4: adiabatic mode-evolution field over 1300-2800 nm "
+        f"(short-pass routes to WGA below the cutoff ~{wl_c * 1e3:.0f} nm)"
     )
     fig.tight_layout()
     fig.savefig(FIGDIR / "magden2018_fig4.png", dpi=150)
@@ -457,22 +485,21 @@ def figure5(cutoffs: dict[str, float]) -> dict[str, float]:
     adiabatic device routes the quasi-even mode, so the port powers are the
     coupled-mode |T_A|^2 and 1 - |T_A|^2 of the spectrally selective
     cross-section (paper Eq. 3) with delta(lambda) and kappa(lambda)
-    computed by FDE. (A full-device EME would need impractically long
-    transitions at our model's kappa; see the module note in
-    magden2018_dichroic.py. The per-section EME convergence - the paper's
-    actual EME usage - is reproduced in figure 3, and the simulated light
-    propagation through the device is shown in figure 4.)
+    computed by FDE. The per-section EME convergence - the paper's actual EME
+    usage - is reproduced in figure 3, and the simulated light propagation
+    through the device is shown in figure 4.
+
+    With ``MEOW_EXAMPLE_HIFI=1`` the modeled spectra also overlay a full-device
+    EME transmission (``FIG5_EME_CELLS`` cells, ``FIG5_N_WL`` wavelengths). This
+    is costly and, at the example's FDE-calibrated coupling, the adiabatic
+    transitions may still be partly diabatic (see the module note in
+    magden2018_dichroic.py); increasing the cell budget and the section lengths
+    brings it toward the coupled-mode prediction.
     """
     mesh = _mesh()
-    wl_c = cutoffs[f"{W_A * 1e3:.0f}"]
-    n_wl = 5 if FAST else 13
-    wls = np.linspace(wl_c - 0.04, wl_c + 0.04, n_wl)
-    deltas, kappas = [], []
-    for wl in wls:
-        d, k = delta_kappa(wl, mesh=mesh, compute_modes=BACKEND)
-        deltas.append(d)
-        kappas.append(k)
-    gamma = np.asarray(deltas) / np.maximum(np.asarray(kappas), 1e-4)
+    wls = np.linspace(1.500, 1.600, FIG5_N_WL)  # paper Fig. 5a range
+    deltas, kappas = delta_kappa_spectrum(wls, mesh=mesh, compute_modes=BACKEND)
+    gamma = deltas / np.maximum(kappas, 1e-9)
     t_short = analytical_transmission(gamma)  # power staying in WGA
     t_long = 1.0 - t_short
 
@@ -481,19 +508,38 @@ def figure5(cutoffs: dict[str, float]) -> dict[str, float]:
     ax.plot(
         wls * 1e3,
         10 * np.log10(np.maximum(t_short, 1e-6)),
-        "C0o-",
-        label="short-pass port (WGA)",
+        "C0-",
+        label="short-pass port (WGA), CMT",
     )
     ax.plot(
         wls * 1e3,
         10 * np.log10(np.maximum(t_long, 1e-6)),
-        "C3s-",
-        label="long-pass port (WGB)",
+        "C3-",
+        label="long-pass port (WGB), CMT",
     )
+    if HIFI:
+        component = dichroic_filter()
+        ts, tl = [], []
+        for wl in wls:
+            s, lng = device_port_transmission(
+                component,
+                float(wl),
+                cells_per_section=FIG5_EME_CELLS,
+                mesh=mesh,
+                num_modes=NUM_MODES,
+                compute_modes=BACKEND,
+            )
+            ts.append(s)
+            tl.append(lng)
+        ts_db = 10 * np.log10(np.maximum(ts, 1e-6))
+        tl_db = 10 * np.log10(np.maximum(tl, 1e-6))
+        ax.plot(wls * 1e3, ts_db, "C0o", ms=3, label="WGA, EME")
+        ax.plot(wls * 1e3, tl_db, "C3s", ms=3, label="WGB, EME")
     ax.set_xlabel("wavelength [nm]")
     ax.set_ylabel("transmission [dB]")
+    ax.set_xlim(wls[0] * 1e3, wls[-1] * 1e3)
     ax.set_title("Fig. 5a (model): mode-evolution filter spectra")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7)
     ax.grid(visible=True)
 
     ax = axes[1]
@@ -517,7 +563,7 @@ def main() -> dict[str, object]:
     """Generate all Magden 2018 figures; returns key validation numbers."""
     FIGDIR.mkdir(exist_ok=True, parents=True)
     cutoffs = figure1()
-    fig2 = figure2(cutoffs[f"{W_A * 1e3:.0f}"])
+    fig2 = figure2()
     fig3 = figure3()
     fig4 = figure4(cutoffs)
     fig5 = figure5(cutoffs)

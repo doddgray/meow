@@ -131,6 +131,24 @@ def test_dichroic_constant_width_gaps_and_single_ridge_ports() -> None:
     assert np.isclose(edge_a, edge_b, atol=2e-3)
 
 
+def test_delta_kappa_spectrum_monotonic() -> None:
+    """The coupling |kappa| is monotonic across the cutoff (no spurious peak).
+
+    The previous supermode-splitting extraction gave a kappa that peaked at the
+    cutoff and clamped to zero away from it; the coupled-mode overlap integral
+    is monotonic and positive, and is calibrated to the design coupling.
+    """
+    wls = np.linspace(1.530, 1.545, 4)
+    mesh = md.mesh2d(res=0.08)
+    deltas, kappas = md.delta_kappa_spectrum(wls, wl_ref=1.537, mesh=mesh)
+    assert np.all(np.diff(deltas) < 0)  # detuning decreases through zero
+    assert np.all(kappas > 0)
+    dk = np.diff(kappas)
+    assert np.all(dk >= -1e-12) or np.all(dk <= 1e-12)  # monotonic
+    # calibrated to the design coupling at the reference wavelength
+    assert np.interp(1.537, wls, kappas) == pytest.approx(md.KAPPA_DESIGN, rel=1e-6)
+
+
 def test_backend_resolver_and_device_s_matrix() -> None:
     from examples.papers import _backends
 

@@ -26,11 +26,16 @@ separate output ports.
   (delta, kappa, |T_A|^2).
 - `magden2018_figures.py`: reproduces Fig. 1 (modes + effective indices +
   supermode anticrossing, with psi_A/psi_B bracketed by psi_+/psi_-), Fig. 2
-  (delta/kappa dispersion, transmission roll-off, extinction ratio), Fig. 3
-  (layout + EME optimization of the four adiabatic section lengths), Fig. 4
-  (top-down adiabatic mode-evolution field: short-pass routes to WGA below
-  the cutoff, long-pass stays in WGB) and the model counterpart of Fig. 5
-  (coupled-mode filter spectra + cutoff-vs-width shift).
+  (delta in 1/um and the monotonic coupling |kappa| in 1/mm on twin axes over
+  1530-1550 nm, the transmission roll-off, and the extinction ratio vs
+  |gamma|), Fig. 3 (layout + EME optimization of the four adiabatic section
+  lengths), Fig. 4 (top-down adiabatic mode-evolution field at the paper's
+  nine wavelengths 1300-2800 nm in a 3x3 grid) and the model counterpart of
+  Fig. 5 (coupled-mode filter spectra + cutoff-vs-width shift). The coupling
+  |kappa| is the FDE coupled-mode overlap integral (monotonic) with its
+  absolute scale anchored to the ~5/mm design coupling at the 750 nm gap; set
+  `MEOW_EXAMPLE_HIFI=1` to also overlay a slow full-device EME spectrum on
+  Fig. 5.
 
 Validation anchors (full-quality run): the phase-matching cutoffs land at
 1496/1537/1573 nm for the 312/318/324 nm WGA widths - matching the paper's
