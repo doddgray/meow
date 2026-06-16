@@ -222,7 +222,10 @@ def dichroic_filter(
     a_half = np.array([0.5 * wga_w(z) for z in za])
     c.add_polygon(strip(za, a_center, a_half), layer=LAYER_WG)
 
-    w_port = central_w(0.0)  # single-ridge WGB port width
+    def _snap(w: float) -> float:
+        return 0.002 * round(float(w) / 0.002)  # gdsfactory 2 nm port grid
+
+    w_port = _snap(central_w(0.0))  # single-ridge WGB port width
     c.add_port("in0", center=(0.0, 0.0), width=w_port, orientation=180, layer=LAYER_WG)
     c.add_port(
         "long_pass", center=(z4, 0.0), width=w_port, orientation=0, layer=LAYER_WG
@@ -230,7 +233,7 @@ def dichroic_filter(
     c.add_port(
         "short_pass",
         center=(z4, y_a_final),
-        width=w_a,
+        width=_snap(w_a),
         orientation=0,
         layer=LAYER_WG,
     )

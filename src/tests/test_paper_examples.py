@@ -205,6 +205,46 @@ def test_device_cells_pipeline() -> None:
     assert np.isclose(sum(cell.length for cell in cells), md.L1 + md.L2 + md.L3 + md.L4)
 
 
+# --- Generalized dichroic beam-splitter designer ---
+
+
+def test_dichroic_designer_platform_and_wgb() -> None:
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(
+        core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.30, etch_fraction=0.5
+    )
+    assert plat.slab_thickness == pytest.approx(0.15)
+    wgb = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3)
+    assert wgb.total_width == pytest.approx(3 * 0.25 + 2 * 0.10)
+    assert wgb.centers(0.0) == pytest.approx([-0.35, 0.0, 0.35])
+    # partial etch -> ridge + slab (both core) + cladding
+    structs = dd._ridge_structures(plat, [0.30], [0.0], (-2.0, 2.0))
+    cores = [s for s in structs if s.material is mw.silicon]
+    assert len(cores) == 2  # ridge + slab
+    assert any(isinstance(s.geometry, mw.Prism) for s in cores)  # angled-able ridge
+
+
+def test_dichroic_designer_reproduces_magden_width() -> None:
+    """On 220 nm SOI the designer's phase-match width matches the paper's 318 nm.
+
+    Targeting the ~1540 nm cutoff with the paper's sub-wavelength WGB, the WGA
+    width that makes n_WGA = n_WGB is ~318 nm (Magden 2018), validating the
+    generalized phase-matching design.
+    """
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    wgb = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3)
+    n_b = dd.segmented_neff(plat, wgb, 1.54, res=0.05)
+    w_a = dd.phase_match_width(plat, 1.54, wgb, res=0.05)
+    assert 0.28 < w_a < 0.36  # ~318 nm
+    # self-consistent phase match (loose: coarse test mesh)
+    assert dd.solid_neff(plat, w_a, 1.54, res=0.05) == pytest.approx(n_b, abs=6e-3)
+    # wider WGA -> higher index -> would phase-match at a longer cutoff
+    assert dd.solid_neff(plat, w_a + 0.03, 1.54, res=0.05) > n_b
+
+
 # --- Kwolek 2026: TFLN FAQUAD combiner ---
 
 

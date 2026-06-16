@@ -78,11 +78,37 @@ the example's EME discretization and by the difference between our
 FDE-calibrated coupling and the paper's; both improve with finer meshes,
 more cells and more modes.
 
+## Generalized dichroic beam-splitter designer
+
+`dichroic_designer.py` generalizes the Magden 2018 approach into a
+**platform-parametric designer** for adiabatic dichroic beam splitters with a
+*targeted cutoff wavelength*. A `Platform` captures a single waveguide layer -
+core/cladding materials, core thickness, sidewall angle, partial etch fraction,
+the minimum fabricable tip width and gap, and a maximum device length - and:
+
+- builds platform-aware rib cross-sections (partial-etch slab + angled
+  sidewalls) and their FDE effective indices for a solid `WGA` strip and a
+  sub-wavelength multi-rail `WGB`;
+- `phase_match_width()` root-finds the `WGA` width that makes
+  `n_WGA(lambda_c) = n_WGB(lambda_c)`, i.e. sets the targeted cutoff (on 220 nm
+  SOI with the paper's WGB this recovers the paper's ~318 nm width at the
+  ~1540 nm cutoff);
+- `design_dichroic()` picks the largest coupling gap (sharpest cutoff) whose
+  Landau-Zener phase-matching taper fits the length budget, allocates the four
+  section lengths, and builds/extrudes the device on the platform.
+
+The coupling `|kappa|` uses a scalar coupled-mode overlap with an empirical
+high-contrast correction (calibrated to the silicon ~5/mm at the 750 nm gap),
+so the extinction estimate is approximate - validate a final design with a
+full EME. `main()` designs a few cutoffs on an SOI platform and writes
+`figures/dichroic_designer.png`.
+
 ## Running
 
 ```sh
 uv run python -m examples.papers.magden2018_figures
 uv run python -m examples.papers.kwolek2026_figures
+uv run python -m examples.papers.dichroic_designer
 ```
 
 Figures are written to `examples/papers/figures/`. The default settings take

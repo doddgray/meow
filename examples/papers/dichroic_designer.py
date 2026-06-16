@@ -50,6 +50,13 @@ from examples.papers.magden2018_dichroic import LAYER_WG, dichroic_filter
 FIGDIR = Path(__file__).parent / "figures"
 FAST = bool(int(os.environ.get("MEOW_EXAMPLE_FAST", "0")))
 
+SCALAR_KAPPA_CORRECTION = 0.4
+"""Empirical correction for the scalar overlap's high-index-contrast
+overestimate of the coupling, calibrated so that the silicon Magden 2018
+coupling (~5/mm at the 750 nm gap) is recovered. Lower-contrast platforms are
+overestimated less, so the corrected ``|kappa|`` (and the extinction estimate
+derived from it) is approximate - validate a final design with a full EME."""
+
 
 # --------------------------------------------------------------------------
 # platform + sub-wavelength WGB specification
@@ -322,7 +329,7 @@ def coupling_kappa(
     ex_a, ex_b = np.real(mode_a.Ex), np.real(mode_b.Ex)
     kappa_ab = 0.5 * k0 * float(np.sum(pert_b * ex_a * ex_b)) / float(np.sum(ex_a**2))
     kappa_ba = 0.5 * k0 * float(np.sum(pert_a * ex_a * ex_b)) / float(np.sum(ex_b**2))
-    return float(np.sqrt(abs(kappa_ab * kappa_ba)))
+    return float(SCALAR_KAPPA_CORRECTION * np.sqrt(abs(kappa_ab * kappa_ba)))
 
 
 # --------------------------------------------------------------------------
