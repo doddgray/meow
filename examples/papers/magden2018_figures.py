@@ -41,6 +41,9 @@ from examples.papers._backends import parallel_enabled, resolve_backend
 from examples.papers._plot import plot_component
 from examples.papers.magden2018_dichroic import (
     H_SI,
+    L1,
+    L2,
+    L3,
     W_A,
     analytical_transmission,
     coupled_structures,
@@ -335,27 +338,38 @@ def _supermode_intensity_slice(mode: mw.Mode) -> tuple[np.ndarray, np.ndarray]:
     return x, np.abs(np.asarray(mode.Ex)[:, jy]) ** 2
 
 
-def _quasi_even_branch(modes_per_cell: list[list[mw.Mode]]) -> list[mw.Mode]:
+def _quasi_even_branch(
+    modes_per_cell: list[list[mw.Mode]],
+    seed_mask: np.ndarray | None = None,
+) -> list[mw.Mode]:
     """Follow the quasi-even supermode psi_+ along the device.
 
     The adiabatic short/long-pass routing is carried by the quasi-even
     (higher-index) supermode. At the example's weak FDE coupling the WGA and
     WGB branches are nearly degenerate at phase matching, so tracking the
     *input* branch by overlap follows the diabatic (WGB) path. Instead we seed
-    psi_+ as the highest-index TE mode at the per-slice phase-matching cell
-    (the smallest neff gap between the two coupled supermodes) and track it by
-    field overlap *outward* in both directions. Below the cutoff this carries
-    the field from the input WGB strip across to WGA; above the cutoff it stays
-    in WGB.
+    psi_+ as the highest-index TE mode at the phase-matching cell (the smallest
+    neff gap between the two coupled supermodes, searched within ``seed_mask``
+    - the coupling region, so the decoupled output section where WGA and the
+    widened WGB strip are also near-degenerate cannot be picked) and track it
+    by field overlap *outward* in both directions. Below the cutoff this
+    carries the field from the input WGB strip across to WGA; above the cutoff
+    it stays in WGB.
     """
     te_per_cell = [
         [m for m in modes if m.te_fraction > 0.5] or list(modes)
         for modes in modes_per_cell
     ]
-    gaps = [
-        float(np.real(te[0].neff) - np.real(te[1].neff)) if len(te) >= 2 else np.inf
-        for te in te_per_cell
-    ]
+    gaps = np.array(
+        [
+            float(np.real(te[0].neff) - np.real(te[1].neff))
+            if len(te) >= 2
+            else np.inf
+            for te in te_per_cell
+        ]
+    )
+    if seed_mask is not None:
+        gaps = np.where(seed_mask, gaps, np.inf)
     seed = int(np.argmin(gaps))
     chosen: list[mw.Mode | None] = [None] * len(te_per_cell)
     chosen[seed] = te_per_cell[seed][0]  # psi_+ = higher-index supermode
@@ -401,6 +415,9 @@ def figure4(cutoffs: dict[str, float]) -> dict[str, float]:
     z_centers = np.cumsum([c.length for c in cells]) - 0.5 * np.asarray(
         [c.length for c in cells]
     )
+    # seed the quasi-even branch only in the coupling region (sections 2-3),
+    # where the WGA/WGB phase matching happens
+    seed_mask = (z_centers >= L1) & (z_centers <= L1 + L2 + L3)
 
     fig, axes = plt.subplots(len(wls), 1, figsize=(11, 1.9 * len(wls)), squeeze=False)
     out: dict[str, float] = {}
@@ -408,7 +425,7 @@ def figure4(cutoffs: dict[str, float]) -> dict[str, float]:
         env = mw.Environment(wl=wl, T=25.0)
         css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
         modes = [BACKEND(cs, num_modes=NUM_MODES) for cs in css]
-        branch = _quasi_even_branch(modes)
+        branch = _quasi_even_branch(modes, seed_mask=seed_mask)
         columns, x_ref = [], None
         for mode in branch:
             x, col = _supermode_intensity_slice(mode)
