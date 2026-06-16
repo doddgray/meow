@@ -18,14 +18,17 @@ wavelength (the filter cutoff, ~1540 nm); four adiabatic sections
 (L1/L2/L3/L4 = 200/260/900/200 um) route short- and long-pass light to
 separate output ports.
 
-- `magden2018_dichroic.py`: the parametric `dichroic_filter()` PCell, the
-  extrusion/meshing helpers and the coupled-mode quantities
-  (delta, kappa, |T_A|^2).
+- `magden2018_dichroic.py`: the parametric `dichroic_filter()` PCell (paper
+  Fig. 3a: a straight three-segment WGB with WGA tipping in at section 2 and
+  bending away in section 3), the extrusion/meshing helpers and the
+  coupled-mode quantities (delta, kappa, |T_A|^2).
 - `magden2018_figures.py`: reproduces Fig. 1 (modes + effective indices +
-  supermode anticrossing), Fig. 2 (delta/kappa dispersion, transmission
-  roll-off, extinction ratio), Fig. 3 (layout + EME optimization of the four
-  adiabatic section lengths) and the model counterpart of Fig. 4 (full-device
-  EME spectra + cutoff-vs-width shift).
+  supermode anticrossing, with psi_A/psi_B bracketed by psi_+/psi_-), Fig. 2
+  (delta/kappa dispersion, transmission roll-off, extinction ratio), Fig. 3
+  (layout + EME optimization of the four adiabatic section lengths), Fig. 4
+  (top-down adiabatic mode-evolution field: short-pass routes to WGA below
+  the cutoff, long-pass stays in WGB) and the model counterpart of Fig. 5
+  (coupled-mode filter spectra + cutoff-vs-width shift).
 
 Validation anchors (full-quality run): the phase-matching cutoffs land at
 1496/1537/1573 nm for the 312/318/324 nm WGA widths - matching the paper's
@@ -78,6 +81,24 @@ uv run python -m examples.papers.kwolek2026_figures
 Figures are written to `examples/papers/figures/`. The default settings take
 tens of minutes; set `MEOW_EXAMPLE_FAST=1` for a coarse smoke-test version
 (used by `src/tests/test_paper_examples.py`).
+
+### Backends and parallel EME
+
+Both examples are backend- and parallel-aware (see `_backends.py`):
+
+- `MEOW_PAPER_BACKEND=tidy3d|mpb|lumerical` selects the FDE mode solver used
+  for all the examples' serial solves (default `tidy3d`). The MPB backend
+  needs the `meep`/`mpb` conda-forge bindings.
+- `MEOW_PAPER_PARALLEL=1` cascades the device EME with the parallel
+  slice-group engine (`meow.compute_s_matrix_parallel`) instead of the serial
+  path. The parallel engine re-solves shared cells in separate processes and
+  checks them for consistency, so it always uses the deterministic tidy3d
+  backend (the two knobs are independent: parallel runs do not use MPB).
+
+```sh
+MEOW_PAPER_BACKEND=mpb uv run python -m examples.papers.magden2018_figures
+MEOW_PAPER_PARALLEL=1 uv run python -m examples.papers.kwolek2026_figures
+```
 
 Note on fidelity: quantitative numbers (cutoff wavelength, dB-level losses
 and extinction ratios) are mesh- and discretization-sensitive. The

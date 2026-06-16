@@ -46,6 +46,49 @@ def test_dichroic_filter_extrusion() -> None:
     assert len(oxide) >= 1
 
 
+def test_dichroic_topology_matches_fig3a() -> None:
+    """WGB runs straight on the axis; WGA tips in and bends away below it.
+
+    Reproduces the paper Fig. 3a layout: the long-pass (WGB) output sits on
+    the lateral axis (x ~ 0) while the short-pass (WGA) output is displaced to
+    negative x by the section-3 bend (the previous layout had these swapped).
+    """
+    seg_centers, y_a_couple, y_a_final = md.lateral_positions()
+    # WGB straight & centred on the axis; WGA below it and bending further away
+    assert np.isclose(seg_centers[1], 0.0)
+    assert y_a_final < y_a_couple < 0.0
+    c = md.dichroic_filter()
+    ports = {p.name: p for p in c.ports}
+    y_short = ports["short_pass"].center[1]
+    y_long = ports["long_pass"].center[1]
+    assert y_short < y_long  # WGA (short-pass) below WGB (long-pass)
+    assert np.isclose(y_long, 0.0, atol=1e-6)
+    assert np.isclose(y_short, y_a_final, atol=1e-6)
+
+
+def test_backend_resolver_and_device_s_matrix() -> None:
+    from examples.papers import _backends
+
+    assert _backends.resolve_backend("tidy3d") is mw.compute_modes_tidy3d
+    assert _backends.resolve_backend("mpb") is mw.compute_modes_mpb
+    assert _backends.resolve_backend(mw.compute_modes) is mw.compute_modes
+    with pytest.raises(ValueError, match="Unknown backend"):
+        _backends.resolve_backend("nope")
+    assert _backends.parallel_enabled(parallel=True) is True
+    assert _backends.parallel_enabled(parallel=False) is False
+
+    # serial device S-matrix on a tiny stack returns SAX multimode ports
+    c = md.dichroic_filter()
+    cells = md.device_cells(
+        c, cells_per_section=(1, 1, 1, 1), mesh=md.device_mesh(res=0.08)
+    )
+    env = mw.Environment(wl=1.55, T=25.0)
+    S, pm = _backends.device_s_matrix(cells, env, num_modes=2, parallel=False)
+    assert "left@0" in pm
+    assert "right@0" in pm
+    assert np.asarray(S).shape[0] == len(pm)
+
+
 def test_phase_matching_cutoff_in_c_band() -> None:
     """The WGA(318nm)/WGB phase-matching point lies in the C-band.
 

@@ -26,6 +26,7 @@ import numpy as np
 
 import meow as mw
 import meow.eme.propagation as prop
+from examples.papers._backends import parallel_enabled, resolve_backend
 from examples.papers._plot import plot_component
 from examples.papers.kwolek2026_faquad import (
     G_C,
@@ -49,9 +50,14 @@ RES = 0.06 if FAST else 0.03
 NUM_CELLS = 12 if FAST else 64
 NUM_MODES = 3 if FAST else 4
 
+# FDE backend ("tidy3d"/"mpb"/"lumerical" or MEOW_PAPER_BACKEND) and whether to
+# cascade the EME with the parallel slice-group engine (MEOW_PAPER_PARALLEL).
+BACKEND = resolve_backend()
+PARALLEL = parallel_enabled()
+
 
 def _design() -> tuple[FaquadDesign, gf.Component]:
-    kappa_0, g_0, dbeta_dtw = calibrate(WL_FH, res=RES)
+    kappa_0, g_0, dbeta_dtw = calibrate(WL_FH, res=RES, compute_modes=BACKEND)
     design = FaquadDesign(kappa_0, g_0, dbeta_dtw)
     component = faquad_combiner(kappa_0, g_0, dbeta_dtw)
     return design, component
@@ -65,7 +71,7 @@ def _supermode_panel(ax_pair: list[plt.Axes], gap: float, title: str) -> None:
     structures = rib_structures(WL_FH, [W_TOP, W_TOP], [-x0, x0])
     cell = mw.Cell(structures=structures, mesh=calib_mesh(RES), z_min=0, z_max=1)
     cs = mw.CrossSection.from_cell(cell=cell, env=mw.Environment(wl=WL_FH, T=25.0))
-    modes = mw.compute_modes(cs, num_modes=2)
+    modes = BACKEND(cs, num_modes=2)
     for ax, mode, name in zip(ax_pair, modes[:2], ["sym", "antisym"], strict=False):
         X, Y = mode.cs.mesh.Xx, mode.cs.mesh.Yx
         ax.pcolormesh(X, Y, np.real(mode.Ex), cmap="RdBu")
@@ -119,7 +125,7 @@ def figure1() -> dict[str, float]:
         cells = device_cells(component, wl, num_cells=NUM_CELLS, res=RES, design=design)
         env = mw.Environment(wl=wl, T=25.0)
         css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
-        modes = [mw.compute_modes(cs, num_modes=NUM_MODES) for cs in css]
+        modes = [BACKEND(cs, num_modes=NUM_MODES) for cs in css]
 
         def centroid(mode: mw.Mode) -> float:
             d = np.abs(mode.Ex) ** 2
@@ -151,7 +157,9 @@ def figure1() -> dict[str, float]:
         ax.set_ylim(-3, 3)
         ax.set_title(f"Fig. 1e: |Ex|$^2$ propagation at {label}")
 
-        t_bar, t_cross = bar_cross_transmission(cells, wl, num_modes=NUM_MODES)
+        t_bar, t_cross = bar_cross_transmission(
+            cells, wl, num_modes=NUM_MODES, parallel=PARALLEL, compute_modes=BACKEND
+        )
         results[f"bar_{label.split()[0]}"] = t_bar
         results[f"cross_{label.split()[0]}"] = t_cross
 
@@ -181,7 +189,9 @@ def figure2() -> dict[str, float]:
             cells = device_cells(
                 component, wl, num_cells=NUM_CELLS, res=RES, design=design
             )
-            t_bar, t_cross = bar_cross_transmission(cells, wl, num_modes=NUM_MODES)
+            t_bar, t_cross = bar_cross_transmission(
+                cells, wl, num_modes=NUM_MODES, parallel=PARALLEL, compute_modes=BACKEND
+            )
             bars.append(t_bar)
             crosses.append(t_cross)
         spectra[label] = (wls, np.asarray(bars), np.asarray(crosses))

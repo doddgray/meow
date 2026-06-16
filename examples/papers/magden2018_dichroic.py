@@ -11,18 +11,24 @@ paper with gdsfactory (parametric layout) and meow (FDE mode solving + EME):
 - WGA and WGB are phase matched at exactly one wavelength (the filter
   cutoff): below the cutoff the quasi-even supermode lives in WGA, above it
   in WGB, so adiabatic mode evolution separates short- and long-pass light.
-- The full filter consists of four adiabatic sections (paper Fig. 3a):
-  (1) development of the segmented WGB next to the input waveguide,
-  (2) tapering of WGA through the phase-matching condition,
-  (3) slow lateral separation of WGA and WGB to a 2 um gap, and
-  (4) conversion of the segmented WGB back into a solid output waveguide.
-  C-band design lengths: L1 = L4 = 200 um, L2 = 260 um, L3 = 900 um.
+- The full filter consists of four adiabatic sections (paper Fig. 3a),
+  with WGB running straight along the axis and WGA tipping in below it:
+  (1) a single input strip grows into the straight 3-segment WGB,
+  (2) WGA tapers up from a point at the fixed coupling gap, through the
+      phase-matching condition,
+  (3) WGA bends away from WGB, separating to a 2 um gap, and
+  (4) the 3-segment WGB merges back into a single output strip.
+  WGA is the short-pass output, WGB the long-pass output. C-band design
+  lengths: L1 = L4 = 200 um, L2 = 260 um, L3 = 900 um.
 
-Where the paper leaves layout details unspecified (input taper width, the
-exact morph in section 4), this example documents its assumptions inline.
+Where the paper leaves layout details unspecified (the input/output strip
+width, the exact section-1/4 morphology), this example documents its
+assumptions inline (matching the reference layout in the paper's Fig. 3a).
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import gdsfactory as gf
 import numpy as np
@@ -42,7 +48,7 @@ T_CLAD = 1.0
 
 # default C-band design values from the paper
 W_A = 0.318
-W_A_IN = 0.40  # assumption: input/output solid waveguide width (not specified)
+W_A_IN = 0.45  # assumption: single-mode input/output strip width (not specified)
 W_B = 0.25
 G_B = 0.10
 GAP = 0.75
@@ -56,7 +62,6 @@ GAP = 0.75
 # from the coupled-mode model (paper Eq. 3) with FDE-computed
 # delta(lambda) and kappa(lambda), as in the paper's Fig. 2b.
 GAP_OUT = 2.0
-W_SEG_MIN = 0.10  # minimum width/gap from the fabrication design rules
 L1, L2, L3, L4 = 200.0, 260.0, 900.0, 200.0
 
 
@@ -65,15 +70,39 @@ def w_b_total(w_b: float = W_B, g_b: float = G_B) -> float:
     return 3 * w_b + 2 * g_b
 
 
-@gf.cell
-def dichroic_filter(
+def lateral_positions(
     w_a: float = W_A,
-    w_a_in: float = W_A_IN,
     w_b: float = W_B,
     g_b: float = G_B,
     gap: float = GAP,
     gap_out: float = GAP_OUT,
-    w_seg_min: float = W_SEG_MIN,
+) -> tuple[list[float], float, float]:
+    """Lateral (meow-x) centres of the device waveguides (paper Fig. 3a).
+
+    The three WGB segments are centred on the lateral axis (x=0); WGA sits
+    *below* them (negative x), at the coupling gap in section 2 and bending to
+    the final gap in section 3.
+
+    Returns:
+        ``(seg_centers, y_a_couple, y_a_final)``: the WGB segment centres and
+        the WGA centre in the coupling region and after separation.
+    """
+    pitch_b = w_b + g_b
+    seg_centers = [(i - 1) * pitch_b for i in range(3)]
+    wgb_left_edge = min(seg_centers) - w_b / 2
+    y_a_couple = wgb_left_edge - gap - w_a / 2
+    y_a_final = wgb_left_edge - gap_out - w_a / 2
+    return seg_centers, y_a_couple, y_a_final
+
+
+@gf.cell
+def dichroic_filter(
+    w_a: float = W_A,
+    w_in: float = W_A_IN,
+    w_b: float = W_B,
+    g_b: float = G_B,
+    gap: float = GAP,
+    gap_out: float = GAP_OUT,
     l1: float = L1,
     l2: float = L2,
     l3: float = L3,
@@ -82,71 +111,105 @@ def dichroic_filter(
 ) -> gf.Component:
     """Parametric 1x2 dichroic filter (paper Fig. 3a).
 
-    The component is drawn with the propagation direction along x (which
-    meow maps to its z axis) and the cross-section along y. WGA runs
-    straight along y=0; the three WGB segments develop above it, couple,
-    and are separated and merged into the solid long-pass output.
+    Drawn with propagation along the gds x-axis (meow ``z``) and the lateral
+    cross-section along the gds y-axis (meow ``x``); the 220 nm Si height is
+    added at extrusion time. The topology reproduces paper Fig. 3a:
+
+    - WGB (long-pass, segmented) runs **straight** on the lateral axis: a
+      central strip on x=0 that is the single-mode I/O waveguide (tapering
+      ``w_in`` -> ``w_b`` in section 1 and back in section 4) flanked by two
+      outer segments that grow from a point in section 1 and vanish in
+      section 4, so a single input strip becomes the three-segment WGB and
+      back into a single output strip.
+    - WGA (short-pass, solid strip) is **absent until section 2**, where it
+      tapers up from a point at the fixed coupling gap; in section 3 it bends
+      away from WGB (linear lateral shift to the final gap) and then runs
+      straight to its output.
     """
     c = gf.Component()
     z1, z2, z3, z4 = l1, l1 + l2, l1 + l2 + l3, l1 + l2 + l3 + l4
+    eps = 5e-4  # half-width floor so zero-width tips stay non-degenerate
+    seg_centers, y_a_couple, y_a_final = lateral_positions(
+        w_a, w_b, g_b, gap, gap_out
+    )
 
-    def wga_width(z: float) -> float:
-        if z <= z1:  # section 1: input width held
-            return w_a_in
-        if z <= z2:  # section 2: taper through phase matching
-            return w_a_in + (w_a - w_a_in) * (z - z1) / l2
-        return w_a  # sections 3 & 4
+    def strip(zs: np.ndarray, center: np.ndarray, half: np.ndarray) -> np.ndarray:
+        upper = np.stack([zs, center + half], axis=1)
+        lower = np.stack([zs, center - half], axis=1)[::-1]
+        return np.concatenate([upper, lower])
 
-    def seg_width(z: float) -> float:
-        if z <= z1:  # section 1: segments develop from the min feature size
-            return w_seg_min + (w_b - w_seg_min) * z / l1
+    zs_full = [
+        *np.linspace(0, z1, points_per_section, endpoint=False),
+        *np.linspace(z1, z3, points_per_section, endpoint=False),
+        *np.linspace(z3, z4, points_per_section, endpoint=False),
+        z4,
+    ]
+    zs_full = np.asarray(zs_full, dtype=float)
+
+    def wgb_central_half(z: float) -> float:
+        if z <= z1:  # section 1: input strip narrows into the central segment
+            return 0.5 * (w_in + (w_b - w_in) * z / l1)
         if z <= z3:
-            return w_b
-        # section 4: segments widen until they merge into a solid waveguide
-        return w_b + (w_b + g_b - w_b) * (z - z3) / l4
+            return 0.5 * w_b
+        return 0.5 * (w_b + (w_in - w_b) * (z - z3) / l4)  # section 4: widen out
 
-    def seg_gap(z: float) -> float:
+    def wgb_outer_half(z: float) -> float:
+        if z <= z1:  # section 1: outer segments grow from a point
+            return max(0.5 * w_b * z / l1, eps)
         if z <= z3:
-            return g_b
-        return g_b * (1 - (z - z3) / l4)  # close the gaps in section 4
+            return 0.5 * w_b
+        return max(0.5 * w_b * (1 - (z - z3) / l4), eps)  # section 4: vanish
 
-    def wgb_offset(z: float) -> float:
-        """Edge-to-edge gap between WGA and WGB."""
+    # WGB central segment (the I/O strip) on x=0
+    central_half = np.array([wgb_central_half(z) for z in zs_full])
+    c.add_polygon(strip(zs_full, np.zeros_like(zs_full), central_half), layer=LAYER_WG)
+    # WGB outer segments
+    outer_half = np.array([wgb_outer_half(z) for z in zs_full])
+    for center in seg_centers:
+        if np.isclose(center, 0.0):
+            continue
+        c.add_polygon(
+            strip(zs_full, np.full_like(zs_full, center), outer_half), layer=LAYER_WG
+        )
+
+    # WGA: present from z1 (tip in section 2, bend away in section 3)
+    zs_a = np.asarray(
+        [
+            *np.linspace(z1, z2, points_per_section, endpoint=False),
+            *np.linspace(z2, z3, points_per_section, endpoint=False),
+            *np.linspace(z3, z4, points_per_section, endpoint=False),
+            z4,
+        ],
+        dtype=float,
+    )
+
+    def wga_half(z: float) -> float:
+        if z <= z2:  # section 2: taper up from a point
+            return max(0.5 * w_a * (z - z1) / l2, eps)
+        return 0.5 * w_a
+
+    def wga_center(z: float) -> float:
         if z <= z2:
-            return gap
-        if z <= z3:  # section 3: slow separation (sine-smoothed)
-            t = (z - z2) / l3
-            return gap + (gap_out - gap) * 0.5 * (1 - np.cos(np.pi * t))
-        return gap_out
+            return y_a_couple
+        if z <= z3:  # section 3: straight linear bend away from WGB
+            return y_a_couple + (y_a_final - y_a_couple) * (z - z2) / l3
+        return y_a_final
 
-    zs = []
-    for z_start, z_stop in [(0, z1), (z1, z2), (z2, z3), (z3, z4)]:
-        zs.extend(np.linspace(z_start, z_stop, points_per_section, endpoint=False))
-    zs = np.asarray([*zs, z4])
+    a_center = np.array([wga_center(z) for z in zs_a])
+    a_half = np.array([wga_half(z) for z in zs_a])
+    c.add_polygon(strip(zs_a, a_center, a_half), layer=LAYER_WG)
 
-    # WGA: straight strip centered on y=0
-    wa = np.asarray([wga_width(z) for z in zs])
-    upper = np.stack([zs, wa / 2], axis=1)
-    lower = np.stack([zs, -wa / 2], axis=1)[::-1]
-    c.add_polygon(np.concatenate([upper, lower]), layer=LAYER_WG)
-
-    # WGB: three segments above WGA
-    for i in range(3):
-        y_lo, y_hi = [], []
-        for z in zs:
-            w_seg, g_seg = seg_width(z), seg_gap(z)
-            base = wga_width(z) / 2 + wgb_offset(z)
-            lo = base + i * (w_seg + g_seg)
-            y_lo.append(lo)
-            y_hi.append(lo + w_seg)
-        upper = np.stack([zs, y_hi], axis=1)
-        lower = np.stack([zs, y_lo], axis=1)[::-1]
-        c.add_polygon(np.concatenate([upper, lower]), layer=LAYER_WG)
-
-    c.add_port("in0", center=(0, 0), width=w_a_in, orientation=180, layer=LAYER_WG)
-    c.add_port("short_pass", center=(z4, 0), width=w_a, orientation=0, layer=LAYER_WG)
-    y_lp = wga_width(z4) / 2 + gap_out + w_b_total(w_b, g_b) / 2
-    c.add_port("long_pass", center=(z4, y_lp), width=w_b, orientation=0, layer=LAYER_WG)
+    c.add_port("in0", center=(0.0, 0.0), width=w_in, orientation=180, layer=LAYER_WG)
+    c.add_port(
+        "long_pass", center=(z4, 0.0), width=w_in, orientation=0, layer=LAYER_WG
+    )
+    c.add_port(
+        "short_pass",
+        center=(z4, y_a_final),
+        width=w_a,
+        orientation=0,
+        layer=LAYER_WG,
+    )
     return c
 
 
@@ -177,7 +240,7 @@ def extrude_filter(component: gf.Component) -> list[mw.Structure3D]:
     }
     structs = mw.extrude_gds(component, extrusion_rules)
     z_max = float(component.xmax)
-    return structs + oxide_structures(z_max, x_span=(-3.0, 6.0))
+    return structs + oxide_structures(z_max, x_span=(-3.6, 1.2))
 
 
 def mesh2d(
@@ -187,7 +250,29 @@ def mesh2d(
     y_max: float = 1.1,
     res: float = 0.025,
 ) -> mw.Mesh2D:
-    """Cross-section mesh. x: lateral (chip plane), y: vertical."""
+    """Cross-section mesh for the isolated/coupled mode analyses (Fig. 1/2).
+
+    x: lateral (chip plane), y: vertical. The default span fits the coupled
+    cross-section used for the coupling analysis (WGA at x=0, WGB to +x).
+    """
+    return mw.Mesh2D(
+        x=np.arange(x_min, x_max + res / 2, res),
+        y=np.arange(y_min, y_max + res / 2, res),
+    )
+
+
+def device_mesh(
+    x_min: float = -3.3,
+    x_max: float = 0.9,
+    y_min: float = -0.9,
+    y_max: float = 1.1,
+    res: float = 0.025,
+) -> mw.Mesh2D:
+    """Cross-section mesh spanning the full device width (paper Fig. 3a/4).
+
+    Wide enough laterally (meow x) to contain WGB on x=0 and WGA all the way
+    down to its separated position ``y_a_final`` in section 3.
+    """
     return mw.Mesh2D(
         x=np.arange(x_min, x_max + res / 2, res),
         y=np.arange(y_min, y_max + res / 2, res),
@@ -249,9 +334,12 @@ def fundamental_neff(
     wl: float,
     mesh: mw.Mesh2D | None = None,
     num_modes: int = 2,
+    compute_modes: Callable | None = None,
 ) -> float:
     """Effective index of the fundamental TE mode of a cross-section."""
-    modes = solve_modes(structures, wl, mesh=mesh, num_modes=num_modes)
+    modes = solve_modes(
+        structures, wl, mesh=mesh, num_modes=num_modes, compute_modes=compute_modes
+    )
     te = [m for m in modes if m.te_fraction > 0.5]
     return float(np.real((te or modes)[0].neff))
 
@@ -261,13 +349,44 @@ def solve_modes(
     wl: float,
     mesh: mw.Mesh2D | None = None,
     num_modes: int = 4,
+    compute_modes: Callable | None = None,
 ) -> list[mw.Mode]:
-    """Solve the modes of a single cross-section at z=0.5."""
+    """Solve the modes of a single cross-section at z=0.5.
+
+    Args:
+        structures: the 3D structures defining the cross-section.
+        wl: vacuum wavelength [um].
+        mesh: the 2D mesh (default: :func:`mesh2d`).
+        num_modes: number of modes to compute.
+        compute_modes: FDE backend (default: ``meow.compute_modes``, tidy3d).
+    """
     mesh = mesh or mesh2d()
+    compute_modes = compute_modes or mw.compute_modes
     cell = mw.Cell(structures=structures, mesh=mesh, z_min=0.0, z_max=1.0)
     env = mw.Environment(wl=wl, T=25.0)
     cs = mw.CrossSection.from_cell(cell=cell, env=env)
-    return mw.compute_modes(cs, num_modes=num_modes)
+    return compute_modes(cs, num_modes=num_modes)
+
+
+def coupled_supermode_neffs(
+    wl: float,
+    w_a: float = W_A,
+    gap: float = GAP,
+    mesh: mw.Mesh2D | None = None,
+    compute_modes: Callable | None = None,
+) -> tuple[float, float]:
+    """The (n_+, n_-) TE supermode effective indices of the coupled section.
+
+    The pair is selected so that ``n_+`` is the higher-index supermode: at
+    weak coupling these are the quasi-even/quasi-odd combinations of the WGA
+    and WGB modes whose splitting gives the coupling ``kappa``.
+    """
+    modes = solve_modes(
+        coupled_structures(w_a=w_a, gap=gap), wl, mesh=mesh, compute_modes=compute_modes
+    )
+    te = [m for m in modes if m.te_fraction > 0.5][:2]
+    n_p, n_m = sorted((float(np.real(m.neff)) for m in te[:2]), reverse=True)
+    return n_p, n_m
 
 
 def delta_kappa(
@@ -275,19 +394,26 @@ def delta_kappa(
     w_a: float = W_A,
     gap: float = GAP,
     mesh: mw.Mesh2D | None = None,
+    compute_modes: Callable | None = None,
 ) -> tuple[float, float]:
     """Half phase mismatch delta and coupling |kappa| at one wavelength.
 
-    delta = (beta_A - beta_B) / 2 from the isolated waveguides and
-    |kappa| = sqrt(((beta_+ - beta_-)/2)**2 - delta**2) from the supermode
-    splitting of the coupled cross-section (coupled mode theory).
+    ``delta = (beta_A - beta_B) / 2`` from the isolated waveguides and
+    ``|kappa| = sqrt(((beta_+ - beta_-)/2)**2 - delta**2)`` from the supermode
+    splitting of the coupled cross-section (coupled mode theory). The isolated
+    WGA and WGB use the same cross-sections as the Fig. 1e phase-matching
+    analysis, so their indices cross exactly at the cutoff wavelength.
     """
     k0 = 2 * np.pi / wl
-    n_a = fundamental_neff(wga_structures(w_a), wl, mesh=mesh)
-    n_b = fundamental_neff(wgb_structures(), wl, mesh=mesh)
-    modes = solve_modes(coupled_structures(w_a=w_a, gap=gap), wl, mesh=mesh)
-    te = [m for m in modes if m.te_fraction > 0.5][:2]
-    n_p, n_m = (float(np.real(m.neff)) for m in te[:2])
+    n_a = fundamental_neff(
+        wga_structures(w_a), wl, mesh=mesh, compute_modes=compute_modes
+    )
+    n_b = fundamental_neff(
+        wgb_structures(), wl, mesh=mesh, compute_modes=compute_modes
+    )
+    n_p, n_m = coupled_supermode_neffs(
+        wl, w_a=w_a, gap=gap, mesh=mesh, compute_modes=compute_modes
+    )
     delta = 0.5 * k0 * (n_a - n_b)
     half_splitting = 0.5 * k0 * (n_p - n_m)
     kappa_sq = max(half_splitting**2 - delta**2, 0.0)
@@ -307,7 +433,7 @@ def device_cells(
 ) -> list[mw.Cell]:
     """Discretize the four filter sections into EME cells."""
     structs = extrude_filter(component)
-    mesh = mesh or mesh2d()
+    mesh = mesh or device_mesh()
     Ls: list[float] = []
     for n, length in zip(cells_per_section, lengths, strict=True):
         Ls.extend([length / n] * n)
@@ -342,3 +468,45 @@ def port_transmissions(
         else:
             t_long += power
     return t_short, t_long
+
+
+def device_port_transmission(
+    component: gf.Component,
+    wl: float,
+    *,
+    cells_per_section: tuple[int, int, int, int] = (6, 8, 12, 6),
+    mesh: mw.Mesh2D | None = None,
+    num_modes: int = 4,
+    parallel: bool | None = None,
+    compute_modes: Callable | None = None,
+) -> tuple[float, float]:
+    """Full-device EME (short-pass, long-pass) power for fundamental TE input.
+
+    Builds the EME cells of the whole filter and cascades them either serially
+    or with the parallel slice-group engine (``parallel=True`` or the
+    ``MEOW_PAPER_PARALLEL`` environment variable). The output modes (needed to
+    attribute power to the WGA/WGB ports) are solved once on the final cell.
+
+    Note: the parallel engine always uses the deterministic default (tidy3d)
+    backend; ``compute_modes`` selects the backend for the serial path and for
+    the output-mode classification.
+    """
+    from examples.papers._backends import device_s_matrix
+
+    cells = device_cells(component, cells_per_section=cells_per_section, mesh=mesh)
+    env = mw.Environment(wl=wl, T=25.0)
+    S, pm = device_s_matrix(
+        cells,
+        env,
+        num_modes=num_modes,
+        parallel=parallel,
+        compute_modes=compute_modes,
+    )
+    solver = compute_modes or mw.compute_modes
+    cs_out = mw.CrossSection.from_cell(cell=cells[-1], env=env)
+    modes_out = solver(cs_out, num_modes=num_modes)
+    # at the output WGB sits on x=0 and WGA at y_a_final (negative x); split
+    # the lateral axis halfway between them to attribute the port powers.
+    _, _, y_a_final = lateral_positions()
+    x_split = y_a_final / 2
+    return port_transmissions(np.asarray(S), pm, modes_out, x_split)

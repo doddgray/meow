@@ -33,6 +33,7 @@ Design workflow (paper Sec. 2, Eqs. 8-12):
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import lru_cache
 
 import gdsfactory as gf
@@ -271,18 +272,26 @@ def solve_te_neffs(
     mesh: mw.Mesh2D,
     num_modes: int = 4,
     num_te: int = 2,
+    compute_modes: Callable | None = None,
 ) -> list[float]:
     """Real effective indices of the first TE modes of a cross-section."""
+    compute_modes = compute_modes or mw.compute_modes
     cell = mw.Cell(structures=structures, mesh=mesh, z_min=0.0, z_max=1.0)
     cs = mw.CrossSection.from_cell(cell=cell, env=mw.Environment(wl=wl, T=25.0))
-    modes = mw.compute_modes(cs, num_modes=num_modes)
+    modes = compute_modes(cs, num_modes=num_modes)
     te = [m for m in modes if m.te_fraction > 0.5]
     return [float(np.real(m.neff)) for m in te[:num_te]]
 
 
 @lru_cache(maxsize=8)
-def calibrate(wl: float = 1.55, res: float = 0.04) -> tuple[float, float, float]:
-    """Extract (kappa_0, g_0, dbeta_dtw) from FDE solves (workflow step 1)."""
+def calibrate(
+    wl: float = 1.55, res: float = 0.04, compute_modes: Callable | None = None
+) -> tuple[float, float, float]:
+    """Extract (kappa_0, g_0, dbeta_dtw) from FDE solves (workflow step 1).
+
+    ``compute_modes`` selects the FDE backend (default: tidy3d); it is part of
+    the memoization key, so different backends are cached separately.
+    """
     mesh = calib_mesh(res)
     k0 = 2 * np.pi / wl
 
@@ -291,7 +300,10 @@ def calibrate(wl: float = 1.55, res: float = 0.04) -> tuple[float, float, float]
     for g in gaps:
         x0 = (W_TOP + g) / 2
         n_p, n_m = solve_te_neffs(
-            rib_structures(wl, [W_TOP, W_TOP], [-x0, x0]), wl, mesh
+            rib_structures(wl, [W_TOP, W_TOP], [-x0, x0]),
+            wl,
+            mesh,
+            compute_modes=compute_modes,
         )
         kappas.append(0.5 * k0 * (n_p - n_m))
     slope, intercept = np.polyfit(gaps, np.log(np.asarray(kappas)), 1)
@@ -300,7 +312,14 @@ def calibrate(wl: float = 1.55, res: float = 0.04) -> tuple[float, float, float]
 
     dws = np.array([-0.05, 0.0, 0.05])
     neffs = [
-        solve_te_neffs(rib_structures(wl, [W_TOP + dw], [0.0]), wl, mesh, 4, 1)[0]
+        solve_te_neffs(
+            rib_structures(wl, [W_TOP + dw], [0.0]),
+            wl,
+            mesh,
+            4,
+            1,
+            compute_modes=compute_modes,
+        )[0]
         for dw in dws
     ]
     dbeta_dtw = float(k0 * np.polyfit(dws, neffs, 1)[0])
@@ -446,28 +465,48 @@ def bar_cross_transmission(
     cells: list[mw.Cell],
     wl: float,
     num_modes: int = 4,
+    *,
+    parallel: bool | None = None,
+    compute_modes: Callable | None = None,
 ) -> tuple[float, float]:
     """(bar, cross) power for the fundamental TE mode injected in port B.
 
     The input fundamental mode of the asymmetric input cross-section is the
     one localized in waveguide B (negative x); transmission is classified by
     the lateral energy centroid of the output modes.
+
+    The EME S-matrix is cascaded serially or, if ``parallel`` (or the
+    ``MEOW_PAPER_PARALLEL`` environment variable) is set, with the parallel
+    slice-group engine. ``compute_modes`` selects the FDE backend for the
+    serial path and for the input/output mode classification; the parallel
+    path always uses the deterministic default (tidy3d) backend.
     """
+    from examples.papers._backends import device_s_matrix
+
+    solver = compute_modes or mw.compute_modes
     env = mw.Environment(wl=wl, T=25.0)
-    css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
-    modes = [mw.compute_modes(cs, num_modes=num_modes) for cs in css]
-    S, pm = mw.compute_s_matrix(modes, cells=cells)
+    S, pm = device_s_matrix(
+        cells,
+        env,
+        num_modes=num_modes,
+        parallel=parallel,
+        compute_modes=compute_modes,
+    )
     S = np.asarray(S)
+    cs_in = mw.CrossSection.from_cell(cell=cells[0], env=env)
+    cs_out = mw.CrossSection.from_cell(cell=cells[-1], env=env)
+    modes_in = solver(cs_in, num_modes=num_modes)
+    modes_out = solver(cs_out, num_modes=num_modes)
 
     def centroid(mode: mw.Mode) -> float:
         density = np.abs(mode.Ex) ** 2
         return float(np.sum(mode.cs.mesh.Xx * density) / np.sum(density))
 
     in_idx = min(
-        range(min(2, len(modes[0]))), key=lambda i: centroid(modes[0][i])
+        range(min(2, len(modes_in))), key=lambda i: centroid(modes_in[i])
     )  # input mode in waveguide B (bottom, drawn at negative x)
     t_bar = t_cross = 0.0
-    for i, mode in enumerate(modes[-1]):
+    for i, mode in enumerate(modes_out):
         power = float(np.abs(S[pm[f"right@{i}"], pm[f"left@{in_idx}"]]) ** 2)
         if centroid(mode) < 0:
             t_bar += power
