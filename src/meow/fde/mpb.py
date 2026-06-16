@@ -36,7 +36,7 @@ def compute_modes_mpb(
     num_modes: PositiveInt = 10,
     target_neff: PositiveFloat | None = None,
     resolution: PositiveFloat | None = None,
-    tolerance: float = 1e-9,
+    tolerance: float = 1e-6,
     post_process: Callable = post_process_modes,
 ) -> Modes:
     """Compute ``Modes`` for a given ``CrossSection`` with MPB.
