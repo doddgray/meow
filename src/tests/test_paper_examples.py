@@ -66,6 +66,71 @@ def test_dichroic_topology_matches_fig3a() -> None:
     assert np.isclose(y_short, y_a_final, atol=1e-6)
 
 
+def _y_intervals(
+    c: gf.Component, z: float, *, wgb_only: bool
+) -> list[tuple[float, float]]:
+    """Lateral (y) extents of the Si ridges crossing the plane at ``z``."""
+    import shapely
+
+    cut = shapely.LineString([(z, -6.0), (z, 6.0)])
+    out: list[tuple[float, float]] = []
+    for ps in c.get_polygons().values():
+        for p in ps:
+            try:
+                dbu = c.layout().dbu
+                pts = np.asarray(
+                    [(pt.x * dbu, pt.y * dbu) for pt in p.each_point_hull()]
+                )
+            except AttributeError:
+                pts = np.asarray(p)
+            inter = shapely.Polygon(pts).intersection(cut)
+            for geom in getattr(inter, "geoms", [inter]):
+                if geom.is_empty:
+                    continue
+                ys = np.asarray(geom.coords)[:, 1]
+                lo, hi = float(ys.min()), float(ys.max())
+                if wgb_only and 0.5 * (lo + hi) < -0.6:  # skip WGA (well below axis)
+                    continue
+                out.append((lo, hi))
+    return sorted(out)
+
+
+def test_dichroic_constant_width_gaps_and_single_ridge_ports() -> None:
+    """The refined WGB taper keeps constant total width and gaps, single-ridge
+    ports and finite (w_tip) taper tips; WGA tapers at constant gap."""
+    c = md.dichroic_filter()
+    total = md.w_b_total()
+    z1 = md.L1
+    z4 = md.L1 + md.L2 + md.L3 + md.L4
+
+    # single-ridge WGB ports (only the central ridge in the l_ext extensions)
+    assert len(_y_intervals(c, 1.0, wgb_only=True)) == 1
+    assert len(_y_intervals(c, z4 - 1.0, wgb_only=True)) == 1
+    # three ridges in the coupling region
+    coupling = _y_intervals(c, z1 + 200.0, wgb_only=True)
+    assert len(coupling) == 3
+
+    # constant total WGB width (envelope) in the taper and the coupling region
+    for z in (md.L_EXT + 20.0, z1 + 200.0):
+        ivs = _y_intervals(c, z, wgb_only=True)
+        envelope = ivs[-1][1] - ivs[0][0]
+        assert np.isclose(envelope, total, atol=2e-3)
+    # constant inter-ridge gaps (= g_b) in the coupling region
+    gaps = [coupling[i + 1][0] - coupling[i][1] for i in range(len(coupling) - 1)]
+    assert np.allclose(gaps, md.G_B, atol=2e-3)
+
+    # all taper tips have the finite minimum width w_tip (WGA tip just past z1)
+    wga = _y_intervals(c, z1 + 0.5, wgb_only=False)[0]
+    assert wga[1] - wga[0] == pytest.approx(md.W_TIP, abs=2e-3)
+
+    # WGA tapers at a constant edge-to-edge gap through section 2: its upper
+    # (WGB-facing) edge stays fixed while it widens
+    z2 = md.L1 + md.L2
+    edge_a = _y_intervals(c, z1 + 20.0, wgb_only=False)[0][1]
+    edge_b = _y_intervals(c, z2 - 20.0, wgb_only=False)[0][1]
+    assert np.isclose(edge_a, edge_b, atol=2e-3)
+
+
 def test_backend_resolver_and_device_s_matrix() -> None:
     from examples.papers import _backends
 

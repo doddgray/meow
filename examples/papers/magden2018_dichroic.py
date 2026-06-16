@@ -48,10 +48,14 @@ T_CLAD = 1.0
 
 # default C-band design values from the paper
 W_A = 0.318
-W_A_IN = 0.45  # assumption: single-mode input/output strip width (not specified)
 W_B = 0.25
 G_B = 0.10
 GAP = 0.75
+W_TIP = 0.05
+"""Minimum fabricable ridge/taper-tip width (all taper tips use this)."""
+L_EXT = 10.0
+"""Length the central WGB ridge extends beyond the outer-ridge taper tips, so
+the EME ports at the WGB edges are single-ridge waveguides."""
 # NOTE on end-to-end EME: our discretized FDE model yields a coupling of
 # kappa ~ 0.003/um at the 750 nm gap, for which the paper's 260 um
 # phase-matching taper is strongly diabatic (Landau-Zener jump
@@ -98,11 +102,12 @@ def lateral_positions(
 @gf.cell
 def dichroic_filter(
     w_a: float = W_A,
-    w_in: float = W_A_IN,
     w_b: float = W_B,
     g_b: float = G_B,
     gap: float = GAP,
     gap_out: float = GAP_OUT,
+    w_tip: float = W_TIP,
+    l_ext: float = L_EXT,
     l1: float = L1,
     l2: float = L2,
     l3: float = L3,
@@ -115,93 +120,99 @@ def dichroic_filter(
     cross-section along the gds y-axis (meow ``x``); the 220 nm Si height is
     added at extrusion time. The topology reproduces paper Fig. 3a:
 
-    - WGB (long-pass, segmented) runs **straight** on the lateral axis: a
-      central strip on x=0 that is the single-mode I/O waveguide (tapering
-      ``w_in`` -> ``w_b`` in section 1 and back in section 4) flanked by two
-      outer segments that grow from a point in section 1 and vanish in
-      section 4, so a single input strip becomes the three-segment WGB and
-      back into a single output strip.
+    - WGB (long-pass, segmented) runs **straight** on the lateral axis with a
+      **constant total width** (``3 w_b + 2 g_b``) and constant inter-ridge
+      gaps everywhere. Near each end the central and outer ridges taper
+      *simultaneously* - the outer ridges shrink to a ``w_tip`` tip while the
+      central ridge widens to take up the freed width - so the three-ridge WGB
+      smoothly becomes a single ridge. The central ridge then extends a further
+      ``l_ext`` past the outer-ridge tips, so the WGB ports (z=0, z=z4) are
+      single-ridge waveguides.
     - WGA (short-pass, solid strip) is **absent until section 2**, where it
-      tapers up from a point at the fixed coupling gap; in section 3 it bends
-      away from WGB (linear lateral shift to the final gap) and then runs
-      straight to its output.
+      tapers up from a ``w_tip`` tip at a **constant edge-to-edge gap** to WGB
+      (its centre shifts as it widens); in section 3 it bends away from WGB
+      (linear lateral shift to the final gap) and then runs straight to its
+      output.
+
+    All taper tips use the minimum fabricable width ``w_tip``.
     """
     c = gf.Component()
     z1, z2, z3, z4 = l1, l1 + l2, l1 + l2 + l3, l1 + l2 + l3 + l4
-    eps = 5e-4  # half-width floor so zero-width tips stay non-degenerate
-    seg_centers, y_a_couple, y_a_final = lateral_positions(
-        w_a, w_b, g_b, gap, gap_out
-    )
+    _, y_a_couple, y_a_final = lateral_positions(w_a, w_b, g_b, gap, gap_out)
+    total = w_b_total(w_b, g_b)  # constant WGB total width
+    wgb_left_edge = -total / 2  # constant WGA-facing edge of WGB
+    z_ol, z_or = l_ext, z4 - l_ext  # outer-ridge tip locations
 
     def strip(zs: np.ndarray, center: np.ndarray, half: np.ndarray) -> np.ndarray:
         upper = np.stack([zs, center + half], axis=1)
         lower = np.stack([zs, center - half], axis=1)[::-1]
         return np.concatenate([upper, lower])
 
-    zs_full = [
-        *np.linspace(0, z1, points_per_section, endpoint=False),
-        *np.linspace(z1, z3, points_per_section, endpoint=False),
-        *np.linspace(z3, z4, points_per_section, endpoint=False),
-        z4,
-    ]
-    zs_full = np.asarray(zs_full, dtype=float)
+    def zsamp(intervals: list[tuple[float, float]]) -> np.ndarray:
+        pts: list[float] = []
+        for a, b in intervals:
+            pts.extend(np.linspace(a, b, points_per_section, endpoint=False))
+        pts.append(intervals[-1][1])
+        return np.asarray(pts, dtype=float)
 
-    def wgb_central_half(z: float) -> float:
-        if z <= z1:  # section 1: input strip narrows into the central segment
-            return 0.5 * (w_in + (w_b - w_in) * z / l1)
+    def outer_t(z: float) -> float:
+        """Outer-ridge taper fraction: 0 at the tips, 1 in the coupling region."""
+        if z <= z_ol:
+            return 0.0
+        if z < z1:
+            return (z - z_ol) / (z1 - z_ol)
         if z <= z3:
-            return 0.5 * w_b
-        return 0.5 * (w_b + (w_in - w_b) * (z - z3) / l4)  # section 4: widen out
+            return 1.0
+        if z < z_or:
+            return (z_or - z) / (z_or - z3)
+        return 0.0
 
-    def wgb_outer_half(z: float) -> float:
-        if z <= z1:  # section 1: outer segments grow from a point
-            return max(0.5 * w_b * z / l1, eps)
-        if z <= z3:
-            return 0.5 * w_b
-        return max(0.5 * w_b * (1 - (z - z3) / l4), eps)  # section 4: vanish
+    def outer_w(z: float) -> float:
+        return w_tip + (w_b - w_tip) * outer_t(z)
 
-    # WGB central segment (the I/O strip) on x=0
-    central_half = np.array([wgb_central_half(z) for z in zs_full])
-    c.add_polygon(strip(zs_full, np.zeros_like(zs_full), central_half), layer=LAYER_WG)
-    # WGB outer segments
-    outer_half = np.array([wgb_outer_half(z) for z in zs_full])
-    for center in seg_centers:
-        if np.isclose(center, 0.0):
-            continue
-        c.add_polygon(
-            strip(zs_full, np.full_like(zs_full, center), outer_half), layer=LAYER_WG
-        )
+    def central_w(z: float) -> float:
+        # constant total width: central takes up whatever the outer ridges
+        # (w_tip where they are absent) leave; = w_b in the coupling region.
+        ow = outer_w(z) if z_ol <= z <= z_or else w_tip
+        return total - 2 * g_b - 2 * ow
 
-    # WGA: present from z1 (tip in section 2, bend away in section 3)
-    zs_a = np.asarray(
-        [
-            *np.linspace(z1, z2, points_per_section, endpoint=False),
-            *np.linspace(z2, z3, points_per_section, endpoint=False),
-            *np.linspace(z3, z4, points_per_section, endpoint=False),
-            z4,
-        ],
-        dtype=float,
+    # WGB central ridge (extends the full device length, single-ridge at ports)
+    zc = zsamp([(0, z_ol), (z_ol, z1), (z1, z3), (z3, z_or), (z_or, z4)])
+    c.add_polygon(
+        strip(zc, np.zeros_like(zc), np.array([0.5 * central_w(z) for z in zc])),
+        layer=LAYER_WG,
     )
+    # WGB outer ridges (only between the tips), at constant total width so their
+    # outer edge stays at +-total/2 and the gap to the central ridge stays g_b
+    zo = zsamp([(z_ol, z1), (z1, z3), (z3, z_or)])
+    ow_half = np.array([0.5 * outer_w(z) for z in zo])
+    oc = np.array([total / 2 - 0.5 * outer_w(z) for z in zo])  # outer-ridge centre
+    for sign in (-1.0, 1.0):
+        c.add_polygon(strip(zo, sign * oc, ow_half), layer=LAYER_WG)
 
-    def wga_half(z: float) -> float:
-        if z <= z2:  # section 2: taper up from a point
-            return max(0.5 * w_a * (z - z1) / l2, eps)
-        return 0.5 * w_a
+    # WGA: present from z1 (tip in section 2 at constant gap, bend in section 3)
+    za = zsamp([(z1, z2), (z2, z3), (z3, z4)])
+
+    def wga_w(z: float) -> float:
+        if z <= z2:  # section 2: taper up from a w_tip tip
+            return w_tip + (w_a - w_tip) * (z - z1) / l2
+        return w_a
 
     def wga_center(z: float) -> float:
-        if z <= z2:
-            return y_a_couple
+        if z <= z2:  # constant gap: WGA near (upper) edge fixed at wgb_left_edge-gap
+            return (wgb_left_edge - gap) - 0.5 * wga_w(z)
         if z <= z3:  # section 3: straight linear bend away from WGB
             return y_a_couple + (y_a_final - y_a_couple) * (z - z2) / l3
         return y_a_final
 
-    a_center = np.array([wga_center(z) for z in zs_a])
-    a_half = np.array([wga_half(z) for z in zs_a])
-    c.add_polygon(strip(zs_a, a_center, a_half), layer=LAYER_WG)
+    a_center = np.array([wga_center(z) for z in za])
+    a_half = np.array([0.5 * wga_w(z) for z in za])
+    c.add_polygon(strip(za, a_center, a_half), layer=LAYER_WG)
 
-    c.add_port("in0", center=(0.0, 0.0), width=w_in, orientation=180, layer=LAYER_WG)
+    w_port = central_w(0.0)  # single-ridge WGB port width
+    c.add_port("in0", center=(0.0, 0.0), width=w_port, orientation=180, layer=LAYER_WG)
     c.add_port(
-        "long_pass", center=(z4, 0.0), width=w_in, orientation=0, layer=LAYER_WG
+        "long_pass", center=(z4, 0.0), width=w_port, orientation=0, layer=LAYER_WG
     )
     c.add_port(
         "short_pass",
@@ -430,13 +441,34 @@ def device_cells(
     cells_per_section: tuple[int, int, int, int] = (6, 8, 12, 6),
     lengths: tuple[float, float, float, float] = (L1, L2, L3, L4),
     mesh: mw.Mesh2D | None = None,
+    l_ext: float = L_EXT,
 ) -> list[mw.Cell]:
-    """Discretize the four filter sections into EME cells."""
+    """Discretize the four filter sections into EME cells.
+
+    When a section has at least two cells, the first cell of section 1 and the
+    last cell of section 4 are made exactly ``l_ext`` long, so they coincide
+    with the single-ridge WGB extensions and the EME input/output ports are
+    single-ridge cross-sections.
+    """
     structs = extrude_filter(component)
     mesh = mesh or device_mesh()
+    n1, n2, n3, n4 = cells_per_section
+    l1, l2, l3, l4 = lengths
     Ls: list[float] = []
-    for n, length in zip(cells_per_section, lengths, strict=True):
-        Ls.extend([length / n] * n)
+    # section 1: single-ridge port cell (l_ext) + uniform taper, if room
+    if n1 >= 2 and 0 < l_ext < l1:
+        Ls.append(l_ext)
+        Ls.extend([(l1 - l_ext) / (n1 - 1)] * (n1 - 1))
+    else:
+        Ls.extend([l1 / n1] * n1)
+    Ls.extend([l2 / n2] * n2)
+    Ls.extend([l3 / n3] * n3)
+    # section 4: uniform taper + single-ridge port cell (l_ext), if room
+    if n4 >= 2 and 0 < l_ext < l4:
+        Ls.extend([(l4 - l_ext) / (n4 - 1)] * (n4 - 1))
+        Ls.append(l_ext)
+    else:
+        Ls.extend([l4 / n4] * n4)
     return mw.create_cells(structs, mesh, np.asarray(Ls), z_min=0.0)
 
 
