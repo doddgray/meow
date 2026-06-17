@@ -289,6 +289,96 @@ def test_dichroic_designer_thickness_sweep_setup() -> None:
     assert plat.max_length == pytest.approx(2000.0)
 
 
+def _minimal_slurm_design() -> object:
+    """A tiny manually-built design (avoids the expensive design_dichroic)."""
+    from examples.papers import dichroic_designer as dd
+    from examples.papers import magden2018_dichroic as md
+
+    plat = dd.Platform(
+        core=mw.silicon_nitride,
+        clad=mw.silicon_oxide,
+        core_thickness=0.20,
+        min_tip=0.05,
+        min_gap=0.05,
+        max_length=2000.0,
+        clad_thickness=1.0,
+    )
+    wgb = dd.WGB(0.20, 0.05, 3)
+    w_a, gap = 0.5, 0.6
+    comp = md.dichroic_filter(
+        w_a=w_a,
+        w_b=wgb.rail_width,
+        g_b=wgb.gap,
+        gap=gap,
+        gap_out=2.0,
+        w_tip=0.05,
+        l1=10,
+        l2=10,
+        l3=10,
+        l4=10,
+    )
+    return dd.DichroicDesign(
+        platform=plat,
+        cutoff_wl=1.0,
+        wgb=wgb,
+        w_a=w_a,
+        gap=gap,
+        lengths=(10, 10, 10, 10),
+        kappa=0.005,
+        dn_dw=1.0,
+        extinction_db=20.0,
+        component=comp,
+    )
+
+
+def test_slurm_designer_executor_and_cells(tmp_path: Path) -> None:
+    """The slurm example builds an executor and slices a device into cells."""
+    from examples.papers import dichroic_designer_slurm as ds
+
+    # make_executor honours the cluster argument (debug -> in-process executor)
+    executor = ds.make_executor(folder=tmp_path / "jobs", cluster="debug")
+    assert hasattr(executor, "submit")
+
+    design = _minimal_slurm_design()
+    cells = ds.device_cells(design, num_cells=4, res=0.1)
+    assert len(cells) == 4
+    # the cells tile the full device length end-to-end
+    assert cells[0].z_min == pytest.approx(0.0)
+    assert cells[-1].z_max == pytest.approx(float(design.component.xmax))
+
+
+def test_slurm_designer_blocking_and_concurrent_agree(tmp_path: Path) -> None:
+    """Blocking and async EME paths give the same port powers (debug executor)."""
+    import asyncio
+
+    from examples.papers import dichroic_designer_slurm as ds
+
+    design = _minimal_slurm_design()
+    eme_kwargs = {"num_cells": 4, "num_modes": 2, "res": 0.1}
+
+    blocking = ds.run_blocking(
+        [design],
+        executor=ds.make_executor(folder=tmp_path / "blocking", cluster="debug"),
+        **eme_kwargs,
+    )
+    concurrent = asyncio.run(
+        ds.run_concurrent(
+            [design],
+            executor=ds.make_executor(folder=tmp_path / "concurrent", cluster="debug"),
+            **eme_kwargs,
+        )
+    )
+    assert set(blocking) == set(concurrent) == {"1000nm"}
+    for key in blocking:
+        b_short, b_long = blocking[key]
+        c_short, c_long = concurrent[key]
+        assert b_short == pytest.approx(c_short, abs=1e-9)
+        assert b_long == pytest.approx(c_long, abs=1e-9)
+        # power is conserved/split between the two output ports
+        assert 0.0 <= b_short <= 1.0
+        assert 0.0 <= b_long <= 1.0
+
+
 # --- Kwolek 2026: TFLN FAQUAD combiner ---
 
 

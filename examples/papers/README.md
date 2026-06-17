@@ -118,6 +118,26 @@ waveguides). For each thickness it writes a result figure and a grid placing
 each optimized device layout next to its simulated (coupled-mode) transmission
 spectrum.
 
+`dichroic_designer_slurm.py` is a **slurm-cluster version** of the Si3N4
+designer. It designs the same splitters and then runs a *full-device EME* of
+each one with the parallel slice-group engine
+(`meow.compute_s_matrix_parallel`), distributing the per-slice mode solves as
+independent cluster jobs through a `meow.slurm_executor`. It exposes two
+workflows over a list of designs:
+
+- **blocking** (`run_blocking`): each device's EME is parallelized across the
+  cluster, and the designs are processed one after another (`eme_ports` ->
+  `meow.compute_s_matrix_parallel`); and
+- **concurrent / async** (`run_concurrent`): every device's EME is submitted at
+  once and awaited together with `asyncio.gather`
+  (`aeme_ports` -> `meow.acompute_s_matrix_parallel`), so all the design
+  workflows' jobs are in flight on the cluster simultaneously.
+
+Because submitit persists each job (payload, logs and result) in its job
+`folder`, the concurrent jobs can also be submitted from one python session and
+their results collected from a *different* session - see "Running EME on a
+slurm cluster" below.
+
 ## Running
 
 ```sh
@@ -126,6 +146,7 @@ uv run python -m examples.papers.kwolek2026_figures
 uv run python -m examples.papers.dichroic_designer
 uv run python -m examples.papers.dichroic_designer_si3n4
 uv run python -m examples.papers.dichroic_designer_si3n4_thickness
+uv run python -m examples.papers.dichroic_designer_slurm
 ```
 
 Figures are written to `examples/papers/figures/`. The default settings take
@@ -148,6 +169,112 @@ Both examples are backend- and parallel-aware (see `_backends.py`):
 ```sh
 MEOW_PAPER_BACKEND=mpb uv run python -m examples.papers.magden2018_figures
 MEOW_PAPER_PARALLEL=1 uv run python -m examples.papers.kwolek2026_figures
+```
+
+### Running EME on a slurm cluster
+
+`dichroic_designer_slurm.py` distributes the per-slice mode solves of each
+device's EME as independent jobs via `meow.slurm_executor`, which wraps a
+[submitit](https://github.com/facebookincubator/submitit) `AutoExecutor`. The
+same code runs the jobs as local subprocesses, in-process, or on a real slurm
+cluster - only the executor's `cluster` selector changes.
+
+**1. Install submitit.** It is an optional dependency, needed on the machine
+that *submits* the jobs (a slurm login node, or your laptop for local runs) and
+on the cluster *compute* nodes that run them:
+
+```sh
+pip install submitit          # or: uv pip install submitit
+```
+
+**2. Pick an executor backend.** The example builds its executor through
+`make_executor(folder, cluster, *, timeout_min, cpus_per_task, mem_gb,
+slurm_partition)`, which forwards to `meow.slurm_executor`. The `cluster`
+argument (or the `MEOW_SLURM_CLUSTER` environment variable) selects the
+backend:
+
+| `cluster`  | where jobs run                          | use for                          |
+| ---------- | --------------------------------------- | -------------------------------- |
+| `"debug"`  | in the calling process (serial)         | quick checks / the test suite    |
+| `"local"`  | local subprocesses (`submitit` local)   | a multi-core workstation (default here) |
+| `"slurm"`  | submitted to slurm via `sbatch`         | a real cluster                   |
+| `None`     | slurm if available, else local          | auto-detect                      |
+
+By default the example uses `"local"` so it runs anywhere. To dispatch to slurm,
+set the environment variables on the login node and run the module:
+
+```sh
+export MEOW_SLURM_CLUSTER=slurm
+export MEOW_SLURM_PARTITION=cpu      # your cluster's partition name
+export MEOW_SLURM_FOLDER=$HOME/meow_dichroic_jobs   # on a shared filesystem
+uv run python -m examples.papers.dichroic_designer_slurm
+```
+
+**3. Configure the slurm resources.** `make_executor`/`slurm_executor` expose
+the common per-job knobs - `timeout_min` (wall-clock limit), `cpus_per_task`,
+`mem_gb`, `slurm_partition` - and pass any extra keyword through to
+submitit's `update_parameters` (e.g. `slurm_array_parallelism`, `gpus_per_node`,
+`slurm_additional_parameters={"account": "..."}`). Size `cpus_per_task`/`mem_gb`
+to a single cross-section mode solve, since each job solves a small group of
+slices (a triplet or a pair of cells), not the whole device. The
+`MEOW_SLURM_PARTITION` env var overrides the partition without editing code.
+
+**4. Use a shared filesystem.** submitit communicates with each job entirely
+through its `folder` (the pickled callable + arguments go in, logs and the
+pickled result come out). On a cluster that folder **must live on a filesystem
+visible to both the login node and the compute nodes** (e.g. your `$HOME` or a
+scratch mount) - set it with `MEOW_SLURM_FOLDER`. Each job there is a
+self-contained record, which is what enables multi-session collection (below).
+
+**5. Match the software stack on the compute nodes.** The parallel engine
+re-solves shared boundary cells in separate jobs and checks that they return
+identical effective indices, so every job must run the *same deterministic*
+mode solver and the *same* meow/tidy3d (or MPB) versions as the submitter.
+submitit embeds the submitting interpreter (`sys.executable`) in the generated
+sbatch script, so the cleanest approach is to **submit from the exact
+environment you want the jobs to run in** - activate your meow venv/conda env on
+the login node before launching - so the compute nodes import the same `meow`
+and backend. If your cluster needs extra job setup (module loads, sourcing a
+conda env), pass it through with submitit's `setup` parameter, e.g.
+`make_executor(..., setup=["module load anaconda", "conda activate meow"])`
+(forwarded to `update_parameters`).
+
+**Blocking vs. async execution.** Both workflows submit the *same* cluster
+jobs; they differ only in how the submitting session waits:
+
+- `run_blocking(designs, executor=...)` parallelizes one device's EME across the
+  cluster, blocks until it finishes, then moves to the next device. Simplest;
+  the cluster is busy with one device at a time.
+- `run_concurrent(designs, executor=...)` is `async`: it submits *every*
+  device's jobs up front and awaits them together with `asyncio.gather`
+  (`meow.acompute_s_matrix_parallel` polls the jobs without blocking the event
+  loop), so all the design workflows are in flight at once and the cluster's
+  scheduler packs them across all available nodes. Drive it with
+  `asyncio.run(run_concurrent(designs, executor=make_executor()))`.
+
+**Running across multiple python sessions.** Because every job is persisted in
+the submitit `folder`, submission and collection do not have to happen in the
+same process. A long sweep can be launched from one (short-lived) session and
+its results gathered later from another, as long as both point
+`MEOW_SLURM_FOLDER` at the *same shared folder* and the jobs outlive the
+submitting process (true for `cluster="slurm"`, where the work runs under
+`sbatch`, not inside your python process). Concretely: call `make_executor()`
+with a fixed `folder`, submit with `executor.submit(...)` /
+`compute_s_matrix_parallel`, record the returned submitit job ids, and in a
+second session reconstruct the jobs from that folder (e.g.
+`submitit.AutoExecutor(folder=...)` / `submitit.SlurmJob(folder=..., job_id=...)`)
+and read their `.result()`. This lets several design workflows run concurrently
+on the cluster while you start, stop and reattach python sessions on the login
+node.
+
+```sh
+# session A (login node): launch the sweep on the cluster
+MEOW_SLURM_CLUSTER=slurm MEOW_SLURM_PARTITION=cpu \
+MEOW_SLURM_FOLDER=$HOME/meow_dichroic_jobs \
+  uv run python -m examples.papers.dichroic_designer_slurm
+
+# session B (later, same $MEOW_SLURM_FOLDER): collect results from the
+# persisted submitit jobs once they have finished
 ```
 
 Note on fidelity: quantitative numbers (cutoff wavelength, dB-level losses
