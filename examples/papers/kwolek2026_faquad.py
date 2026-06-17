@@ -18,13 +18,17 @@ Design workflow (paper Sec. 2, Eqs. 8-12):
    the symmetric-supermode splitting at several gaps and fit to
    ``kappa = kappa_0 * exp(-g / g_0)``; the phase-mismatch slope
    ``s = d(delta beta)/d(TW)`` is extracted from isolated-waveguide solves.
-2. Closed-form FAQUAD geometry: a constant minimum-gap section of length
-   ``l_m`` (gap ``g_m``, Region I) is connected by curvature-limited cubic
-   transitions ``g(z) = g_m + (2/3) a^2 (|z| - l_m/2)^3`` (Region II) up to
-   the decoupling gap ``g_c``; the FAQUAD mixing angle ``chi(z)`` follows
-   from the constant-adiabaticity condition (Eq. 11) with
-   ``eta = 1 / (kappa_m (l_m + 2/3 Gamma(1/3) z_0))`` (Eq. 12), and the
-   top-width-difference taper is ``dTW(z) = kappa(z) cot(chi(z)) / s``.
+2. FAQUAD geometry: a constant minimum-gap section of length ``l_m`` (gap
+   ``g_m``, Region I) is connected by Euler (clothoid) S-bend separations,
+   parameterized by their lateral offset and maximum waveguide-axis angle,
+   that smoothly open the gap from ``g_m`` to the final gap ``g_f`` past the
+   decoupling gap ``g_c``. The FAQUAD mixing angle ``chi(z)`` follows from
+   the constant-adiabaticity condition (Eq. 11) -- with the adiabaticity
+   parameter ``eta`` fixed by ``chi(z->end) = pi`` (Eq. 12) -- evaluated for
+   the S-bend coupling envelope; the top-width difference is
+   ``dTW(z) = kappa(z) cot(chi(z)) / s`` in Regions I-II and is linearly
+   tapered to zero beyond ``g_c`` (Region III), so it vanishes at the device
+   ends.
 3. EME validation: at the fundamental harmonic (FH, 1550 nm) the input
    adiabatically transfers to the cross port (combiner), while at the
    second harmonic (SH, 775 nm) the strongly-confined mode stays in the bar
@@ -38,7 +42,8 @@ from functools import lru_cache
 
 import gdsfactory as gf
 import numpy as np
-from scipy.special import gamma as gamma_fn
+from gdsfactory import path as gp
+from scipy.integrate import cumulative_trapezoid
 
 import meow as mw
 
@@ -59,8 +64,67 @@ G_C = 1.20
 G_F = 3.0
 """Final gap between the output ports."""
 
+L_M = 264.0
+"""Constant-gap (Region I) length [um] (paper Sec. 2, final design)."""
+
+THETA_MAX_DEG = 3.0
+"""Maximum waveguide-axis angle of the Euler S-bend separation [deg].
+
+The lateral separation that opens the gap from ``g_m`` to ``g_f`` is realized
+with Euler (clothoid) S-bends whose tangent angle rises smoothly from zero to
+this maximum (relative to the propagation/horizontal axis) at the inflection
+and back to zero, giving curvature-continuous, low-loss routing.
+"""
+
 T_BOX = 1.2
 """Modeled SiO2 under-cladding thickness."""
+
+
+def _ensure_pdk() -> None:
+    """Activate the generic gdsfactory PDK if none is active (for euler paths)."""
+    try:
+        gf.get_active_pdk()
+    except ValueError:
+        gf.gpdk.PDK.activate()
+
+
+def euler_sbend(
+    lateral_offset: float, max_axis_angle_deg: float, npoints: int = 400
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sampled Euler (clothoid) S-bend parameterized by offset and max angle.
+
+    The S-bend is two back-to-back Euler bends, ``euler(+theta)`` then
+    ``euler(-theta)``, so the waveguide-axis angle (relative to the horizontal
+    propagation axis) rises smoothly from zero to ``+max_axis_angle_deg`` at
+    the inflection and back to zero, with continuous curvature throughout. The
+    minimum radius is scaled so the net lateral displacement equals
+    ``lateral_offset``.
+
+    Args:
+        lateral_offset: net transverse displacement of the bend [um].
+        max_axis_angle_deg: peak tangent angle magnitude relative to the
+            horizontal (propagation) axis [deg].
+        npoints: samples per Euler segment.
+
+    Returns:
+        ``(z, y)`` arrays of the centerline, starting at ``(0, 0)`` with a
+        monotonically increasing ``z`` (propagation) coordinate.
+    """
+    _ensure_pdk()
+    theta = float(max_axis_angle_deg)
+
+    def build(radius: float) -> tuple[np.ndarray, np.ndarray]:
+        p1 = gp.euler(radius=radius, angle=+theta, p=1.0, npoints=npoints)
+        p2 = gp.euler(radius=radius, angle=-theta, p=1.0, npoints=npoints)
+        path = gp.Path()
+        path.append(p1)
+        path.append(p2)
+        pts = np.asarray(path.points, dtype=float)
+        return pts[:, 0] - pts[0, 0], pts[:, 1] - pts[0, 1]
+
+    _, y = build(1.0)
+    radius = lateral_offset / (y[-1] - y[0])
+    return build(radius)
 
 
 def ln_material(wl: float) -> mw.AnisotropicMaterial:
@@ -99,16 +163,28 @@ def sio2_material(wl: float) -> mw.IndexMaterial:
 
 
 class FaquadDesign:
-    """Closed-form FAQUAD coupler geometry from calibrated kappa(g) data.
+    """FAQUAD coupler geometry from calibrated kappa(g) data, with Euler S-bends.
+
+    The constant-gap interaction section (Region I, length ``l_m``, gap
+    ``g_m``) is connected on either side to Euler (clothoid) S-bend
+    separations that smoothly open the gap from ``g_m`` to the final gap
+    ``g_f`` (paper Fig. 1a/1b). Because the S-bend curvature is continuous,
+    the gap ``g(z)`` and -- through the constant-adiabaticity condition -- the
+    coupling angle ``chi(z)`` and top-width difference ``dTW(z)`` all vary
+    smoothly with position. The decoupling gap ``g_c`` (end of the FAQUAD
+    evolution) is reached partway along the S-bend; beyond it (Region III)
+    ``dTW`` is linearly tapered back to zero at the device ends, as in the
+    paper.
 
     Args:
         kappa_0: coupling prefactor [1/um] of ``kappa = kappa_0 exp(-g/g_0)``.
         g_0: coupling decay length [um].
         dbeta_dtw: phase-mismatch slope d(delta beta)/d(top width) [1/um^2].
         l_m: length of the constant-gap (Region I) section [um].
-        a: curvature parameter of the cubic gap transitions [1/um].
-        dtw_max: maximum top-width difference [um].
-        l_sep: length of the Region III separation/taper section [um].
+        theta_max_deg: maximum waveguide-axis angle of the Euler S-bend [deg].
+        g_c: decoupling gap ending the FAQUAD evolution [um].
+        g_f: final gap between the output ports [um].
+        dtw_max: fabrication limit on the top-width difference [um].
     """
 
     def __init__(
@@ -116,76 +192,105 @@ class FaquadDesign:
         kappa_0: float,
         g_0: float,
         dbeta_dtw: float,
-        l_m: float = 400.0,
-        a: float = 0.004,
-        dtw_max: float = 0.15,
-        l_sep: float = 150.0,
+        l_m: float = L_M,
+        theta_max_deg: float = THETA_MAX_DEG,
+        g_c: float = G_C,
+        g_f: float = G_F,
+        dtw_max: float = 0.5,
     ) -> None:
         self.kappa_0 = kappa_0
         self.g_0 = g_0
         self.dbeta_dtw = dbeta_dtw
         self.l_m = l_m
-        self.a = a
+        self.theta_max_deg = theta_max_deg
+        self.g_c = g_c
+        self.g_f = g_f
         self.dtw_max = dtw_max
-        self.l_sep = l_sep
-
         self.kappa_m = kappa_0 * np.exp(-G_M / g_0)
-        self.z_0 = (3 * g_0 / (2 * a**2)) ** (1 / 3)
-        # paper Eq. 12: constant adiabaticity parameter
-        self.eta = 1.0 / (self.kappa_m * (l_m + (2 / 3) * gamma_fn(1 / 3) * self.z_0))
-        # half-length of the cubic transition (up to the decoupling gap g_c)
-        self.z_c = self.l_m / 2 + (1.5 * (G_C - G_M) / a**2) ** (1 / 3)
-        self.half_length = self.z_c + l_sep
+
+        # Euler S-bend that opens each waveguide laterally by (g_f - g_m)/2,
+        # i.e. opens the edge-to-edge gap from g_m to g_f.
+        z_sb, y_sb = euler_sbend((g_f - G_M) / 2.0, theta_max_deg)
+        self._z_sb = l_m / 2 + z_sb  # device coordinate (positive half)
+        self._g_sb = G_M + 2 * y_sb  # gap along the S-bend
+        self.l_sep = float(z_sb[-1])  # S-bend (separation) length per side
+        self.half_length = float(self._z_sb[-1])
+        # device coordinate where the gap reaches the decoupling gap g_c
+        self.z_c = float(np.interp(g_c, self._g_sb, self._z_sb))
+
+        # chi(z) for a constant adiabaticity parameter eta, integrated
+        # numerically: cos(chi) = -2 eta int_0^z kappa dz', with chi(0) = pi/2
+        # and eta fixed by chi(half_length) = pi (paper Eq. 11-12 generalized
+        # to the Euler-S-bend coupling envelope).
+        zg = np.linspace(-self.half_length, self.half_length, 8001)
+        integral = cumulative_trapezoid(self.kappa(zg), zg, initial=0.0)
+        integral -= np.interp(0.0, zg, integral)
+        self.eta = 1.0 / (2.0 * integral[-1])
+        self._zg = zg
+        self._chi = np.arccos(np.clip(-2.0 * self.eta * integral, -1.0, 1.0))
+        # signed top-width difference at the decoupling gap (+z_c side, < 0),
+        # from which Region III is linearly tapered to zero.
+        self._dtw_c = float(self._dtw_faquad(self.z_c))
 
     def gap(self, z: float | np.ndarray) -> np.ndarray:
-        """Edge-to-edge gap g(z); z=0 is the device center (paper Eq. 9)."""
+        """Edge-to-edge gap g(z); z=0 is the device center.
+
+        Constant ``g_m`` in Region I, then the Euler S-bend profile that opens
+        smoothly to ``g_f`` (symmetric about z=0).
+        """
         z = np.asarray(z, dtype=float)
         az = np.abs(z)
-        g = np.full_like(z, G_M)
-        cubic = (az > self.l_m / 2) & (az <= self.z_c)
-        g = np.where(cubic, G_M + (2 / 3) * self.a**2 * (az - self.l_m / 2) ** 3, g)
-        # Region III: separate further to the final gap (cosine-smoothed)
-        sep = az > self.z_c
-        t = np.clip((az - self.z_c) / self.l_sep, 0.0, 1.0)
-        g = np.where(sep, G_C + (G_F - G_C) * 0.5 * (1 - np.cos(np.pi * t)), g)
-        return g
+        return np.where(
+            az <= self.l_m / 2,
+            G_M,
+            np.interp(az, self._z_sb, self._g_sb),
+        )
 
     def kappa(self, z: float | np.ndarray) -> np.ndarray:
         """Coupling profile kappa(z) = kappa_0 exp(-g(z)/g_0) (paper Eq. 10)."""
         return self.kappa_0 * np.exp(-self.gap(z) / self.g_0)
 
     def chi(self, z: float | np.ndarray) -> np.ndarray:
-        """FAQUAD mixing angle chi(z) (paper Eq. 11), chi(0) = pi/2.
+        """FAQUAD mixing angle chi(z), chi(0) = pi/2, monotonic 0 -> pi."""
+        return np.interp(np.asarray(z, dtype=float), self._zg, self._chi)
 
-        The integral of the cubic-tail coupling
-        ``int_0^u exp(-(t/z_0)^3) dt`` has the closed form
-        ``(z_0/3) Gamma(1/3) P(1/3, (u/z_0)^3)`` with P the regularized lower
-        incomplete gamma function, so chi is evaluated exactly.
-        """
-        from scipy.special import gammainc
+    def _dtw_faquad(self, z: float | np.ndarray) -> np.ndarray:
+        """Raw FAQUAD top-width difference dTW = 2 kappa cot(chi) / s.
 
-        z = np.asarray(z, dtype=float)
-        az = np.abs(z)
-        inner = -2 * self.eta * self.kappa_m * np.clip(z, -self.l_m / 2, self.l_m / 2)
-        u = np.maximum(az - self.l_m / 2, 0.0)
-        tail = (self.z_0 / 3) * gamma_fn(1 / 3) * gammainc(1 / 3, (u / self.z_0) ** 3)
-        cos_chi = inner - 2 * self.eta * self.kappa_m * np.sign(z) * tail
-        return np.arccos(np.clip(cos_chi, -1.0, 1.0))
-
-    def dtw(self, z: float | np.ndarray) -> np.ndarray:
-        """Top-width difference dTW(z) realizing the FAQUAD mixing angle.
-
-        The supermode mixing angle satisfies ``tan(chi) = kappa / delta``
-        with the *half* mismatch ``delta = (beta_A - beta_B) / 2``, so the
-        full mismatch is ``2 kappa cot(chi)`` and the top-width difference
-        is ``dTW = 2 kappa cot(chi) / s`` (clipped to the fabrication
-        limit ``dtw_max``).
+        The supermode mixing angle satisfies ``tan(chi) = kappa / delta`` with
+        the *half* mismatch ``delta = (beta_A - beta_B)/2``, so the full
+        mismatch is ``2 kappa cot(chi)`` and the top-width difference is
+        ``dTW = 2 kappa cot(chi) / s`` (clipped to the fabrication limit).
         """
         chi = self.chi(z)
         with np.errstate(divide="ignore", invalid="ignore"):
             dbeta = 2 * self.kappa(z) / np.tan(chi)
-        dtw = np.nan_to_num(dbeta / self.dbeta_dtw, nan=0.0, posinf=np.inf)
+        dtw = np.nan_to_num(dbeta / self.dbeta_dtw, nan=0.0)
         return np.clip(dtw, -self.dtw_max, self.dtw_max)
+
+    def dtw(self, z: float | np.ndarray) -> np.ndarray:
+        """Top-width difference dTW(z), tapered linearly to zero past g_c.
+
+        In Regions I-II (gap up to the decoupling gap ``g_c``) dTW follows the
+        FAQUAD prescription; in Region III it is linearly tapered to zero at
+        the device ends, enhancing fabrication tolerance and bandwidth (paper
+        Sec. 2, Fig. 1b).
+        """
+        z = np.asarray(z, dtype=float)
+        az = np.abs(z)
+        span = self.half_length - self.z_c
+        ramp = np.clip((self.half_length - az) / span, 0.0, 1.0)
+        return np.where(
+            az <= self.z_c,
+            self._dtw_faquad(z),
+            np.sign(z) * self._dtw_c * ramp,
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"FaquadDesign(l_m={self.l_m:.1f}, theta_max_deg={self.theta_max_deg:.1f}, "
+            f"l_sep={self.l_sep:.1f}, z_c={self.z_c:.1f}, eta={self.eta:.3f})"
+        )
 
 
 # --- meow structures ---
@@ -334,21 +439,19 @@ def faquad_combiner(
     kappa_0: float,
     g_0: float,
     dbeta_dtw: float,
-    l_m: float = 400.0,
-    a: float = 0.004,
-    dtw_max: float = 0.15,
-    l_sep: float = 150.0,
+    l_m: float = L_M,
+    theta_max_deg: float = THETA_MAX_DEG,
     w_top: float = W_TOP,
-    num_points: int = 121,
+    num_points: int = 601,
 ) -> gf.Component:
     """Parametric FAQUAD wavelength combiner layout (paper Fig. 1a).
 
     Two rib waveguides whose top-width difference follows the FAQUAD taper
-    and whose gap follows the constant + cubic + separation profile. The
-    drawn polygons are the rib *top* widths; the angled sidewalls are added
-    at extrusion time.
+    and whose gap follows the constant-gap + Euler-S-bend separation profile.
+    The drawn polygons are the rib *top* widths; the angled sidewalls are
+    added at extrusion time.
     """
-    design = FaquadDesign(kappa_0, g_0, dbeta_dtw, l_m, a, dtw_max, l_sep)
+    design = FaquadDesign(kappa_0, g_0, dbeta_dtw, l_m, theta_max_deg)
     c = gf.Component()
     z = np.linspace(-design.half_length, design.half_length, num_points)
     gap = design.gap(z)

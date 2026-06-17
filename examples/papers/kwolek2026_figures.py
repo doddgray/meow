@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 
 import gdsfactory as gf
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -46,9 +47,19 @@ FIGDIR = Path(__file__).parent / "figures"
 
 WL_FH = 1.55
 WL_SH = 0.775
-RES = 0.06 if FAST else 0.03
-NUM_CELLS = 12 if FAST else 64
-NUM_MODES = 3 if FAST else 4
+# Accuracy knobs. The non-FAST values were raised for a converged
+# reproduction: a finer mode-solver grid (RES), more EME cells (NUM_CELLS),
+# and more mode-solver modes/nodes per cross-section (NUM_MODES).
+RES = 0.06 if FAST else 0.02
+NUM_CELLS = 12 if FAST else 120
+NUM_MODES = 3 if FAST else 6
+
+
+def _show(fig: plt.Figure) -> None:
+    """Display a freshly generated figure if an interactive backend is active."""
+    if not mpl.get_backend().lower().startswith("agg"):
+        fig.show()
+        plt.pause(0.1)
 
 # FDE backend ("tidy3d"/"mpb"/"lumerical" or MEOW_PAPER_BACKEND) and whether to
 # cascade the EME with the parallel slice-group engine (MEOW_PAPER_PARALLEL).
@@ -169,6 +180,7 @@ def figure1() -> dict[str, float]:
     )
     fig.tight_layout()
     fig.savefig(FIGDIR / "kwolek2026_fig1.png", dpi=150)
+    _show(fig)
     plt.close(fig)
     return results
 
@@ -228,6 +240,7 @@ def figure2() -> dict[str, float]:
     fig.suptitle("Kwolek 2026, Fig. 2: simulated combiner performance (EME)")
     fig.tight_layout()
     fig.savefig(FIGDIR / "kwolek2026_fig2.png", dpi=150)
+    _show(fig)
     plt.close(fig)
     return {
         "er_fh_db_min": float(np.min(er_fh)),

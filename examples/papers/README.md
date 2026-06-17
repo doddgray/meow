@@ -61,9 +61,11 @@ bar port).
 
 - `kwolek2026_faquad.py`: LN anisotropy via `AnisotropicMaterial` (uniaxial
   tensor), angled-sidewall rib extrusion, the FDE calibration step
-  (kappa(g) exponential fit + d(beta)/d(width) slope), the closed-form
-  FAQUAD geometry of the paper's Eqs. 8-12 (`FaquadDesign`), and the
-  parametric `faquad_combiner()` PCell.
+  (kappa(g) exponential fit + d(beta)/d(width) slope), the FAQUAD geometry
+  of the paper's Eqs. 8-12 (`FaquadDesign`) with Euler (clothoid) S-bend
+  separations -- parameterized by lateral offset and maximum waveguide-axis
+  angle -- giving a smooth gap and a top-width difference that returns to
+  zero at the device ends, and the parametric `faquad_combiner()` PCell.
 - `kwolek2026_figures.py`: reproduces Fig. 1 (layout, gap/width profiles,
   FAQUAD mixing angle, supermodes, EME field propagation at FH and SH) and
   Fig. 2 (extinction-ratio and loss spectra at FH and SH).

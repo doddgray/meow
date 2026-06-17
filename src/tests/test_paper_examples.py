@@ -396,26 +396,30 @@ def test_calibration(calibration: tuple[float, float, float]) -> None:
 
 def test_faquad_design_profiles(calibration: tuple[float, float, float]) -> None:
     design = kw.FaquadDesign(*calibration)
-    # gap profile: constant g_m in region I, g_c at the end of the cubic
+    # gap profile: constant g_m in region I, smoothly opening along the Euler
+    # S-bend through the decoupling gap g_c to the final gap g_f
     assert np.isclose(design.gap(0.0), kw.G_M)
     assert np.isclose(design.gap(design.l_m / 2), kw.G_M)
     assert np.isclose(design.gap(design.z_c), kw.G_C, atol=1e-6)
     assert np.isclose(design.gap(design.half_length), kw.G_F)
-    # eta from paper Eq. 12
-    from scipy.special import gamma as gamma_fn
-
-    eta_expected = 1.0 / (
-        design.kappa_m * (design.l_m + (2 / 3) * gamma_fn(1 / 3) * design.z_0)
-    )
-    assert np.isclose(design.eta, eta_expected)
+    # gap is smooth and monotonically non-decreasing away from the center
+    zc = np.linspace(0.0, design.half_length, 400)
+    assert np.all(np.diff(design.gap(zc)) >= -1e-9)
+    # adiabaticity parameter normalizes chi to sweep the full 0 -> pi range
+    assert design.eta > 0
+    assert np.isclose(design.chi(design.half_length), np.pi, atol=1e-6)
     # mixing angle: chi(0) = pi/2, antisymmetric about the center
     assert np.isclose(design.chi(0.0), np.pi / 2)
     z = np.linspace(-design.half_length, design.half_length, 31)
-    assert np.allclose(np.cos(design.chi(z)), -np.cos(design.chi(-z)), atol=1e-9)
+    assert np.allclose(np.cos(design.chi(z)), -np.cos(design.chi(-z)), atol=1e-6)
     assert np.all(np.diff(design.chi(z)) >= -1e-9)  # monotonic 0 -> pi
-    # top-width difference: antisymmetric and clipped to dtw_max
+    # top-width difference: antisymmetric, returns to zero at the device ends,
+    # and stays within the fabrication limit
     dtw = design.dtw(z)
     assert np.allclose(dtw, -dtw[::-1], atol=1e-9)
+    assert np.isclose(design.dtw(0.0), 0.0, atol=1e-9)
+    assert np.isclose(design.dtw(design.half_length), 0.0, atol=1e-9)
+    assert np.isclose(design.dtw(-design.half_length), 0.0, atol=1e-9)
     assert np.max(np.abs(dtw)) <= design.dtw_max + 1e-12
 
 
