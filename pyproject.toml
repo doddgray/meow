@@ -24,6 +24,7 @@ dev = [
   "pytest-xdist>=3.6.0",
   "pytest>=8.3.0",
   "ruff>=0.15.5",
+  "submitit>=1.5.0",
   "tmm>=0.2.0",
   "towncrier>=24.0.0",
   "ty==0.0.26",
@@ -153,6 +154,15 @@ select = ["ALL"]
   "RUF003",  # ambiguous-unicode-character-comment
   "S101",  # assert
   "SLF001",  # private-member-access
+  "T201"  # print
+]
+"examples/*" = [
+  "D103",  # undocumented-public-function
+  "D104",  # undocumented-public-package
+  "D107",  # undocumented-public-init
+  "D205",  # missing-blank-line-after-summary
+  "D402",  # docstring-starts-with-signature
+  "PLR0915",  # too-many-statements
   "T201"  # print
 ]
 "src/meow/mesh.py" = [

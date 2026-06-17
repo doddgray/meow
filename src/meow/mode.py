@@ -73,6 +73,13 @@ class Mode(BaseModel):
         """The TE polarization fraction of the mode."""
         return te_fraction(self)
 
+    @property
+    def effective_area(self) -> float:
+        """The (nonlinear) effective mode area [um^2]."""
+        from meow.fde.dispersion import effective_area  # fmt: skip
+
+        return effective_area(self)
+
     @cached_property
     def _pointing(self) -> tuple[ComplexArray2D, ComplexArray2D, ComplexArray2D]:
         """Calculate and cache the poynting vector."""

@@ -268,6 +268,19 @@ class Prism(Geometry3DBase):
         default="y",
         description="axis along which the polygon will be extruded ('x', 'y', or 'z').",
     )
+    sidewall_angle: float = Field(
+        default=0.0,
+        description=(
+            "the sidewall angle of the extrusion (in degrees, measured from "
+            "vertical). The drawn polygon defines the structure at the bottom "
+            "of the extrusion; positive angles shrink the structure with "
+            "increasing height, negative angles widen it."
+        ),
+    )
+
+    @property
+    def _tan_sidewall(self) -> float:
+        return float(np.tan(np.deg2rad(self.sidewall_angle)))
 
     def _project_axis_x(self, z: float) -> list[Geometry2DBase]:
         # x, y, z -> y, z, x
@@ -293,13 +306,17 @@ class Prism(Geometry3DBase):
             (y_min, _), (y_max, _) = intersection
             y_min, y_max = min(y_min, y_max), max(y_min, y_max)
             x_min, x_max = min(self.h_min, self.h_max), max(self.h_min, self.h_max)
-            rect = Rectangle(
-                x_min=x_min,
-                x_max=x_max,
-                y_min=y_min,
-                y_max=y_max,
+            if self.sidewall_angle == 0.0:
+                geoms_2d.append(
+                    Rectangle(x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max)
+                )
+                continue
+            trapezoid = _sidewall_cross_section(
+                y_min, y_max, x_min, x_max, self._tan_sidewall
             )
-            geoms_2d.append(rect)
+            if trapezoid is not None:
+                # height is along x here: (u, h) -> (y, x)
+                geoms_2d.append(Polygon2D(poly=trapezoid[:, ::-1]))
         return geoms_2d
 
     def _project_axis_y(self, z: float) -> list[Geometry2DBase]:
@@ -326,20 +343,35 @@ class Prism(Geometry3DBase):
             (_, x_min), (_, x_max) = intersection
             x_min, x_max = min(x_min, x_max), max(x_min, x_max)
             y_min, y_max = min(self.h_min, self.h_max), max(self.h_min, self.h_max)
-            rect = Rectangle(
-                x_min=x_min,
-                x_max=x_max,
-                y_min=y_min,
-                y_max=y_max,
+            if self.sidewall_angle == 0.0:
+                geoms_2d.append(
+                    Rectangle(x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max)
+                )
+                continue
+            trapezoid = _sidewall_cross_section(
+                x_min, x_max, y_min, y_max, self._tan_sidewall
             )
-            geoms_2d.append(rect)
+            if trapezoid is not None:
+                geoms_2d.append(Polygon2D(poly=trapezoid))
         return geoms_2d
 
     def _project_axis_z(self, z: float) -> list[Geometry2DBase]:
         # x, y, z -> x, y, z
-        if z < self.h_min or z < self.h_max:
+        h_min, h_max = min(self.h_min, self.h_max), max(self.h_min, self.h_max)
+        if z < h_min or z > h_max:
             return []
-        return [Polygon2D(poly=self.poly)]
+        if self.sidewall_angle == 0.0:
+            return [Polygon2D(poly=self.poly)]
+        # extrusion along the propagation axis: the slice is the polygon
+        # offset inward proportional to the height above the bottom.
+        offset = (z - h_min) * self._tan_sidewall
+        shrunk = sg.Polygon(self.poly).buffer(-offset, join_style="mitre")
+        polys = getattr(shrunk, "geoms", [shrunk])
+        return [
+            Polygon2D(poly=np.asarray(p.exterior.coords))
+            for p in polys
+            if not p.is_empty
+        ]
 
     def _project(self, z: float) -> list[Geometry2DBase]:
         if self.axis == "x":
@@ -429,6 +461,42 @@ class Prism(Geometry3DBase):
             "y": (0, 1, 0),
             "z": (0, 0, 1),
         }[self.axis]
+
+
+def _sidewall_cross_section(
+    u_min: float,
+    u_max: float,
+    h_min: float,
+    h_max: float,
+    tan_sidewall: float,
+) -> np.ndarray | None:
+    """Cross-section polygon of an extrusion slice with angled sidewalls.
+
+    The drawn extent ``[u_min, u_max]`` applies at the bottom of the extrusion
+    (``h_min``). Both sidewalls tilt inward by ``tan_sidewall`` per unit height,
+    giving a trapezoid; if they meet below ``h_max``, the cross-section
+    degenerates into a triangle. Returns the (u, h) polygon vertices, or None
+    for an empty cross-section.
+    """
+    width = u_max - u_min
+    if width <= 0:
+        return None
+    inset = (h_max - h_min) * tan_sidewall
+    if tan_sidewall > 0 and width - 2 * inset <= 0:
+        u_apex = 0.5 * (u_min + u_max)
+        h_apex = h_min + 0.5 * width / tan_sidewall
+        return np.array(
+            [(u_min, h_min), (u_max, h_min), (u_apex, h_apex)], dtype=np.float64
+        )
+    return np.array(
+        [
+            (u_min, h_min),
+            (u_max, h_min),
+            (u_max - inset, h_max),
+            (u_min + inset, h_max),
+        ],
+        dtype=np.float64,
+    )
 
 
 Geometry3D: TypeAlias = Box | Prism
