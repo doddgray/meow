@@ -70,14 +70,15 @@ bar port).
   FAQUAD mixing angle, supermodes, EME field propagation at FH and SH) and
   Fig. 2 (extinction-ratio and loss spectra at FH and SH).
 
-Validation anchors (full-quality run): chi(0) = pi/2 and the closed-form
-eta of Eq. 12 hold exactly; the FH input transfers adiabatically to the
-cross port (cross/bar = 0.63/0.28) while the SH stays in the bar port with
-17-19 dB extinction across 755-795 nm, close to the paper's > 19 dB; the
-FH loss is flat (~0.4 dB) across 1500-1600 nm. The remaining gap to the
-paper's dB-level figures (> 25 dB FH extinction, < 0.1 dB loss) is set by
-the example's EME discretization and by the difference between our
-FDE-calibrated coupling and the paper's; both improve with finer meshes,
+Validation anchors (full-quality run): chi(0) = pi/2 and the Euler-S-bend
+gap/dTW vary smoothly with dTW returning to zero at the device ends; the FH
+input transfers adiabatically to the cross port (cross/bar = 0.89/0.07) while
+the SH stays in the bar port with 22-25 dB extinction across 755-795 nm
+(above the paper's > 19 dB); the FH loss is flat (~0.18 dB) across
+1500-1600 nm. The remaining gap to the paper's dB-level FH figures
+(> 25 dB FH extinction) is set by the example's EME discretization and by
+the difference between our FDE-calibrated coupling and the paper's; both
+improve with finer meshes,
 more cells and more modes.
 
 ## Generalized dichroic beam-splitter designer
