@@ -87,19 +87,23 @@ def transmission_spectrum(
     wgb: WGB,
     res: float,
     n_fde: int = 5,
-    window: float = 0.08,
+    fit_window: float = 0.10,
+    max_window: float = 0.20,
+    gamma_span: float = 6.0,
     n_fine: int = 121,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Coupled-mode short/long-pass transmission spectrum of a designed device.
 
     The detuning ``delta(lambda) = 0.5 k0 (n_WGA - n_WGB)`` is sampled by FDE in
-    a window around the cutoff; the adiabatic short-pass power is
-    ``|T_A|^2 = 0.5 (1 + gamma / sqrt(1 + gamma^2))`` with ``gamma = delta /
-    kappa`` (paper Eq. 3), floored at the device's predicted Landau-Zener
-    extinction so the suppressed port cannot beat the device's adiabaticity.
+    a window around the cutoff and fit linearly; the plotted wavelength span is
+    then chosen so ``gamma = delta / kappa`` reaches +-``gamma_span`` (i.e. the
+    full roll-off is shown), capped at ``+-max_window``. The adiabatic short-pass
+    power is ``|T_A|^2 = 0.5 (1 + gamma / sqrt(1 + gamma^2))`` (paper Eq. 3),
+    floored at the device's predicted Landau-Zener extinction so the suppressed
+    port cannot beat the device's adiabaticity.
     """
     wl_c = design.cutoff_wl
-    wls_fde = np.linspace(wl_c * (1 - window), wl_c * (1 + window), n_fde)
+    wls_fde = np.linspace(wl_c * (1 - fit_window), wl_c * (1 + fit_window), n_fde)
     deltas = np.array(
         [
             0.5
@@ -111,8 +115,12 @@ def transmission_spectrum(
             for wl in wls_fde
         ]
     )
-    wls = np.linspace(wls_fde[0], wls_fde[-1], n_fine)
-    gamma = np.interp(wls, wls_fde, deltas) / max(design.kappa, 1e-9)
+    slope, intercept = np.polyfit(wls_fde, deltas, 1)  # delta ~ slope*wl + intercept
+    kappa = max(design.kappa, 1e-9)
+    half = gamma_span * kappa / abs(slope) if abs(slope) > 1e-12 else max_window * wl_c
+    half = min(half, max_window * wl_c)
+    wls = np.linspace(wl_c - half, wl_c + half, n_fine)
+    gamma = (slope * wls + intercept) / kappa
     floor = 10 ** (-design.extinction_db / 10)
     t_short = np.clip(analytical_transmission(gamma), floor, 1.0 - floor)
     return wls, t_short, 1.0 - t_short
@@ -217,10 +225,12 @@ def grid_figure(
         )
         ax_l.set_ylabel("x [um]", fontsize=8)
         wls, t_short, t_long = transmission_spectrum(plat, d, wgb, res)
-        ax_s.plot(wls * 1e3, 10 * np.log10(t_short), "C0", label="short (WGA)")
-        ax_s.plot(wls * 1e3, 10 * np.log10(t_long), "C3", label="long (WGB)")
+        ts_db = 10 * np.log10(t_short)
+        tl_db = 10 * np.log10(t_long)
+        ax_s.plot(wls * 1e3, ts_db, "C0", label="short (WGA)")
+        ax_s.plot(wls * 1e3, tl_db, "C3", label="long (WGB)")
         ax_s.axvline(d.cutoff_wl * 1e3, color="0.5", ls=":", lw=0.8)
-        ax_s.set_ylim(-max(35, d.extinction_db + 5), 2)
+        ax_s.set_ylim(max(-42.0, float(min(ts_db.min(), tl_db.min())) - 3), 2)
         ax_s.set_ylabel("T [dB]", fontsize=8)
         ax_s.grid(visible=True)
         if row == 0:
