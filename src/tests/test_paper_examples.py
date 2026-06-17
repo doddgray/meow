@@ -269,6 +269,26 @@ def test_dichroic_designer_si3n4_platform_and_width() -> None:
     assert w_a > plat.min_tip
 
 
+def test_dichroic_designer_thickness_sweep_setup() -> None:
+    """The Si3N4 thickness-sweep config spans 900-1200 nm (with 990 nm)."""
+    from examples.papers import dichroic_designer_si3n4_thickness as ts
+
+    # cutoffs cover 900-1200 nm and include 990 nm
+    assert ts.CUTOFFS.min() == pytest.approx(0.90)
+    assert ts.CUTOFFS.max() == pytest.approx(1.20)
+    assert any(np.isclose(ts.CUTOFFS, 0.99))
+    # 200/100/40 nm cores, each with a (progressively wider) sub-wavelength WGB
+    assert set(ts.THICKNESS_CONFIGS) == {200, 100, 40}
+    rails = [ts.THICKNESS_CONFIGS[t][2].rail_width for t in (200, 100, 40)]
+    assert rails == sorted(rails)  # thinner core -> wider rails
+    for t_nm, (t_um, _clad, wgb, _res) in ts.THICKNESS_CONFIGS.items():
+        assert t_um == pytest.approx(t_nm / 1000)
+        assert wgb.gap == pytest.approx(0.05)
+    plat = ts.platform(*ts.THICKNESS_CONFIGS[100][:2])
+    assert plat.core is mw.silicon_nitride
+    assert plat.max_length == pytest.approx(2000.0)
+
+
 # --- Kwolek 2026: TFLN FAQUAD combiner ---
 
 

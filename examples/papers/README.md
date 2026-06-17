@@ -110,6 +110,14 @@ designing splitters for cutoffs from 900 to 1200 nm in 50 nm steps. With a
 `figures/dichroic_designer_si3n4.png` shows the index crossings, the design and
 optimization outputs vs cutoff, and a designed device.
 
+`dichroic_designer_si3n4_thickness.py` sweeps three Si3N4 core thicknesses
+(200, 100, 40 nm) over the same cutoffs plus 990 nm. Thinner cores are more
+weakly confined, so each uses a wider sub-wavelength WGB and needs wider WGA
+strips (the 40 nm core sits near the edge of guidance, with micron-scale
+waveguides). For each thickness it writes a result figure and a grid placing
+each optimized device layout next to its simulated (coupled-mode) transmission
+spectrum.
+
 ## Running
 
 ```sh
@@ -117,6 +125,7 @@ uv run python -m examples.papers.magden2018_figures
 uv run python -m examples.papers.kwolek2026_figures
 uv run python -m examples.papers.dichroic_designer
 uv run python -m examples.papers.dichroic_designer_si3n4
+uv run python -m examples.papers.dichroic_designer_si3n4_thickness
 ```
 
 Figures are written to `examples/papers/figures/`. The default settings take
