@@ -245,6 +245,30 @@ def test_dichroic_designer_reproduces_magden_width() -> None:
     assert dd.solid_neff(plat, w_a + 0.03, 1.54, res=0.05) > n_b
 
 
+def test_dichroic_designer_si3n4_platform_and_width() -> None:
+    """The Si3N4 example designs a fabricable splitter in the 900-1200 nm band."""
+    from examples.papers import dichroic_designer as dd
+    from examples.papers import dichroic_designer_si3n4 as sn
+
+    plat = sn.si3n4_platform()
+    assert plat.core is mw.silicon_nitride
+    assert plat.clad is mw.silicon_oxide
+    assert plat.core_thickness == pytest.approx(0.20)
+    assert plat.etch_fraction == pytest.approx(1.0)  # fully etched -> no slab
+    assert plat.slab_thickness == pytest.approx(0.0)
+    assert plat.min_tip == pytest.approx(0.05)
+    assert plat.min_gap == pytest.approx(0.05)
+    assert plat.max_length == pytest.approx(2000.0)
+    # targeted cutoffs span 900-1200 nm in 50 nm steps
+    assert np.isclose(sn.TARGET_CUTOFFS[0], 0.90)
+    assert np.isclose(sn.TARGET_CUTOFFS[-1], 1.20)
+    assert np.allclose(np.diff(sn.TARGET_CUTOFFS), 0.05)
+    # a 1050 nm cutoff phase-matches at a fabricable WGA width
+    w_a = dd.phase_match_width(plat, 1.05, sn.WGB_DESIGN, res=0.05)
+    assert 0.30 < w_a < 0.65
+    assert w_a > plat.min_tip
+
+
 # --- Kwolek 2026: TFLN FAQUAD combiner ---
 
 

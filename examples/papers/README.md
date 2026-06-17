@@ -103,12 +103,20 @@ so the extinction estimate is approximate - validate a final design with a
 full EME. `main()` designs a few cutoffs on an SOI platform and writes
 `figures/dichroic_designer.png`.
 
+`dichroic_designer_si3n4.py` applies the designer to a **fully-etched 200 nm
+Si3N4 / SiO2 platform** (50 nm minimum tip width and gap, 2 mm length budget),
+designing splitters for cutoffs from 900 to 1200 nm in 50 nm steps. With a
+3x200 nm-rail WGB the phase-match WGA width sweeps ~410-480 nm across the band;
+`figures/dichroic_designer_si3n4.png` shows the index crossings, the design and
+optimization outputs vs cutoff, and a designed device.
+
 ## Running
 
 ```sh
 uv run python -m examples.papers.magden2018_figures
 uv run python -m examples.papers.kwolek2026_figures
 uv run python -m examples.papers.dichroic_designer
+uv run python -m examples.papers.dichroic_designer_si3n4
 ```
 
 Figures are written to `examples/papers/figures/`. The default settings take
