@@ -13,6 +13,13 @@ by the tidy3d backend, so the two backends solve nominally identical
 problems. MPB is a lossless (real-epsilon) solver: imaginary permittivity
 parts are ignored.
 
+MPB's eigensolver starts from randomized fields; this backend seeds that
+randomness deterministically (``seed``, fixed by default) so the same
+cross-section always yields the same mode basis. That makes it **parallel-safe**
+for the slice-group EME (:func:`meow.compute_s_matrix_parallel`), which
+re-solves shared boundary cells in separate processes and requires identical
+bases.
+
 Requires the ``meep``/``mpb`` python bindings, which are available from
 conda-forge (``conda install -c conda-forge pymeep``).
 """
@@ -38,6 +45,7 @@ def compute_modes_mpb(
     resolution: PositiveFloat | None = None,
     tolerance: float = 1e-6,
     post_process: Callable = post_process_modes,
+    seed: int | None = 0,
 ) -> Modes:
     """Compute ``Modes`` for a given ``CrossSection`` with MPB.
 
@@ -49,6 +57,12 @@ def compute_modes_mpb(
             to the cross-section mesh spacing).
         tolerance: ``find_k`` convergence tolerance.
         post_process: callable applied to the raw mode list before returning.
+        seed: deterministic seed for MPB's randomized initial fields. With a
+            fixed seed (the default) the same cross-section always yields the
+            same mode basis (ordering, sign and phase), which makes this backend
+            **parallel-safe**: the parallel slice-group EME re-solves shared
+            boundary cells in separate processes and requires identical bases.
+            Pass ``None`` to fall back to MPB's default time-seeded fields.
 
     Returns:
         The computed and post-processed collection of modes.
@@ -67,6 +81,31 @@ def compute_modes_mpb(
         msg = "You need to request at least 1 mode."
         raise ValueError(msg)
 
+    # Deterministically seed MPB's randomized initial eigenvectors so the same
+    # cross-section is solved identically in every (sub)process; restore MPB's
+    # default (time-based) seeding afterwards so global state is untouched.
+    if seed is not None:
+        mp.set_random_seed(seed)
+    try:
+        return _compute_modes_mpb(
+            cs, mp, mpb, num_modes, target_neff, resolution, tolerance, post_process
+        )
+    finally:
+        if seed is not None:
+            mp.restore_random_seed()
+
+
+def _compute_modes_mpb(
+    cs: CrossSection,
+    mp: Any,
+    mpb: Any,
+    num_modes: int,
+    target_neff: float | None,
+    resolution: float | None,
+    tolerance: float,
+    post_process: Callable,
+) -> Modes:
+    """Solve the MPB modes (seeding handled by :func:`compute_modes_mpb`)."""
     mesh = cs.mesh
     x_min, x_max = float(mesh.x.min()), float(mesh.x.max())
     y_min, y_max = float(mesh.y.min()), float(mesh.y.max())

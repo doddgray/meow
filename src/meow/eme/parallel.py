@@ -14,9 +14,10 @@ be transferred between jobs, which drastically reduces the memory and
 storage footprint at the cost of roughly 1.5x (triplets) to 2x (pairs)
 redundant mode solves. This relies on the mode solver being deterministic:
 the same cross section must yield the same mode basis (ordering, sign and
-phase) in every job, which holds for the default tidy3d-based solver
-(deterministic eigensolver seed + deterministic mode normalization) as long
-as all jobs run the same software stack. A consistency check on the
+phase) in every job. This holds for the default tidy3d-based solver
+(deterministic eigensolver seed + deterministic mode normalization) and for
+the MPB backend (which seeds its randomized initial fields deterministically),
+as long as all jobs run the same software stack. A consistency check on the
 effective indices of shared cells guards against violations.
 
 Jobs can run locally (subprocesses via ``ProcessPoolExecutor``, the default)
@@ -31,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import multiprocessing as mp
 import warnings
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from itertools import pairwise
@@ -120,6 +122,7 @@ def compute_group_result(
     num_modes: int = 10,
     compute_modes_kwargs: dict[str, Any] | None = None,
     interface_kwargs: dict[str, Any] | None = None,
+    compute_modes: Callable | None = None,
 ) -> GroupResult:
     """Solve one slice group: modes, overlaps and interface S-matrices.
 
@@ -135,11 +138,16 @@ def compute_group_result(
         num_modes: number of modes to compute per cell.
         compute_modes_kwargs: extra kwargs for ``compute_modes``.
         interface_kwargs: extra kwargs for ``compute_interface_s_matrix``.
+        compute_modes: the FDE backend to use (default:
+            ``meow.fde.compute_modes``, i.e. tidy3d). Must be a picklable
+            top-level callable so it can be shipped to the worker; it must be
+            *deterministic* (the tidy3d and the seeded MPB backends both are).
 
     Returns:
         The :class:`GroupResult` for this group.
     """
-    from meow.fde import compute_modes  # fmt: skip
+    if compute_modes is None:
+        from meow.fde import compute_modes  # fmt: skip
 
     cells = [Cell.model_validate(c) for c in cells_data]
     env = Environment.model_validate(env_data)
@@ -415,6 +423,7 @@ def compute_s_matrix_parallel(
     neff_atol: float = 1e-6,
     compute_modes_kwargs: dict[str, Any] | None = None,
     interface_kwargs: dict[str, Any] | None = None,
+    compute_modes: Callable | None = None,
 ) -> sax.SDenseMM:
     """Compute the EME S-matrix using concurrent slice-group jobs.
 
@@ -441,6 +450,12 @@ def compute_s_matrix_parallel(
             indices of shared cells solved redundantly in two jobs.
         compute_modes_kwargs: extra kwargs for ``compute_modes``.
         interface_kwargs: extra kwargs for ``compute_interface_s_matrix``.
+        compute_modes: the FDE backend to run in each job (default:
+            ``meow.fde.compute_modes``, tidy3d). Must be a picklable top-level
+            callable. The slice-group method needs a *deterministic* backend so
+            shared cells re-solved in two workers return the same mode basis;
+            the tidy3d backend and the (seeded) MPB backend
+            (``meow.compute_modes_mpb``) both satisfy this.
 
     Returns:
         A tuple ``(S, port_map)`` in SAX dense multimode format.
@@ -458,6 +473,7 @@ def compute_s_matrix_parallel(
                 num_modes,
                 compute_modes_kwargs,
                 interface_kwargs,
+                compute_modes,
             )
             results = [job.result() for job in jobs]
     else:
@@ -469,6 +485,7 @@ def compute_s_matrix_parallel(
             num_modes,
             compute_modes_kwargs,
             interface_kwargs,
+            compute_modes,
         )
         results = [job.result() for job in jobs]
     return _assemble_s_matrix(
@@ -488,6 +505,7 @@ async def acompute_s_matrix_parallel(
     neff_atol: float = 1e-6,
     compute_modes_kwargs: dict[str, Any] | None = None,
     interface_kwargs: dict[str, Any] | None = None,
+    compute_modes: Callable | None = None,
 ) -> sax.SDenseMM:
     """Async version of :func:`compute_s_matrix_parallel`.
 
@@ -510,6 +528,7 @@ async def acompute_s_matrix_parallel(
             num_modes,
             compute_modes_kwargs,
             interface_kwargs,
+            compute_modes,
         )
         results = list(
             await asyncio.gather(*(asyncio.to_thread(job.result) for job in jobs))
@@ -583,6 +602,7 @@ def _submit_group_jobs(
     num_modes: int,
     compute_modes_kwargs: dict[str, Any] | None,
     interface_kwargs: dict[str, Any] | None,
+    compute_modes: Callable | None = None,
 ) -> list[Any]:
     cells_data = [cell.model_dump() for cell in cells]
     env_data = env.model_dump()
@@ -595,6 +615,7 @@ def _submit_group_jobs(
             num_modes,
             compute_modes_kwargs,
             interface_kwargs,
+            compute_modes,
         )
         for start, stop in groups
     ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import warnings
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -16,6 +17,47 @@ from meow.cross_section import CrossSection
 from meow.fde.post_process import post_process_modes
 from meow.mode import Mode, Modes
 
+HAS_TIDY3D_EXTRAS = importlib.util.find_spec("tidy3d_extras") is not None
+"""Whether the optional ``tidy3d-extras`` package is importable. It provides
+tidy3d's local (subpixel) dielectric smoothing and the fully-tensorial mode
+solver."""
+
+
+def _enable_local_smoothing(local_smoothing: bool | None) -> None:  # noqa: FBT001
+    """Enable tidy3d's local (subpixel) dielectric smoothing when requested.
+
+    Args:
+        local_smoothing:
+            - ``None`` (default): auto - enable the smoothing iff
+              ``tidy3d-extras`` is installed, otherwise do nothing;
+            - ``True``: require ``tidy3d-extras`` and enable it (raise if the
+              package is missing);
+            - ``False``: leave tidy3d's smoothing preference untouched.
+
+    When enabled, this sets ``tidy3d.config.simulation.use_local_subpixel`` so
+    tidy3d's mode solver performs local dielectric smoothing. Note that meow
+    additionally applies its own subpixel smoothing when building the
+    permittivity (see ``CrossSection.subpixel_smoothing``).
+    """
+    if local_smoothing is False:
+        return
+    if not HAS_TIDY3D_EXTRAS:
+        if local_smoothing is True:
+            msg = (
+                "local dielectric smoothing requires the optional 'tidy3d-extras' "
+                "package; install it with: pip install 'tidy3d[extras]'"
+            )
+            raise ImportError(msg)
+        return  # auto-mode and the package is unavailable: nothing to do
+    try:
+        import tidy3d as td  # fmt: skip
+
+        td.config.simulation.use_local_subpixel = True
+    except (ImportError, AttributeError) as e:  # pragma: no cover - defensive
+        warnings.warn(
+            f"could not enable tidy3d local dielectric smoothing: {e}", stacklevel=2
+        )
+
 
 def compute_modes_tidy3d(
     cs: CrossSection,
@@ -23,6 +65,8 @@ def compute_modes_tidy3d(
     target_neff: PositiveFloat | None = None,
     precision: Literal["single", "double"] = "double",
     post_process: Callable = post_process_modes,
+    *,
+    local_smoothing: bool | None = None,
 ) -> Modes:
     """Compute ``Modes`` for a given ``CrossSection``.
 
@@ -32,6 +76,11 @@ def compute_modes_tidy3d(
         target_neff: effective index near which to search for modes.
         precision: floating-point precision, ``"single"`` or ``"double"``.
         post_process: callable applied to the raw mode list before returning.
+        local_smoothing: enable tidy3d's local (subpixel) dielectric smoothing
+            via the optional ``tidy3d-extras`` package. ``None`` (default)
+            enables it automatically when ``tidy3d-extras`` is installed;
+            ``True`` requires it; ``False`` leaves the tidy3d preference alone.
+            See :func:`_enable_local_smoothing`.
 
     Returns:
         The computed and post-processed collection of modes.
@@ -39,6 +88,8 @@ def compute_modes_tidy3d(
     if num_modes < 1:
         msg = "You need to request at least 1 mode."
         raise ValueError(msg)
+
+    _enable_local_smoothing(local_smoothing)
 
     eps_cross = [
         cs.nx**2,
