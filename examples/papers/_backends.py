@@ -18,10 +18,12 @@ Parallelism (``parallel_enabled`` / ``device_s_matrix``):
 
 Note: the parallel slice-group engine re-solves shared boundary cells in
 separate worker processes and checks that they return identical effective
-indices, which requires a *deterministic* mode solver. The default tidy3d
-backend is deterministic; the MPB backend uses randomized initial fields and
-is therefore not supported in the parallel path. Backend selection and
-parallelism are thus independent knobs (parallel always uses tidy3d).
+indices, which requires a *deterministic* mode solver. Both the tidy3d backend
+and the (deterministically seeded) MPB backend satisfy this, and
+``meow.compute_s_matrix_parallel`` accepts a ``compute_modes`` backend. For
+simplicity this example helper still runs the parallel path with the default
+tidy3d backend; pass a backend to :func:`meow.compute_s_matrix_parallel`
+directly to parallelize with MPB.
 """
 
 from __future__ import annotations

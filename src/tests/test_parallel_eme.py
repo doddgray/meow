@@ -153,6 +153,28 @@ def test_parallel_matches_serial_with_subprocesses(
     np.testing.assert_allclose(np.asarray(S_par), np.asarray(S_ref), atol=1e-9)
 
 
+def test_parallel_accepts_explicit_compute_modes_backend(
+    taper: tuple[list[mw.Cell], mw.Environment],
+    serial_s_matrix: tuple,
+) -> None:
+    """A picklable ``compute_modes`` backend is threaded through to the jobs.
+
+    Passing the (deterministic) tidy3d backend explicitly must match the
+    default; the same hook lets the seeded MPB backend run in parallel.
+    """
+    cells, env = taper
+    S_ref, pm_ref = serial_s_matrix
+    S_par, pm_par = mw.compute_s_matrix_parallel(
+        cells,
+        env,
+        num_modes=NUM_MODES,
+        executor=ThreadPoolExecutor(max_workers=2),
+        compute_modes=mw.compute_modes_tidy3d,
+    )
+    assert pm_par == pm_ref
+    np.testing.assert_allclose(np.asarray(S_par), np.asarray(S_ref), atol=1e-9)
+
+
 def test_parallel_matches_serial_with_submitit(
     taper: tuple[list[mw.Cell], mw.Environment],
     serial_s_matrix: tuple,
