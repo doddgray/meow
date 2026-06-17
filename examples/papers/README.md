@@ -140,6 +140,38 @@ Because submitit persists each job (payload, logs and result) in its job
 their results collected from a *different* session - see "Running EME on a
 slurm cluster" below.
 
+## Generalized FAQUAD wavelength-filter designer
+
+`kwolek_designer.py` generalizes the Kwolek 2026 FAQUAD coupler into a
+**platform-parametric designer** for X-cut thin-film lithium niobate (TFLN) and
+lithium tantalate (TFLT). A `TFPlatform` captures one etched film - the
+(anisotropic) core material, the film thickness, the rib etch depth, the
+sidewall angle and the fabrication limits - and `design_faquad_filter()` designs
+an Euler-S-bend FAQUAD coupler for a target fundamental/second-harmonic (FH/SH)
+wavelength pair that transfers the FH to the cross port while the strongly
+confined SH stays in the bar port (the dichroic filter action).
+
+The design matrix spans both materials (`tfln_platform`, `tflt_platform`), the
+four core thicknesses 300/400/500/600 nm (`CORE_THICKNESSES`) and the three
+FH/SH pairs 1550/775, 1350/675 and 1060/530 nm (`WAVELENGTH_PAIRS`). LiTaO3 uses
+the tabulated dispersion of Bond (1965); LiNbO3 reuses the Zelmon Sellmeier of
+`kwolek2026_faquad.ln_material`. The optimization (within a device-length
+budget) picks the largest top width whose FAQUAD device still meets the FH
+extinction target - maximizing SH rejection (the FH/SH coupling contrast grows
+with width) - then the shortest constant-gap length meeting the target
+adiabaticity. `main()` writes `figures/kwolek_designer.png` (optimized widths,
+the FH-vs-SH coupling contrast, and a designed layout).
+
+`kwolek_designer_slurm.py` is the **slurm-cluster version**. It designs the full
+(material x thickness x FH/SH) matrix and runs a *full-device EME at both the FH
+and the SH* of each design with the parallel slice-group engine
+(`meow.compute_s_matrix_parallel`), reporting the FH cross / SH bar
+transmissions and extinction ratios. Like the dichroic slurm example it exposes
+both a **blocking** (`run_blocking` -> `eme_filter`) and a **concurrent / async**
+(`run_concurrent` -> `aeme_filter` -> `asyncio.gather`) workflow, so every
+design's jobs can be in flight on the cluster at once; pass a
+`meow.slurm_executor` (or rely on local subprocesses by default).
+
 ## Running
 
 ```sh
@@ -149,6 +181,8 @@ uv run python -m examples.papers.dichroic_designer
 uv run python -m examples.papers.dichroic_designer_si3n4
 uv run python -m examples.papers.dichroic_designer_si3n4_thickness
 uv run python -m examples.papers.dichroic_designer_slurm
+uv run python -m examples.papers.kwolek_designer
+uv run python -m examples.papers.kwolek_designer_slurm
 ```
 
 Figures are written to `examples/papers/figures/`. The default settings take

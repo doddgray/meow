@@ -20,6 +20,12 @@ from examples.papers import (  # noqa: E402
     kwolek2026_faquad as kw,
 )
 from examples.papers import (  # noqa: E402
+    kwolek_designer as kd,
+)
+from examples.papers import (  # noqa: E402
+    kwolek_designer_slurm as ks,
+)
+from examples.papers import (  # noqa: E402
     magden2018_dichroic as md,
 )
 
@@ -470,3 +476,118 @@ def test_sh_stays_in_bar_port(calibration: tuple[float, float, float]) -> None:
     # discretization, but the bar/cross contrast remains well over an order
     # of magnitude (the full-resolution figures show > 30 dB extinction)
     assert t_bar > 20 * t_cross
+
+
+# --- Generalized FAQUAD wavelength-filter designer (Kwolek 2026) ---
+
+
+def test_lt_material_anisotropy() -> None:
+    lt = kd.lt_material(1.55)
+    assert isinstance(lt, mw.AnisotropicMaterial)
+    assert not lt.is_isotropic
+    ne, no_y, no_z = np.sqrt(np.real(np.diag(lt.eps)))
+    assert np.isclose(no_y, no_z)
+    assert ne > no_y  # LiTaO3 is (weakly) positive uniaxial: ne > no
+    assert 2.1 < no_y < 2.25
+
+
+def test_tfplatform_geometry() -> None:
+    p = kd.tfln_platform(0.50, etch_depth=0.2)
+    assert p.core is kd.ln_material
+    assert p.name == "TFLN-500nm"
+    assert p.slab_thickness == pytest.approx(0.30)
+    assert p.sidewall_run == pytest.approx(0.2 * np.tan(np.deg2rad(p.sidewall_deg)))
+    # fully etched -> no slab
+    assert kd.tflt_platform(0.30, etch_depth=0.30).slab_thickness == pytest.approx(0.0)
+
+
+def test_platform_matrix_covers_materials_and_thicknesses() -> None:
+    platforms = kd.platform_matrix()
+    assert len(platforms) == len(kd.MATERIALS) * len(kd.CORE_THICKNESSES)  # 2 x 4
+    names = {p.name for p in platforms}
+    assert "TFLN-300nm" in names
+    assert "TFLT-600nm" in names
+    # the three FH/SH pairs are octave-spaced (second harmonic)
+    for fh, sh in kd.WAVELENGTH_PAIRS:
+        assert np.isclose(sh, fh / 2, atol=1e-9)
+
+
+def test_faquad_combiner_layout() -> None:
+    design = kw.FaquadDesign(0.05, 0.4, 0.2)
+    c = kd.faquad_combiner(design, w_top=1.2)
+    port_names = {p.name for p in c.ports}
+    assert {"in_bar", "out_bar", "out_cross"} <= port_names
+    polys = [p for ps in c.get_polygons().values() for p in ps]
+    assert len(polys) == 2
+    assert np.isclose(c.xmax - c.xmin, 2 * design.half_length, atol=0.3)
+
+
+def test_design_faquad_filter_dichroic() -> None:
+    """A designed filter couples the FH far more strongly than the SH.
+
+    Passing ``w_top`` skips the (FDE) width optimization; the calibration still
+    runs, so the SH coupling at the minimum gap must be well below the FH one -
+    the basis of the dichroic FH(cross)/SH(bar) behavior - and the device must
+    fit the platform length budget.
+    """
+    p = kd.tfln_platform(0.30)
+    d = kd.design_faquad_filter(p, 1.55, 0.775, w_top=1.2, res=0.07)
+    assert d.platform.name == "TFLN-300nm"
+    assert d.total_length <= p.max_length + 1.0
+    kappa_fh_gm = d.kappa_0 * np.exp(-p.g_m / d.g_0)
+    assert d.kappa_sh < kappa_fh_gm  # SH decoupled relative to the FH
+    assert 0.2 < d.g_0 < 0.8  # plausible evanescent decay length [um]
+    assert d.eta > 0
+    # the layout matches the designed half-length
+    assert np.isclose(
+        d.component.xmax - d.component.xmin, 2 * d.design.half_length, atol=0.3
+    )
+
+
+def test_optimize_width_within_bounds() -> None:
+    p = kd.tfln_platform(0.30, max_length=1500.0)
+    w = kd.optimize_width(p, 1.55, target_extinction_db=18.0, res=0.08)
+    assert 0.6 <= w <= 2.0
+
+
+def test_kwolek_slurm_executor_and_cells(tmp_path) -> None:  # noqa: ANN001
+    executor = ks.make_executor(folder=tmp_path / "jobs", cluster="debug")
+    assert hasattr(executor, "submit")
+
+    d = kd.design_faquad_filter(
+        kd.tfln_platform(0.30), 1.55, 0.775, w_top=1.2, res=0.08
+    )
+    cells = ks.device_cells(d, 1.55, num_cells=5, res=0.1)
+    assert len(cells) == 5
+    assert cells[0].z_min == pytest.approx(0.0)
+    assert cells[-1].z_max == pytest.approx(float(d.component.xmax))
+
+
+def test_kwolek_slurm_blocking_and_concurrent_agree(tmp_path) -> None:  # noqa: ANN001
+    """Blocking and async EME paths give identical FoM (debug executor)."""
+    import asyncio
+
+    d = kd.design_faquad_filter(
+        kd.tfln_platform(0.30), 1.55, 0.775, w_top=1.2, res=0.08
+    )
+    eme_kwargs = {"num_cells": 5, "num_modes": 2, "res": 0.1}
+
+    blocking = ks.run_blocking(
+        [d],
+        executor=ks.make_executor(folder=tmp_path / "b", cluster="debug"),
+        **eme_kwargs,
+    )
+    concurrent = asyncio.run(
+        ks.run_concurrent(
+            [d],
+            executor=ks.make_executor(folder=tmp_path / "c", cluster="debug"),
+            **eme_kwargs,
+        )
+    )
+    key = "TFLN-300nm/1550-775nm"
+    assert set(blocking) == set(concurrent) == {key}
+    assert blocking[key]["fh_cross"] == pytest.approx(concurrent[key]["fh_cross"])
+    assert blocking[key]["sh_bar"] == pytest.approx(concurrent[key]["sh_bar"])
+    # power stays physical
+    assert 0.0 <= blocking[key]["fh_cross"] <= 1.0
+    assert 0.0 <= blocking[key]["sh_bar"] <= 1.0
