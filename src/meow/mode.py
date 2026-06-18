@@ -80,6 +80,18 @@ class Mode(BaseModel):
 
         return effective_area(self)
 
+    def hg_label(self, **kwargs: Any) -> Any:
+        """Label this mode by its Hermite-Gaussian character.
+
+        Fits elliptical Hermite-Gaussian templates (TE and TM, various orders)
+        to the mode field and returns the best-fitting `ModeLabel` (e.g.
+        ``TE00``). See :func:`meow.mode_label.label_mode` for the accepted
+        keyword arguments.
+        """
+        from meow.mode_label import label_mode  # fmt: skip
+
+        return label_mode(self, **kwargs)
+
     @cached_property
     def _pointing(self) -> tuple[ComplexArray2D, ComplexArray2D, ComplexArray2D]:
         """Calculate and cache the poynting vector."""
