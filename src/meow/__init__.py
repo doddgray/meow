@@ -54,6 +54,7 @@ from meow.cross_section import (
     CrossSection,
 )
 from meow.eme import (
+    ParallelEMEJobs,
     PassivityMethod,
     acompute_s_matrix_parallel,
     acompute_s_matrix_spectrum,
@@ -82,6 +83,7 @@ from meow.eme import (
     select_ports,
     slurm_executor,
     split_square_matrix,
+    submit_s_matrix_parallel,
     track_modes,
     tsvd_solve,
 )
@@ -220,6 +222,7 @@ __all__ = [
     "ModelMetaclass",
     "Modes",
     "NDArray",
+    "ParallelEMEJobs",
     "PassivityMethod",
     "Polygon2D",
     "Prism",
@@ -314,6 +317,7 @@ __all__ = [
     "sort_structures",
     "split_square_matrix",
     "structures",
+    "submit_s_matrix_parallel",
     "te_fraction",
     "track_modes",
     "tsvd_solve",

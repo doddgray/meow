@@ -11,20 +11,33 @@ slurm cluster; the design workflows themselves can be run either
   the cluster, and the designs are processed one after another; or
 - **concurrent / async** (:func:`run_concurrent`): every device's EME is
   submitted at once and awaited together with :func:`asyncio.gather`, so all the
-  design workflows' jobs are in flight on the cluster simultaneously - and,
-  because submitit persists jobs in its ``folder``, they can be collected from a
-  *different* python session.
+  design workflows' jobs are in flight on the cluster simultaneously.
+
+**Reloading results in a later session.** Because submitit persists every job
+(payload, logs and result) in its ``folder``, submission and collection do not
+have to happen in the same process. :func:`submit_designs` submits every
+design's EME *without waiting* and writes one small ``<cutoff>.eme.pkl`` record
+(a :class:`meow.ParallelEMEJobs` handle, via ``examples.papers._slurm``) into
+the job folder; :func:`gather_results` - run in a *different* python session
+pointing at the same ``MEOW_SLURM_FOLDER`` - reloads those records, reattaches
+to the still-running cluster jobs and cascades each device's S-matrix. This is
+demonstrated by the ``submit`` / ``gather`` subcommands below.
 
 See ``examples/papers/README.md`` ("Running EME on a slurm cluster") for how to
 configure the local and remote environments for blocking, async and
 multi-session execution.
 
-Run locally (jobs as local subprocesses) with::
+Run the in-session demo (jobs as local subprocesses) with::
 
     python -m examples.papers.dichroic_designer_slurm
 
-or, on a login node of a slurm cluster, set ``MEOW_SLURM_CLUSTER=slurm`` (and
-``MEOW_SLURM_PARTITION``) first.
+or split submission and collection across two sessions::
+
+    python -m examples.papers.dichroic_designer_slurm submit   # session A
+    python -m examples.papers.dichroic_designer_slurm gather    # session B (later)
+
+On a login node of a slurm cluster, set ``MEOW_SLURM_CLUSTER=slurm`` (and
+``MEOW_SLURM_PARTITION``) and a shared ``MEOW_SLURM_FOLDER`` first.
 """
 
 from __future__ import annotations
@@ -38,6 +51,7 @@ import gdsfactory as gf
 import numpy as np
 
 import meow as mw
+from examples.papers import _slurm
 from examples.papers.dichroic_designer import (
     DichroicDesign,
     Platform,
@@ -81,27 +95,36 @@ def device_cells(
     return mw.create_cells(structs, device_mesh(design, res), lengths, z_min=0.0)
 
 
-def _port_powers(
-    design: DichroicDesign,
+def short_pass_split(design: DichroicDesign) -> float:
+    """Lateral position [um] separating the WGA short-pass and WGB long-pass
+    output ports of a designed device (output modes with their energy centroid
+    below this go to the short-pass port).
+    """
+    _, _, y_a_final = lateral_positions(
+        design.w_a, design.wgb.rail_width, design.wgb.gap, design.gap, GAP_OUT
+    )
+    return y_a_final / 2
+
+
+def port_powers_from_s(
     cells: list[mw.Cell],
     env: mw.Environment,
     s_matrix: Any,
     port_map: dict[str, int],
     num_modes: int,
+    split: float,
 ) -> tuple[float, float]:
     """(short-pass, long-pass) power for the fundamental input mode.
 
     The output modes (needed to attribute power to the WGA short-pass and WGB
     long-pass ports) are solved once on the final cell; the parallel engine
-    itself returns no field data.
+    itself returns no field data. Only the precomputed ``split`` scalar is
+    needed besides the S-matrix, so this can run in a later session that
+    reloaded the EME result without the original design object.
     """
     s = np.asarray(s_matrix)
     cs_out = mw.CrossSection.from_cell(cell=cells[-1], env=env)
     modes_out = mw.compute_modes(cs_out, num_modes=num_modes)
-    _, _, y_a_final = lateral_positions(
-        design.w_a, design.wgb.rail_width, design.wgb.gap, design.gap, GAP_OUT
-    )
-    split = y_a_final / 2
 
     def centroid(mode: mw.Mode) -> float:
         d = np.abs(mode.Ex) ** 2
@@ -115,6 +138,20 @@ def _port_powers(
         else:
             t_long += power
     return t_short, t_long
+
+
+def _port_powers(
+    design: DichroicDesign,
+    cells: list[mw.Cell],
+    env: mw.Environment,
+    s_matrix: Any,
+    port_map: dict[str, int],
+    num_modes: int,
+) -> tuple[float, float]:
+    """(short-pass, long-pass) power for a design (see :func:`port_powers_from_s`)."""
+    return port_powers_from_s(
+        cells, env, s_matrix, port_map, num_modes, short_pass_split(design)
+    )
 
 
 # --------------------------------------------------------------------------
@@ -186,6 +223,67 @@ async def run_concurrent(
     }
 
 
+# --------------------------------------------------------------------------
+# multi-session workflow: submit now, gather (reload) in a later session
+# --------------------------------------------------------------------------
+def submit_designs(
+    designs: list[DichroicDesign],
+    *,
+    executor: Any,
+    folder: Path | str = JOB_FOLDER,
+    num_cells: int = 16,
+    num_modes: int = 4,
+    res: float = 0.06,
+) -> list[_slurm.SavedEME]:
+    """Submit every design's full-device EME to the cluster *without waiting*.
+
+    Each design's per-slice jobs are submitted through
+    :func:`meow.submit_s_matrix_parallel` and a small picklable record
+    (``<cutoff>.eme.pkl``) is written into ``folder``. This returns as soon as
+    the jobs are queued, so the submitting session can exit; collect the
+    results later (in any session) with :func:`gather_results` pointed at the
+    same ``folder``. Use a :func:`meow.slurm_executor` (``cluster="slurm"``)
+    so the jobs outlive this process.
+    """
+    folder = Path(folder)
+    records = []
+    for design in designs:
+        cells = device_cells(design, num_cells, res)
+        env = mw.Environment(wl=design.cutoff_wl, T=25.0)
+        records.append(
+            _slurm.submit_eme(
+                f"{design.cutoff_wl * 1e3:.0f}nm",
+                cells,
+                env,
+                executor=executor,
+                num_modes=num_modes,
+                folder=folder,
+                meta={"split": short_pass_split(design)},
+            )
+        )
+    return records
+
+
+def gather_results(
+    folder: Path | str = JOB_FOLDER,
+) -> dict[str, tuple[float, float]]:
+    """Collect EME results submitted by :func:`submit_designs` from ``folder``.
+
+    Designed to run in a **different python session** from the one that
+    submitted the jobs: it reloads each persisted :class:`_slurm.SavedEME`
+    record (which reattaches to the still-running submitit jobs), blocks until
+    each job has finished, cascades the device S-matrix and attributes the
+    short-/long-pass powers - without needing the original design objects.
+    """
+    out: dict[str, tuple[float, float]] = {}
+    for rec in _slurm.load_records(folder):
+        s, pm = rec.jobs.result()
+        out[rec.label] = port_powers_from_s(
+            rec.jobs.cells, rec.jobs.env, s, pm, rec.num_modes, rec.meta["split"]
+        )
+    return out
+
+
 def make_executor(
     folder: Path | str = JOB_FOLDER,
     cluster: str | None = None,
@@ -221,13 +319,8 @@ def _design_sweep(platform: Platform, cutoffs: np.ndarray, res: float) -> list:
     ]
 
 
-def main() -> dict[str, object]:
-    """Design a few Si3N4 splitters and run their EME on the cluster.
-
-    Demonstrates both the blocking and the concurrent (async) workflows. By
-    default the EME jobs run as local subprocesses; set ``MEOW_SLURM_CLUSTER=slurm``
-    (and ``MEOW_SLURM_PARTITION``) on a slurm login node to run them on the cluster.
-    """
+def _demo_designs() -> tuple[list[DichroicDesign], dict[str, Any]]:
+    """The designs + EME settings shared by every entry point of this demo."""
     gf.gpdk.PDK.activate()
     platform = si3n4_platform()
     res = 0.06 if FAST else 0.045
@@ -237,24 +330,60 @@ def main() -> dict[str, object]:
         "num_modes": 2 if FAST else 4,
         "res": 0.07 if FAST else 0.05,
     }
+    return _design_sweep(platform, cutoffs, res), eme_kwargs
 
-    designs = _design_sweep(platform, cutoffs, res)
 
+def _fmt(d: dict[str, tuple[float, float]]) -> dict[str, dict[str, float]]:
+    return {
+        k: {"short_pass": round(s, 4), "long_pass": round(lng, 4)}
+        for k, (s, lng) in d.items()
+    }
+
+
+def main() -> dict[str, object]:
+    """Design a few Si3N4 splitters and run their EME on the cluster.
+
+    Demonstrates both the blocking and the concurrent (async) workflows. By
+    default the EME jobs run as local subprocesses; set ``MEOW_SLURM_CLUSTER=slurm``
+    (and ``MEOW_SLURM_PARTITION``) on a slurm login node to run them on the cluster.
+    """
+    designs, eme_kwargs = _demo_designs()
     blocking = run_blocking(designs, executor=make_executor(), **eme_kwargs)
     concurrent = asyncio.run(
         run_concurrent(designs, executor=make_executor(), **eme_kwargs)
     )
+    return {"blocking": _fmt(blocking), "concurrent": _fmt(concurrent)}
 
-    def fmt(d: dict[str, tuple[float, float]]) -> dict[str, dict[str, float]]:
-        return {
-            k: {"short_pass": round(s, 4), "long_pass": round(lng, 4)}
-            for k, (s, lng) in d.items()
-        }
 
-    return {"blocking": fmt(blocking), "concurrent": fmt(concurrent)}
+def submit_main() -> dict[str, object]:
+    """Session A: submit every design's EME to the cluster and return.
+
+    Writes one persisted record per design into ``MEOW_SLURM_FOLDER`` and exits
+    without waiting. Collect the results later with :func:`gather_main`.
+    """
+    designs, eme_kwargs = _demo_designs()
+    records = submit_designs(
+        designs,
+        executor=make_executor(),
+        folder=JOB_FOLDER,
+        num_cells=eme_kwargs["num_cells"],
+        num_modes=eme_kwargs["num_modes"],
+        res=eme_kwargs["res"],
+    )
+    return {
+        "submitted": {r.label: r.jobs.job_ids for r in records},
+        "folder": str(JOB_FOLDER),
+        "next": "run 'gather' in a later session with the same MEOW_SLURM_FOLDER",
+    }
+
+
+def gather_main() -> dict[str, object]:
+    """Session B (later): reload and collect the results from ``MEOW_SLURM_FOLDER``."""
+    return {"gathered": _fmt(gather_results(JOB_FOLDER))}
 
 
 if __name__ == "__main__":
-    import json
-
-    print(json.dumps(main(), indent=2, default=str))
+    _slurm.cli_main(
+        "examples.papers.dichroic_designer_slurm",
+        {"run": main, "submit": submit_main, "gather": gather_main},
+    )

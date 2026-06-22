@@ -25,17 +25,26 @@ or on a slurm cluster by passing a ``submitit`` executor (see
 :func:`slurm_executor`). Any object with an
 ``executor.submit(fn, *args) -> job`` method where ``job.result()`` returns
 the function result can be used.
+
+:func:`compute_s_matrix_parallel` submits the jobs and blocks until they
+finish. For long cluster runs, :func:`submit_s_matrix_parallel` instead
+returns a picklable :class:`ParallelEMEJobs` handle right after submitting, so
+the result can be collected later - even from a *different python session* -
+by saving the handle and reloading it once the (persisted) submitit jobs have
+finished.
 """
 
 from __future__ import annotations
 
 import asyncio
 import multiprocessing as mp
+import pickle
 import warnings
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from itertools import pairwise
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import jax.numpy as jnp
@@ -476,21 +485,21 @@ def compute_s_matrix_parallel(
                 compute_modes,
             )
             results = [job.result() for job in jobs]
-    else:
-        jobs = _submit_group_jobs(
-            executor,
-            cells,
-            env,
-            groups,
-            num_modes,
-            compute_modes_kwargs,
-            interface_kwargs,
-            compute_modes,
+        return _assemble_s_matrix(
+            results, cells, env, sax_backend=sax_backend, neff_atol=neff_atol
         )
-        results = [job.result() for job in jobs]
-    return _assemble_s_matrix(
-        results, cells, env, sax_backend=sax_backend, neff_atol=neff_atol
-    )
+    return submit_s_matrix_parallel(
+        cells,
+        env,
+        executor=executor,
+        num_modes=num_modes,
+        max_interfaces_per_job=max_interfaces_per_job,
+        sax_backend=sax_backend,
+        neff_atol=neff_atol,
+        compute_modes_kwargs=compute_modes_kwargs,
+        interface_kwargs=interface_kwargs,
+        compute_modes=compute_modes,
+    ).result()
 
 
 async def acompute_s_matrix_parallel(
@@ -513,15 +522,26 @@ async def acompute_s_matrix_parallel(
     multiple EME simulations can be in flight at the same time, e.g. when
     sweeping a parameter with jobs running on a slurm cluster.
     """
+    if executor is not None:
+        return await submit_s_matrix_parallel(
+            cells,
+            env,
+            executor=executor,
+            num_modes=num_modes,
+            max_interfaces_per_job=max_interfaces_per_job,
+            sax_backend=sax_backend,
+            neff_atol=neff_atol,
+            compute_modes_kwargs=compute_modes_kwargs,
+            interface_kwargs=interface_kwargs,
+            compute_modes=compute_modes,
+        ).aresult()
     groups = chunk_cell_indices(len(cells), max_interfaces_per_job)
-    own_executor: ProcessPoolExecutor | None = None
-    if executor is None:
-        executor = own_executor = ProcessPoolExecutor(
-            max_workers=max_workers, mp_context=mp.get_context("spawn")
-        )
+    own_executor = ProcessPoolExecutor(
+        max_workers=max_workers, mp_context=mp.get_context("spawn")
+    )
     try:
         jobs = _submit_group_jobs(
-            executor,
+            own_executor,
             cells,
             env,
             groups,
@@ -534,10 +554,203 @@ async def acompute_s_matrix_parallel(
             await asyncio.gather(*(asyncio.to_thread(job.result) for job in jobs))
         )
     finally:
-        if own_executor is not None:
-            own_executor.shutdown()
+        own_executor.shutdown()
     return _assemble_s_matrix(
         results, cells, env, sax_backend=sax_backend, neff_atol=neff_atol
+    )
+
+
+@dataclass
+class ParallelEMEJobs:
+    """Handle for a submitted - but not yet collected - parallel EME run.
+
+    Returned by :func:`submit_s_matrix_parallel`. It bundles the submitted
+    slice-group jobs with the (small) metadata the calling process needs to
+    cascade their results into the full EME S-matrix - the cells (for their
+    lengths) and the environment (for its wavelength), but *not* any mode
+    field data.
+
+    The handle is **picklable**, which is what enables collecting the result
+    in a *different python session* from the one that submitted the jobs: save
+    it with :meth:`save` right after submitting, then in a later session
+    :meth:`load` it and call :meth:`result` (or :meth:`aresult`). This works
+    because a :func:`slurm_executor` (submitit) job persists its payload, logs
+    and result in its ``folder`` and reloads them on unpickling, so the jobs
+    keep running on the cluster after the submitting process exits (and
+    ``job.result()`` reads the result back from the shared folder).
+
+    Attributes:
+        jobs: the submitted slice-group jobs (each has a ``.result()``).
+        cells: the cells of the EME chain (used to build the propagation
+            matrices when assembling the final S-matrix).
+        env: the simulation environment.
+        sax_backend: SAX backend used to cascade the S-matrices.
+        neff_atol: tolerance of the shared-cell consistency check.
+    """
+
+    jobs: list[Any]
+    cells: list[Cell]
+    env: Environment
+    sax_backend: sax.Backend = "klu"
+    neff_atol: float = 1e-6
+
+    @property
+    def job_ids(self) -> list[str]:
+        """The submitit job ids (empty strings for executors without ids)."""
+        return [str(getattr(job, "job_id", "")) for job in self.jobs]
+
+    @property
+    def folder(self) -> str | None:
+        """The submitit job folder the results are persisted in, if any."""
+        for job in self.jobs:
+            paths = getattr(job, "paths", None)
+            folder = getattr(paths, "folder", None)
+            if folder is not None:
+                return str(folder)
+        return None
+
+    def done(self) -> bool:
+        """Whether every job has finished (best-effort, never blocks).
+
+        Uses each job's ``done()`` if it exposes one (submitit does); jobs
+        without it are assumed finished. Use this to poll a submitted run
+        before collecting it, e.g. across sessions.
+        """
+        for job in self.jobs:
+            is_done = getattr(job, "done", None)
+            if callable(is_done):
+                try:
+                    if not is_done():
+                        return False
+                except Exception:  # noqa: BLE001 - a not-yet-known job isn't done
+                    return False
+        return True
+
+    def result(self) -> sax.SDenseMM:
+        """Block until all jobs finish, then cascade the full EME S-matrix.
+
+        Returns:
+            A tuple ``(S, port_map)`` in SAX dense multimode format.
+        """
+        results = [job.result() for job in self.jobs]
+        return _assemble_s_matrix(
+            results,
+            self.cells,
+            self.env,
+            sax_backend=self.sax_backend,
+            neff_atol=self.neff_atol,
+        )
+
+    async def aresult(self) -> sax.SDenseMM:
+        """Async :meth:`result` (awaits the jobs without blocking the loop)."""
+        results = list(
+            await asyncio.gather(*(asyncio.to_thread(job.result) for job in self.jobs))
+        )
+        return _assemble_s_matrix(
+            results,
+            self.cells,
+            self.env,
+            sax_backend=self.sax_backend,
+            neff_atol=self.neff_atol,
+        )
+
+    def save(self, path: str | Path) -> Path:
+        """Pickle this handle to ``path`` so a later session can collect it.
+
+        Pickling stores the jobs (which know their submitit ``folder`` and
+        job ids) together with the cells and environment, so a later session
+        only needs this one file to reattach to the running jobs and assemble
+        the result.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as f:
+            pickle.dump(self, f)
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path) -> ParallelEMEJobs:
+        """Load a handle saved by :meth:`save` (e.g. in a later session)."""
+        with Path(path).open("rb") as f:
+            obj = pickle.load(f)
+        if not isinstance(obj, cls):
+            msg = f"{path} does not contain a {cls.__name__}."
+            raise TypeError(msg)
+        return obj
+
+
+def submit_s_matrix_parallel(
+    cells: list[Cell],
+    env: Environment,
+    *,
+    executor: JobExecutor,
+    num_modes: int = 10,
+    max_interfaces_per_job: int = 2,
+    sax_backend: sax.Backend = "klu",
+    neff_atol: float = 1e-6,
+    compute_modes_kwargs: dict[str, Any] | None = None,
+    interface_kwargs: dict[str, Any] | None = None,
+    compute_modes: Callable | None = None,
+) -> ParallelEMEJobs:
+    """Submit the slice-group jobs of a parallel EME *without* awaiting them.
+
+    This is the non-blocking half of :func:`compute_s_matrix_parallel`: it
+    chunks the cells, submits the group jobs to ``executor`` and returns a
+    :class:`ParallelEMEJobs` handle immediately, instead of blocking until the
+    jobs finish. Collect the result later (possibly in another python session)
+    with :meth:`ParallelEMEJobs.result` / :meth:`ParallelEMEJobs.aresult`.
+
+    The point is **multi-session execution**: submit a long EME on a slurm
+    cluster from one (short-lived) session, :meth:`~ParallelEMEJobs.save` the
+    handle, and :meth:`~ParallelEMEJobs.load` it in a later session to gather
+    the results once the cluster jobs have finished. This requires an executor
+    whose jobs outlive the submitting process and persist their results - i.e.
+    a :func:`slurm_executor` (``cluster="slurm"`` on a real cluster, or
+    ``"local"``/``"debug"`` for testing the workflow). A bare
+    ``concurrent.futures`` executor does not persist its jobs, so pass one of
+    those only for in-session collection.
+
+    Args:
+        cells: the cells of the EME chain.
+        env: the simulation environment.
+        executor: where to run the jobs - typically a :func:`slurm_executor`.
+        num_modes: number of modes to compute per cell.
+        max_interfaces_per_job: how many interfaces each job computes
+            (1 -> pairs of cells, 2 -> triplets, ...).
+        sax_backend: SAX backend used to cascade the S-matrices.
+        neff_atol: tolerance of the shared-cell consistency check.
+        compute_modes_kwargs: extra kwargs for ``compute_modes``.
+        interface_kwargs: extra kwargs for ``compute_interface_s_matrix``.
+        compute_modes: the (picklable, deterministic) FDE backend to run in
+            each job (default: ``meow.fde.compute_modes``, tidy3d).
+
+    Returns:
+        A :class:`ParallelEMEJobs` handle over the submitted jobs.
+    """
+    if executor is None:
+        msg = (
+            "submit_s_matrix_parallel requires an executor whose jobs persist "
+            "(e.g. meow.slurm_executor(...)). For an in-process local "
+            "ProcessPoolExecutor run, use compute_s_matrix_parallel instead."
+        )
+        raise ValueError(msg)
+    groups = chunk_cell_indices(len(cells), max_interfaces_per_job)
+    jobs = _submit_group_jobs(
+        executor,
+        cells,
+        env,
+        groups,
+        num_modes,
+        compute_modes_kwargs,
+        interface_kwargs,
+        compute_modes,
+    )
+    return ParallelEMEJobs(
+        jobs=jobs,
+        cells=cells,
+        env=env,
+        sax_backend=sax_backend,
+        neff_atol=neff_atol,
     )
 
 

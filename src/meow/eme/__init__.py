@@ -19,6 +19,7 @@ from meow.eme.parallel import (
     GroupResult,
     GroupSpectrumResult,
     JobExecutor,
+    ParallelEMEJobs,
     acompute_s_matrix_parallel,
     acompute_s_matrix_spectrum,
     chunk_cell_indices,
@@ -27,6 +28,7 @@ from meow.eme.parallel import (
     compute_s_matrix_parallel,
     compute_s_matrix_spectrum,
     slurm_executor,
+    submit_s_matrix_parallel,
 )
 from meow.eme.propagation import (
     compute_mode_amplitudes,
@@ -50,6 +52,7 @@ __all__ = [
     "GroupResult",
     "GroupSpectrumResult",
     "JobExecutor",
+    "ParallelEMEJobs",
     "PassivityMethod",
     "acompute_s_matrix_parallel",
     "acompute_s_matrix_spectrum",
@@ -78,6 +81,7 @@ __all__ = [
     "select_ports",
     "slurm_executor",
     "split_square_matrix",
+    "submit_s_matrix_parallel",
     "track_modes",
     "tsvd_solve",
 ]
