@@ -137,9 +137,20 @@ workflows over a list of designs:
   workflows' jobs are in flight on the cluster simultaneously.
 
 Because submitit persists each job (payload, logs and result) in its job
-`folder`, the concurrent jobs can also be submitted from one python session and
-their results collected from a *different* session - see "Running EME on a
-slurm cluster" below.
+`folder`, submission and collection can also happen in *different* python
+sessions. The example exposes this directly with `submit_designs` (submit every
+design's EME without waiting, writing one `<cutoff>.eme.pkl` record per design
+into the folder) and `gather_results` (reload those records and collect the
+results in a later session) - see "Running across multiple python sessions"
+below.
+
+`dichroic_coupler_slurm.py` is a focused **single-design** companion: rather than
+an array of designs it prepares, asynchronously deploys and gathers the EME of
+*one* adiabatic dichroic coupler. It walks through the three stages explicitly -
+`prepare` (design + slice into cells), `submit` (asynchronously deploy the
+slice-group jobs through `meow.submit_s_matrix_parallel`, returning immediately)
+and `gather`/`agather` (reload the persisted handle and collect the cascaded
+S-matrix) - so the submit and gather steps can run in separate python sessions.
 
 ## Generalized FAQUAD wavelength-filter designer
 
@@ -171,7 +182,9 @@ transmissions and extinction ratios. Like the dichroic slurm example it exposes
 both a **blocking** (`run_blocking` -> `eme_filter`) and a **concurrent / async**
 (`run_concurrent` -> `aeme_filter` -> `asyncio.gather`) workflow, so every
 design's jobs can be in flight on the cluster at once; pass a
-`meow.slurm_executor` (or rely on local subprocesses by default).
+`meow.slurm_executor` (or rely on local subprocesses by default). It also
+supports the same two-session `submit_designs` / `gather_results` workflow
+(persisting one FH and one SH record per design) for reloading results later.
 
 ## Running
 
@@ -182,6 +195,7 @@ uv run python -m examples.papers.dichroic_designer
 uv run python -m examples.papers.dichroic_designer_si3n4
 uv run python -m examples.papers.dichroic_designer_si3n4_thickness
 uv run python -m examples.papers.dichroic_designer_slurm
+uv run python -m examples.papers.dichroic_coupler_slurm
 uv run python -m examples.papers.kwolek_designer
 uv run python -m examples.papers.kwolek_designer_slurm
 ```
@@ -289,29 +303,61 @@ jobs; they differ only in how the submitting session waits:
   scheduler packs them across all available nodes. Drive it with
   `asyncio.run(run_concurrent(designs, executor=make_executor()))`.
 
-**Running across multiple python sessions.** Because every job is persisted in
-the submitit `folder`, submission and collection do not have to happen in the
-same process. A long sweep can be launched from one (short-lived) session and
-its results gathered later from another, as long as both point
+**Reloading / gathering results in a later python session.** Because every job
+is persisted in the submitit `folder`, submission and collection do not have to
+happen in the same process. A sweep can be launched from one (short-lived)
+session and its results gathered later from another, as long as both point
 `MEOW_SLURM_FOLDER` at the *same shared folder* and the jobs outlive the
 submitting process (true for `cluster="slurm"`, where the work runs under
-`sbatch`, not inside your python process). Concretely: call `make_executor()`
-with a fixed `folder`, submit with `executor.submit(...)` /
-`compute_s_matrix_parallel`, record the returned submitit job ids, and in a
-second session reconstruct the jobs from that folder (e.g.
-`submitit.AutoExecutor(folder=...)` / `submitit.SlurmJob(folder=..., job_id=...)`)
-and read their `.result()`. This lets several design workflows run concurrently
-on the cluster while you start, stop and reattach python sessions on the login
-node.
+`sbatch`, not inside your python process).
+
+meow exposes a **submit/collect split** for exactly this:
+`meow.submit_s_matrix_parallel(cells, env, executor=...)` submits the
+slice-group jobs and returns a *picklable* `meow.ParallelEMEJobs` handle
+*without blocking*. Save the handle (`handle.save(path)`) right after
+submitting; in a later session `meow.ParallelEMEJobs.load(path)` reattaches to
+the still-running jobs (it pickles the submitit jobs, which reload their results
+from `folder`) and `handle.result()` / `await handle.aresult()` cascades the
+full EME S-matrix. Poll without blocking with `handle.done()`, and inspect
+`handle.job_ids` / `handle.folder`.
+
+The examples wrap this in `submit_designs` / `gather_results` (and, for the
+single-coupler example, `submit` / `gather` / `agather`). Each writes one
+small `<label>.eme.pkl` record (the handle plus the few scalars needed to turn
+the S-matrix into the figures of merit) into the job folder via
+`examples/papers/_slurm.py`, so the later session needs nothing but the shared
+folder. Both example modules expose `submit` and `gather` subcommands:
 
 ```sh
-# session A (login node): launch the sweep on the cluster
+# session A (login node): submit the sweep to the cluster and return at once
 MEOW_SLURM_CLUSTER=slurm MEOW_SLURM_PARTITION=cpu \
 MEOW_SLURM_FOLDER=$HOME/meow_dichroic_jobs \
-  uv run python -m examples.papers.dichroic_designer_slurm
+  uv run python -m examples.papers.dichroic_designer_slurm submit
 
-# session B (later, same $MEOW_SLURM_FOLDER): collect results from the
-# persisted submitit jobs once they have finished
+# session B (later, same $MEOW_SLURM_FOLDER): reload the persisted handles and
+# collect the results once the cluster jobs have finished
+MEOW_SLURM_CLUSTER=slurm MEOW_SLURM_PARTITION=cpu \
+MEOW_SLURM_FOLDER=$HOME/meow_dichroic_jobs \
+  uv run python -m examples.papers.dichroic_designer_slurm gather
+```
+
+The single-design `dichroic_coupler_slurm.py` works the same way (`submit` then
+`gather`), and demonstrates the async path explicitly - `submit` returns the
+moment the jobs are queued and `agather` awaits them with `await
+handle.aresult()`. The underlying API call is just:
+
+```python
+import meow as mw
+
+# session A: prepare + asynchronously deploy, then exit
+executor = mw.slurm_executor(folder="$HOME/meow_coupler_jobs", cluster="slurm")
+handle = mw.submit_s_matrix_parallel(cells, env, executor=executor, num_modes=4)
+handle.save("$HOME/meow_coupler_jobs/coupler.eme.pkl")   # nothing else needed
+
+# session B (later): reload and collect
+handle = mw.ParallelEMEJobs.load("$HOME/meow_coupler_jobs/coupler.eme.pkl")
+if handle.done():
+    S, port_map = handle.result()
 ```
 
 Note on fidelity: quantitative numbers (cutoff wavelength, dB-level losses

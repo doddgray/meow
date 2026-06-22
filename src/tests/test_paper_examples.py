@@ -385,6 +385,73 @@ def test_slurm_designer_blocking_and_concurrent_agree(tmp_path: Path) -> None:
         assert 0.0 <= b_long <= 1.0
 
 
+def test_slurm_designer_submit_then_gather(tmp_path: Path) -> None:
+    """submit_designs persists records that gather_results reloads later.
+
+    Submits each design's EME (local submitit cluster) into a shared folder,
+    drops the in-memory handles, then reloads + collects from the folder alone -
+    matching the blocking workflow's port powers.
+    """
+    pytest.importorskip("submitit")
+    from examples.papers import dichroic_designer_slurm as ds
+
+    design = _minimal_slurm_design()
+    eme_kwargs = {"num_cells": 4, "num_modes": 2, "res": 0.1}
+    folder = tmp_path / "shared"
+
+    records = ds.submit_designs(
+        [design],
+        executor=ds.make_executor(folder=folder, cluster="local"),
+        folder=folder,
+        **eme_kwargs,
+    )
+    assert [r.label for r in records] == ["1000nm"]
+    assert (folder / "1000nm.eme.pkl").exists()
+    del records  # only the persisted records remain, as in a later session
+
+    gathered = ds.gather_results(folder)
+    blocking = ds.run_blocking(
+        [design],
+        executor=ds.make_executor(folder=tmp_path / "block", cluster="local"),
+        **eme_kwargs,
+    )
+    assert set(gathered) == set(blocking) == {"1000nm"}
+    g_short, g_long = gathered["1000nm"]
+    b_short, b_long = blocking["1000nm"]
+    assert g_short == pytest.approx(b_short, abs=1e-9)
+    assert g_long == pytest.approx(b_long, abs=1e-9)
+
+
+def test_dichroic_coupler_single_submit_then_gather(tmp_path: Path) -> None:
+    """The single-coupler example submits one EME and reloads it in 'session B'."""
+    import asyncio
+
+    pytest.importorskip("submitit")
+    from examples.papers import dichroic_coupler_slurm as dc
+
+    design = _minimal_slurm_design()
+    folder = tmp_path / "coupler"
+
+    saved = dc.submit(
+        design,
+        executor=dc.make_executor(folder=folder, cluster="local"),
+        folder=folder,
+        num_cells=4,
+        num_modes=2,
+        res=0.1,
+    )
+    assert saved.label == dc.RECORD_LABEL
+    assert (folder / f"{dc.RECORD_LABEL}.eme.pkl").exists()
+    del saved  # later session only has the persisted record
+
+    ports = dc.gather(folder)
+    aports = asyncio.run(dc.agather(folder))
+    assert ports == aports
+    assert set(ports) == {"short_pass", "long_pass"}
+    assert 0.0 <= ports["short_pass"] <= 1.0
+    assert 0.0 <= ports["long_pass"] <= 1.0
+
+
 # --- Kwolek 2026: TFLN FAQUAD combiner ---
 
 
@@ -591,3 +658,35 @@ def test_kwolek_slurm_blocking_and_concurrent_agree(tmp_path) -> None:  # noqa: 
     # power stays physical
     assert 0.0 <= blocking[key]["fh_cross"] <= 1.0
     assert 0.0 <= blocking[key]["sh_bar"] <= 1.0
+
+
+def test_kwolek_slurm_submit_then_gather(tmp_path) -> None:  # noqa: ANN001
+    """submit_designs writes one FH and one SH record per design; gather_results
+    reloads them from the folder and recombines the FH/SH figures of merit."""
+    pytest.importorskip("submitit")
+
+    d = kd.design_faquad_filter(
+        kd.tfln_platform(0.30), 1.55, 0.775, w_top=1.2, res=0.08
+    )
+    eme_kwargs = {"num_cells": 5, "num_modes": 2, "res": 0.1}
+    folder = tmp_path / "shared"
+
+    records = ks.submit_designs(
+        [d],
+        executor=ks.make_executor(folder=folder, cluster="local"),
+        folder=folder,
+        **eme_kwargs,
+    )
+    key = "TFLN-300nm/1550-775nm"
+    assert {r.label for r in records} == {f"{key}|fh", f"{key}|sh"}
+    del records
+
+    gathered = ks.gather_results(folder)
+    blocking = ks.run_blocking(
+        [d],
+        executor=ks.make_executor(folder=tmp_path / "block", cluster="local"),
+        **eme_kwargs,
+    )
+    assert set(gathered) == {key}
+    assert gathered[key]["fh_cross"] == pytest.approx(blocking[key]["fh_cross"])
+    assert gathered[key]["sh_bar"] == pytest.approx(blocking[key]["sh_bar"])

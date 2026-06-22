@@ -194,6 +194,70 @@ def test_parallel_matches_serial_with_submitit(
     np.testing.assert_allclose(np.asarray(S_par), np.asarray(S_ref), atol=1e-9)
 
 
+def test_submit_handle_matches_serial_and_reloads(
+    taper: tuple[list[mw.Cell], mw.Environment],
+    serial_s_matrix: tuple,
+    tmp_path,  # noqa: ANN001
+) -> None:
+    """submit_s_matrix_parallel returns a picklable handle that reloads results.
+
+    Submits the slice-group jobs through submitit's local cluster, saves the
+    handle, reloads it (simulating a *later python session*) and collects the
+    cascaded S-matrix from the persisted jobs - it must match the serial EME.
+    """
+    import pickle
+
+    pytest.importorskip("submitit")
+    cells, env = taper
+    S_ref, pm_ref = serial_s_matrix
+    executor = mw.slurm_executor(
+        folder=str(tmp_path / "jobs"), cluster="local", timeout_min=10
+    )
+    handle = mw.submit_s_matrix_parallel(
+        cells, env, executor=executor, num_modes=NUM_MODES
+    )
+    assert isinstance(handle, mw.ParallelEMEJobs)
+    assert len(handle.job_ids) == len(mw.chunk_cell_indices(len(cells)))
+
+    # persist + reload (a fresh ParallelEMEJobs, as a later session would see)
+    saved = handle.save(tmp_path / "run.eme.pkl")
+    reloaded = mw.ParallelEMEJobs.load(saved)
+    assert isinstance(pickle.dumps(reloaded), bytes)
+
+    S_par, pm_par = reloaded.result()
+    assert pm_par == pm_ref
+    np.testing.assert_allclose(np.asarray(S_par), np.asarray(S_ref), atol=1e-9)
+
+
+def test_submit_handle_requires_executor(
+    taper: tuple[list[mw.Cell], mw.Environment],
+) -> None:
+    cells, env = taper
+    with pytest.raises(ValueError, match="requires an executor"):
+        mw.submit_s_matrix_parallel(cells, env, executor=None, num_modes=NUM_MODES)
+
+
+def test_async_submit_handle_matches_serial(
+    taper: tuple[list[mw.Cell], mw.Environment],
+    serial_s_matrix: tuple,
+) -> None:
+    """ParallelEMEJobs.aresult awaits the jobs and matches the serial EME."""
+    import asyncio
+
+    cells, env = taper
+    S_ref, pm_ref = serial_s_matrix
+    handle = mw.submit_s_matrix_parallel(
+        cells, env, executor=ThreadPoolExecutor(max_workers=2), num_modes=NUM_MODES
+    )
+
+    async def main() -> tuple:
+        return await handle.aresult()
+
+    S_par, pm_par = asyncio.run(main())
+    assert pm_par == pm_ref
+    np.testing.assert_allclose(np.asarray(S_par), np.asarray(S_ref), atol=1e-9)
+
+
 def test_async_parallel_matches_serial(
     taper: tuple[list[mw.Cell], mw.Environment],
     serial_s_matrix: tuple,
