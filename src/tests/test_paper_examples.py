@@ -422,11 +422,58 @@ def test_slurm_designer_submit_then_gather(tmp_path: Path) -> None:
     assert g_long == pytest.approx(b_long, abs=1e-9)
 
 
-def test_dichroic_coupler_single_submit_then_gather(tmp_path: Path) -> None:
-    """The single-coupler example submits one EME and reloads it in 'session B'."""
+def _tiny_analysis_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shrink the dense spectrum / propagation grids so analysis runs are fast."""
+    monkeypatch.setenv("MEOW_SPECTRUM_NPTS", "3")
+    monkeypatch.setenv("MEOW_PROP_NPTS", "3")
+
+
+def test_dichroic_designer_submit_runs_then_gather(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """submit_runs ships one analysis job/design that writes plots + GDS, and
+    gather_runs reloads its summary from a timestamped subfolder in 'session B'."""
+    pytest.importorskip("submitit")
+    _tiny_analysis_env(monkeypatch)
+    from examples.papers import dichroic_designer_slurm as ds
+
+    design = _minimal_slurm_design()
+    folder = tmp_path / "runs"
+    records = ds.submit_runs(
+        [design],
+        folder=folder,
+        executor_factory=lambda sub: ds.make_executor(folder=sub, cluster="local"),
+        num_cells=4,
+        num_modes=2,
+        device_res=0.1,
+    )
+    assert [r.label for r in records] == ["1000nm"]
+    run_dir = Path(records[0].out_dir)
+    assert run_dir.parent == folder
+    assert (run_dir / "run.pkl").exists()
+    del records  # only the persisted run record remains, as in a later session
+
+    gathered = ds.gather_runs(folder)
+    assert set(gathered) == {"1000nm"}
+    summary = gathered["1000nm"]
+    # spectrum/propagation/design figures, GDS and data were produced
+    produced = {p.name for p in run_dir.iterdir()}
+    for suffix in ("_spectrum.png", "_propagation.png", "_design.png"):
+        assert any(name.endswith(suffix) for name in produced)
+    assert "1000nm.gds" in produced
+    assert "1000nm_results.npz" in produced
+    assert 0.0 <= summary["short_pass_at_cutoff"] <= 1.0
+    assert 0.0 <= summary["long_pass_at_cutoff"] <= 1.0
+
+
+def test_dichroic_coupler_single_submit_then_gather(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The single-coupler example submits one analysis job and reloads it later."""
     import asyncio
 
     pytest.importorskip("submitit")
+    _tiny_analysis_env(monkeypatch)
     from examples.papers import dichroic_coupler_slurm as dc
 
     design = _minimal_slurm_design()
@@ -434,22 +481,56 @@ def test_dichroic_coupler_single_submit_then_gather(tmp_path: Path) -> None:
 
     saved = dc.submit(
         design,
-        executor=dc.make_executor(folder=folder, cluster="local"),
         folder=folder,
+        executor_factory=lambda sub: dc.make_executor(folder=sub, cluster="local"),
         num_cells=4,
         num_modes=2,
-        res=0.1,
+        device_res=0.1,
     )
     assert saved.label == dc.RECORD_LABEL
-    assert (folder / f"{dc.RECORD_LABEL}.eme.pkl").exists()
+    run_dir = Path(saved.out_dir)
+    assert (run_dir / "run.pkl").exists()
     del saved  # later session only has the persisted record
 
-    ports = dc.gather(folder)
-    aports = asyncio.run(dc.agather(folder))
-    assert ports == aports
-    assert set(ports) == {"short_pass", "long_pass"}
-    assert 0.0 <= ports["short_pass"] <= 1.0
-    assert 0.0 <= ports["long_pass"] <= 1.0
+    summary = dc.gather(folder)
+    asummary = asyncio.run(dc.agather(folder))
+    assert summary == asummary
+    produced = {p.name for p in run_dir.iterdir()}
+    assert f"{dc.RECORD_LABEL}.gds" in produced
+    assert any(n.endswith("_propagation.png") for n in produced)
+    assert 0.0 <= summary["short_pass_at_cutoff"] <= 1.0
+    assert 0.0 <= summary["long_pass_at_cutoff"] <= 1.0
+
+
+def test_thickness_sweep_slurm_submit_then_gather(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The slurm thickness sweep submits one analysis job per (thickness, cutoff)
+    design and reloads their summaries from per-run timestamped folders."""
+    pytest.importorskip("submitit")
+    _tiny_analysis_env(monkeypatch)
+    from examples.papers import dichroic_designer_si3n4_thickness_slurm as ts
+
+    design = _minimal_slurm_design()
+    designs = [(200, design, 0.1), (100, design, 0.1)]
+    folder = tmp_path / "thickness"
+    records = ts.submit_runs(
+        designs,
+        folder=folder,
+        executor_factory=lambda sub: ts.make_executor(folder=sub, cluster="local"),
+        num_cells=4,
+        num_modes=2,
+    )
+    assert {r.label for r in records} == {"200nm-1000nm", "100nm-1000nm"}
+    del records
+
+    gathered = ts.gather_runs(folder)
+    assert set(gathered) == {"200nm-1000nm", "100nm-1000nm"}
+    for label, summary in gathered.items():
+        run_dir = Path(summary["out_dir"])
+        produced = {p.name for p in run_dir.iterdir()}
+        assert any(n.endswith("_spectrum.png") for n in produced)
+        assert f"{label}.gds" in produced
 
 
 # --- Kwolek 2026: TFLN FAQUAD combiner ---
@@ -690,3 +771,41 @@ def test_kwolek_slurm_submit_then_gather(tmp_path) -> None:  # noqa: ANN001
     assert set(gathered) == {key}
     assert gathered[key]["fh_cross"] == pytest.approx(blocking[key]["fh_cross"])
     assert gathered[key]["sh_bar"] == pytest.approx(blocking[key]["sh_bar"])
+
+
+def test_kwolek_slurm_submit_runs_then_gather(
+    tmp_path,  # noqa: ANN001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """submit_runs ships one analysis job/design (FH/SH spectra + propagation +
+    plots + GDS) into a timestamped folder; gather_runs reloads the summary."""
+    pytest.importorskip("submitit")
+    monkeypatch.setenv("MEOW_SPECTRUM_NPTS", "3")
+    monkeypatch.setenv("MEOW_PROP_NPTS", "3")
+
+    d = kd.design_faquad_filter(
+        kd.tfln_platform(0.30), 1.55, 0.775, w_top=1.2, res=0.08
+    )
+    folder = tmp_path / "runs"
+    records = ks.submit_runs(
+        [d],
+        folder=folder,
+        executor_factory=lambda sub: ks.make_executor(folder=sub, cluster="local"),
+        num_cells=5,
+        num_modes=2,
+        device_res=0.1,
+    )
+    key = "TFLN-300nm/1550-775nm"
+    assert [r.label for r in records] == [key]
+    run_dir = Path(records[0].out_dir)
+    del records
+
+    gathered = ks.gather_runs(folder)
+    assert set(gathered) == {key}
+    summary = gathered[key]
+    produced = {p.name for p in run_dir.iterdir()}
+    for suffix in ("_spectrum.png", "_propagation.png", "_design.png"):
+        assert any(name.endswith(suffix) for name in produced)
+    assert summary["kind"] == "faquad"
+    assert 0.0 <= summary["fh_cross"] <= 1.0
+    assert 0.0 <= summary["sh_bar"] <= 1.0

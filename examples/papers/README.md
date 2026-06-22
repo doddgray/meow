@@ -122,35 +122,41 @@ each optimized device layout next to its simulated (coupled-mode) transmission
 spectrum.
 
 `dichroic_designer_slurm.py` is a **slurm-cluster version** of the Si3N4
-designer. It designs the same splitters and then runs a *full-device EME* of
-each one with the parallel slice-group engine
-(`meow.compute_s_matrix_parallel`), distributing the per-slice mode solves as
-independent cluster jobs through a `meow.slurm_executor`. It exposes two
-workflows over a list of designs:
+designer. It designs the same splitters and submits, for each one, a full
+analysis as an independent cluster job through a `meow.slurm_executor`. Each
+job (`submit_runs` -> `_analysis.analyze_dichroic`) writes everything into a
+fresh **timestamped subfolder** of the MEOW jobs folder:
 
-- **blocking** (`run_blocking`): each device's EME is parallelized across the
-  cluster, and the designs are processed one after another (`eme_ports` ->
-  `meow.compute_s_matrix_parallel`); and
-- **concurrent / async** (`run_concurrent`): every device's EME is submitted at
-  once and awaited together with `asyncio.gather`
-  (`aeme_ports` -> `meow.acompute_s_matrix_parallel`), so all the design
-  workflows' jobs are in flight on the cluster simultaneously.
+- a dense **short-/long-pass transmission spectrum** (`*_spectrum.png` + the raw
+  arrays in `*_results.npz`);
+- **intensity-propagation plots** `|Ex|^2(z, x)` at a few wavelengths on either
+  side of and at the cutoff (`*_propagation.png`);
+- a layout + WGA/WGB index-crossing **design figure** (`*_design.png`,
+  analogous to `dichroic_designer.py`); and
+- the device **GDS** (`*.gds`) and a JSON summary.
 
-Because submitit persists each job (payload, logs and result) in its job
-`folder`, submission and collection can also happen in *different* python
-sessions. The example exposes this directly with `submit_designs` (submit every
-design's EME without waiting, writing one `<cutoff>.eme.pkl` record per design
-into the folder) and `gather_results` (reload those records and collect the
-results in a later session) - see "Running across multiple python sessions"
-below.
+`gather_runs` reloads the persisted run handles and returns their summaries (the
+figures/GDS/data already on disk) - and, because submitit persists each job in
+its `folder`, that can happen in a *different* python session (see "Reloading /
+gathering results in a later python session" below). The wavelength bounds and
+counts have sensible defaults and are overridable per call or via the
+`MEOW_SPECTRUM_*` / `MEOW_PROP_*` env vars (see `_analysis.py`).
+
+It also keeps the in-session EME helpers `run_blocking` / `run_concurrent`
+(blocking vs. `asyncio.gather` over `meow.compute_s_matrix_parallel` /
+`meow.acompute_s_matrix_parallel`) and a lighter S-matrix-only multi-session
+path `submit_designs` / `gather_results` (built on `meow.ParallelEMEJobs`,
+writing one `<cutoff>.eme.pkl` per design) for just the port powers.
 
 `dichroic_coupler_slurm.py` is a focused **single-design** companion: rather than
-an array of designs it prepares, asynchronously deploys and gathers the EME of
-*one* adiabatic dichroic coupler. It walks through the three stages explicitly -
-`prepare` (design + slice into cells), `submit` (asynchronously deploy the
-slice-group jobs through `meow.submit_s_matrix_parallel`, returning immediately)
-and `gather`/`agather` (reload the persisted handle and collect the cascaded
-S-matrix) - so the submit and gather steps can run in separate python sessions.
+an array of designs it prepares, asynchronously deploys and gathers the full
+analysis of *one* adiabatic dichroic coupler. It walks through the three stages
+explicitly - `design_coupler` (design one coupler), `submit` (asynchronously
+deploy the analysis job, returning immediately, into a timestamped subfolder)
+and `gather`/`agather` (reload the persisted `_slurm.SavedRun` handle and
+collect the summary) - so the submit and gather steps can run in separate python
+sessions, producing the same spectrum/propagation/design figures, GDS and data
+as above.
 
 ## Generalized FAQUAD wavelength-filter designer
 
@@ -175,16 +181,27 @@ adiabaticity. `main()` writes `figures/kwolek_designer.png` (optimized widths,
 the FH-vs-SH coupling contrast, and a designed layout).
 
 `kwolek_designer_slurm.py` is the **slurm-cluster version**. It designs the full
-(material x thickness x FH/SH) matrix and runs a *full-device EME at both the FH
-and the SH* of each design with the parallel slice-group engine
-(`meow.compute_s_matrix_parallel`), reporting the FH cross / SH bar
-transmissions and extinction ratios. Like the dichroic slurm example it exposes
-both a **blocking** (`run_blocking` -> `eme_filter`) and a **concurrent / async**
-(`run_concurrent` -> `aeme_filter` -> `asyncio.gather`) workflow, so every
-design's jobs can be in flight on the cluster at once; pass a
-`meow.slurm_executor` (or rely on local subprocesses by default). It also
-supports the same two-session `submit_designs` / `gather_results` workflow
-(persisting one FH and one SH record per design) for reloading results later.
+(material x thickness x FH/SH) matrix and submits one analysis job per design
+(`submit_runs` -> `_analysis.analyze_faquad`) that writes, into a timestamped
+subfolder, the **FH/SH extinction-ratio and loss spectra** (`*_spectrum.png`,
+the model counterpart of paper Fig. 2), the **intensity-propagation plots** at
+the FH and SH (`*_propagation.png`, like Fig. 1e), a layout + FAQUAD gap/dTW +
+mixing-angle **design figure** (`*_design.png`, like Fig. 1a-c), the device
+**GDS** and a JSON summary; `gather_runs` reloads the summaries in any later
+session. It also keeps the in-session EME helpers `run_blocking` /
+`run_concurrent` (over `meow.compute_s_matrix_parallel` /
+`acompute_s_matrix_parallel`) and the lighter S-matrix-only `submit_designs` /
+`gather_results` multi-session path (one FH and one SH `.eme.pkl` per design)
+for just the figures of merit.
+
+`dichroic_designer_si3n4_thickness_slurm.py` is the **slurm-cluster version of
+the thickness sweep** (`dichroic_designer_si3n4_thickness.py`). It designs the
+fully-etched Si3N4 splitters across the three core thicknesses (200/100/40 nm)
+and the 900-1200 nm cutoffs, then runs *all the simulation, analysis and
+plotting of each (thickness, cutoff) design asynchronously as its own slurm job*
+- each writing its spectrum/propagation/design figures, GDS and data into a
+fresh timestamped subfolder. As with the others, `submit_runs` returns
+immediately and `gather_runs` reloads every summary in a later session.
 
 ## Running
 
@@ -194,15 +211,19 @@ uv run python -m examples.papers.kwolek2026_figures
 uv run python -m examples.papers.dichroic_designer
 uv run python -m examples.papers.dichroic_designer_si3n4
 uv run python -m examples.papers.dichroic_designer_si3n4_thickness
+uv run python -m examples.papers.dichroic_designer_si3n4_thickness_slurm
 uv run python -m examples.papers.dichroic_designer_slurm
 uv run python -m examples.papers.dichroic_coupler_slurm
 uv run python -m examples.papers.kwolek_designer
 uv run python -m examples.papers.kwolek_designer_slurm
 ```
 
-Figures are written to `examples/papers/figures/`. The default settings take
-tens of minutes; set `MEOW_EXAMPLE_FAST=1` for a coarse smoke-test version
-(used by `src/tests/test_paper_examples.py`).
+Figures for the non-slurm examples are written to `examples/papers/figures/`.
+The slurm examples instead write each design's figures, GDS and data into a
+timestamped subfolder of the MEOW jobs folder (`MEOW_SLURM_FOLDER`, default
+`meow_*_jobs/`). The default settings take tens of minutes; set
+`MEOW_EXAMPLE_FAST=1` for a coarse smoke-test version (used by
+`src/tests/test_paper_examples.py`).
 
 ### Backends and parallel EME
 
@@ -321,12 +342,23 @@ from `folder`) and `handle.result()` / `await handle.aresult()` cascades the
 full EME S-matrix. Poll without blocking with `handle.done()`, and inspect
 `handle.job_ids` / `handle.folder`.
 
-The examples wrap this in `submit_designs` / `gather_results` (and, for the
-single-coupler example, `submit` / `gather` / `agather`). Each writes one
-small `<label>.eme.pkl` record (the handle plus the few scalars needed to turn
-the S-matrix into the figures of merit) into the job folder via
-`examples/papers/_slurm.py`, so the later session needs nothing but the shared
-folder. Both example modules expose `submit` and `gather` subcommands:
+The **default analysis workflow** of every slurm example builds on the same
+idea at a coarser grain: `submit_runs` (the single-coupler example: `submit`)
+ships *one slurm job per design* that runs the whole simulation + analysis +
+plotting, and writes a small picklable `_slurm.SavedRun` handle (`run.pkl`)
+plus all of its figures, GDS and data into a fresh **timestamped subfolder** of
+`MEOW_SLURM_FOLDER`. `gather_runs` (`gather` / `agather`) walks those subfolders
+in a later session, reattaches to the persisted jobs and returns their
+summaries. The wavelength bounds and counts for the spectrum/propagation are set
+by `MEOW_SPECTRUM_SPAN` / `MEOW_SPECTRUM_NPTS` and `MEOW_PROP_SPAN` /
+`MEOW_PROP_NPTS` (or an explicit `MEOW_PROP_WLS` list).
+
+A lighter S-matrix-only path is also available on the array examples
+(`submit_designs` / `gather_results`): it writes one small `<label>.eme.pkl`
+record (the `ParallelEMEJobs` handle plus the few scalars needed for the port
+powers) into the job folder, for when you only want the figures of merit and not
+the plots. Every example module exposes `submit` and `gather` subcommands that
+drive the analysis workflow:
 
 ```sh
 # session A (login node): submit the sweep to the cluster and return at once
@@ -334,8 +366,9 @@ MEOW_SLURM_CLUSTER=slurm MEOW_SLURM_PARTITION=cpu \
 MEOW_SLURM_FOLDER=$HOME/meow_dichroic_jobs \
   uv run python -m examples.papers.dichroic_designer_slurm submit
 
-# session B (later, same $MEOW_SLURM_FOLDER): reload the persisted handles and
-# collect the results once the cluster jobs have finished
+# session B (later, same $MEOW_SLURM_FOLDER): reload the persisted run handles
+# and collect the summaries once the cluster jobs have finished (the figures,
+# GDS and data are already in each run's timestamped subfolder)
 MEOW_SLURM_CLUSTER=slurm MEOW_SLURM_PARTITION=cpu \
 MEOW_SLURM_FOLDER=$HOME/meow_dichroic_jobs \
   uv run python -m examples.papers.dichroic_designer_slurm gather
@@ -343,8 +376,8 @@ MEOW_SLURM_FOLDER=$HOME/meow_dichroic_jobs \
 
 The single-design `dichroic_coupler_slurm.py` works the same way (`submit` then
 `gather`), and demonstrates the async path explicitly - `submit` returns the
-moment the jobs are queued and `agather` awaits them with `await
-handle.aresult()`. The underlying API call is just:
+moment the job is queued and `agather` awaits it. For just an S-matrix (the
+lower-level building block), the underlying meow API call is:
 
 ```python
 import meow as mw
