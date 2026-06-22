@@ -595,6 +595,65 @@ def design_faquad_filter(
 
 
 # --------------------------------------------------------------------------
+# picklable parameter round-trip (for shipping a design to a worker)
+# --------------------------------------------------------------------------
+def to_params(design: FaquadFilterDesign) -> dict:
+    """A picklable parameter dict fully describing ``design`` (no gdsfactory).
+
+    The gdsfactory ``Component`` of a :class:`FaquadFilterDesign` cannot be
+    pickled; this returns the (picklable) platform, the FAQUAD geometry
+    dataclass and the scalar design outputs. :func:`filter_from_params` rebuilds
+    an equivalent design (re-creating the layout) from it.
+    """
+    return {
+        "platform": design.platform,
+        "fh_wl": design.fh_wl,
+        "sh_wl": design.sh_wl,
+        "w_top": design.w_top,
+        "kappa_0": design.kappa_0,
+        "g_0": design.g_0,
+        "dbeta_dtw": design.dbeta_dtw,
+        "kappa_sh": design.kappa_sh,
+        "faquad": design.design,
+        "extinction_db": design.extinction_db,
+    }
+
+
+def filter_from_params(
+    platform: TFPlatform,
+    fh_wl: float,
+    sh_wl: float,
+    w_top: float,
+    kappa_0: float,
+    g_0: float,
+    dbeta_dtw: float,
+    kappa_sh: float,
+    faquad: FaquadDesign,
+    extinction_db: float = 0.0,
+) -> FaquadFilterDesign:
+    """Rebuild a :class:`FaquadFilterDesign` (incl. layout) from scalar params.
+
+    Does no optimization or FDE calibration - it just re-creates the parametric
+    combiner layout for an already-chosen design (used to reconstruct a design
+    from :func:`to_params` on a worker node).
+    """
+    component = faquad_combiner(faquad, w_top)
+    return FaquadFilterDesign(
+        platform=platform,
+        fh_wl=fh_wl,
+        sh_wl=sh_wl,
+        w_top=w_top,
+        kappa_0=kappa_0,
+        g_0=g_0,
+        dbeta_dtw=dbeta_dtw,
+        kappa_sh=kappa_sh,
+        design=faquad,
+        component=component,
+        extinction_db=extinction_db,
+    )
+
+
+# --------------------------------------------------------------------------
 # layout + platform-aware extrusion / EME cells
 # --------------------------------------------------------------------------
 def faquad_combiner(

@@ -483,6 +483,74 @@ def design_dichroic(
 # --------------------------------------------------------------------------
 # platform-aware extrusion of the designed device
 # --------------------------------------------------------------------------
+def to_params(design: DichroicDesign) -> dict:
+    """A picklable parameter dict fully describing ``design`` (no gdsfactory).
+
+    The gdsfactory ``Component`` of a :class:`DichroicDesign` cannot be pickled,
+    so this returns only the (picklable) platform, sub-wavelength WGB and scalar
+    design outputs. :func:`design_from_params` rebuilds an equivalent design
+    (re-creating the layout) from it - e.g. inside a slurm job that received the
+    dict over the wire.
+    """
+    return {
+        "platform": design.platform,
+        "cutoff_wl": design.cutoff_wl,
+        "wgb": design.wgb,
+        "w_a": design.w_a,
+        "gap": design.gap,
+        "lengths": tuple(design.lengths),
+        "kappa": design.kappa,
+        "dn_dw": design.dn_dw,
+        "extinction_db": design.extinction_db,
+    }
+
+
+def design_from_params(
+    platform: Platform,
+    cutoff_wl: float,
+    wgb: WGB,
+    w_a: float,
+    gap: float,
+    lengths: tuple[float, float, float, float],
+    *,
+    kappa: float = 0.0,
+    dn_dw: float = 0.0,
+    extinction_db: float = 0.0,
+    gap_out: float = 2.0,
+) -> DichroicDesign:
+    """Rebuild a :class:`DichroicDesign` (incl. its layout) from scalar params.
+
+    Unlike :func:`design_dichroic` this does *no* optimization or FDE solving -
+    it just re-creates the parametric layout for an already-chosen design, so it
+    is cheap and deterministic (used to reconstruct a design from
+    :func:`to_params` on a worker node).
+    """
+    component = dichroic_filter(
+        w_a=w_a,
+        w_b=wgb.rail_width,
+        g_b=wgb.gap,
+        gap=gap,
+        gap_out=gap_out,
+        w_tip=platform.min_tip,
+        l1=lengths[0],
+        l2=lengths[1],
+        l3=lengths[2],
+        l4=lengths[3],
+    )
+    return DichroicDesign(
+        platform=platform,
+        cutoff_wl=cutoff_wl,
+        wgb=wgb,
+        w_a=w_a,
+        gap=gap,
+        lengths=tuple(lengths),
+        kappa=kappa,
+        dn_dw=dn_dw,
+        extinction_db=extinction_db,
+        component=component,
+    )
+
+
 def device_structures(design: DichroicDesign) -> list[mw.Structure3D]:
     """Extrude a designed device layout onto its platform (rib + slab + clad)."""
     platform = design.platform

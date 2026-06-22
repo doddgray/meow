@@ -45,6 +45,7 @@ pip-log.txt
 uv.lock
 
 # folders
+meow_*_jobs/
 .eggs/
 .hypothesis/
 .ipynb_checkpoints/

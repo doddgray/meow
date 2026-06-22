@@ -16,15 +16,24 @@ slurm cluster; the design workflows themselves can be run either
   (material x thickness x wavelength-pair) design workflows are in flight on the
   cluster simultaneously.
 
+**Analysis runs (plots + GDS).** The default workflow (:func:`submit_runs` /
+:func:`gather_runs`, used by ``main`` and the ``submit``/``gather``
+subcommands) submits *one slurm job per design* that runs the whole analysis -
+FH/SH extinction-ratio and loss spectra, intensity-propagation plots at the FH
+and SH, a layout + FAQUAD-profile design figure, and the device GDS - writing
+every figure, the GDS and the raw data into a fresh **timestamped subfolder**
+of ``MEOW_SLURM_FOLDER`` (one per submitted job). Wavelength controls follow
+the ``MEOW_SPECTRUM_*`` / ``MEOW_PROP_*`` env vars (see
+:mod:`examples.papers._analysis`).
+
 **Reloading results in a later session.** Because submitit persists every job
 in its ``folder``, submission and collection can happen in different processes.
-:func:`submit_designs` submits each design's FH and SH EMEs *without waiting*
-and writes one small ``.eme.pkl`` record per (design, harmonic) into the job
-folder (a :class:`meow.ParallelEMEJobs` handle, via ``examples.papers._slurm``);
-:func:`gather_results` - run in a *different* session pointing at the same
-``MEOW_SLURM_FOLDER`` - reloads them, reattaches to the still-running cluster
-jobs and recombines each design's FH/SH figures of merit. See the ``submit`` /
-``gather`` subcommands below.
+:func:`gather_runs` - run in a *different* session pointing at the same
+``MEOW_SLURM_FOLDER`` - reloads the persisted :class:`_slurm.SavedRun` records,
+reattaches to the still-running jobs and returns their summaries. A lighter
+S-matrix-only path (:func:`submit_designs` / :func:`gather_results`, built on
+:class:`meow.ParallelEMEJobs`, writing one ``.eme.pkl`` per (design, harmonic))
+is kept for just the FH/SH figures of merit.
 
 See ``examples/papers/README.md`` ("Running EME on a slurm cluster") for how to
 configure the local and remote environments.
@@ -53,13 +62,14 @@ import gdsfactory as gf
 import numpy as np
 
 import meow as mw
-from examples.papers import _slurm
+from examples.papers import _analysis, _slurm
 from examples.papers.kwolek_designer import (
     WAVELENGTH_PAIRS,
     FaquadFilterDesign,
     design_faquad_filter,
     device_cells,
     platform_matrix,
+    to_params,
 )
 
 FAST = bool(int(os.environ.get("MEOW_EXAMPLE_FAST", "0")))
@@ -201,13 +211,15 @@ def _figures_of_merit(
     fh_bar: float, fh_cross: float, sh_bar: float, sh_cross: float
 ) -> dict[str, float]:
     eps = 1e-9
+    fh_er = float(10 * np.log10(max(fh_cross, eps) / max(fh_bar, eps)))
+    sh_er = float(10 * np.log10(max(sh_bar, eps) / max(sh_cross, eps)))
     return {
         "fh_cross": round(float(fh_cross), 4),
         "fh_bar": round(float(fh_bar), 4),
         "sh_bar": round(float(sh_bar), 4),
         "sh_cross": round(float(sh_cross), 4),
-        "fh_er_db": round(float(10 * np.log10(max(fh_cross, eps) / max(fh_bar, eps))), 2),
-        "sh_er_db": round(float(10 * np.log10(max(sh_bar, eps) / max(sh_cross, eps))), 2),
+        "fh_er_db": round(fh_er, 2),
+        "sh_er_db": round(sh_er, 2),
     }
 
 
@@ -303,11 +315,104 @@ def gather_results(
     return out
 
 
+# --------------------------------------------------------------------------
+# rich analysis runs: FH/SH spectra + propagation plots + GDS, one job/design
+# --------------------------------------------------------------------------
+def analysis_settings(
+    design: FaquadFilterDesign,
+    *,
+    num_cells: int,
+    num_modes: int,
+    device_res: float,
+) -> dict[str, Any]:
+    """Per-design analysis settings (FH/SH spectra + propagation wavelengths).
+
+    Bounds/counts default to bands around the FH and SH and honour the
+    ``MEOW_SPECTRUM_*`` / ``MEOW_PROP_*`` env vars (see
+    :mod:`examples.papers._analysis`).
+    """
+    fh_wls = _analysis.spectrum_wavelengths(
+        design.fh_wl, span=0.03, n=5 if FAST else 11
+    )
+    sh_wls = _analysis.spectrum_wavelengths(
+        design.sh_wl, span=0.03, n=3 if FAST else 7
+    )
+    prop_fh = _analysis.propagation_wavelengths(design.fh_wl, span=0.02, n=3)
+    prop_sh = _analysis.propagation_wavelengths(
+        design.sh_wl, span=0.02, n=3 if FAST else 5
+    )
+    explicit = os.environ.get("MEOW_PROP_WLS")
+    prop_wls = (
+        np.array([float(x) for x in explicit.split(",") if x.strip()])
+        if explicit
+        else np.concatenate([prop_fh, prop_sh])
+    )
+    return {
+        "num_cells": num_cells,
+        "num_modes": num_modes,
+        "device_res": device_res,
+        "fh_wls": fh_wls,
+        "sh_wls": sh_wls,
+        "prop_wls": prop_wls,
+        "num_z": 200 if FAST else 600,
+    }
+
+
+def submit_runs(
+    designs: list[FaquadFilterDesign],
+    *,
+    folder: Path | str = JOB_FOLDER,
+    executor_factory: Any | None = None,
+    num_cells: int = 48,
+    num_modes: int = 4,
+    device_res: float = 0.05,
+) -> list[_slurm.SavedRun]:
+    """Submit a full analysis (FH/SH spectra + propagation + plots + GDS)/design.
+
+    Each design becomes one slurm job (:func:`_analysis.analyze_faquad`) writing
+    all its figures, GDS and data into a fresh timestamped subfolder of
+    ``folder``; returns immediately with persisted :class:`_slurm.SavedRun`
+    handles. Collect later with :func:`gather_runs`.
+    """
+    if executor_factory is None:
+        def executor_factory(sub: Path) -> Any:
+            return make_executor(folder=sub)
+
+    return [
+        _slurm.submit_run(
+            _analysis.analyze_faquad,
+            to_params(design),
+            analysis_settings(
+                design,
+                num_cells=num_cells,
+                num_modes=num_modes,
+                device_res=device_res,
+            ),
+            executor_factory=executor_factory,
+            folder=folder,
+            label=_key(design),
+        )
+        for design in designs
+    ]
+
+
+def gather_runs(folder: Path | str = JOB_FOLDER) -> dict[str, dict]:
+    """Reload and collect the analysis summaries from ``folder`` (any session)."""
+    return {r.label: r.result() for r in _slurm.load_runs(folder)}
+
+
+async def agather_runs(folder: Path | str = JOB_FOLDER) -> dict[str, dict]:
+    """Async :func:`gather_runs` (awaits all the analysis jobs together)."""
+    runs = _slurm.load_runs(folder)
+    summaries = await asyncio.gather(*(r.aresult() for r in runs))
+    return {r.label: s for r, s in zip(runs, summaries, strict=True)}
+
+
 def make_executor(
     folder: Path | str = JOB_FOLDER,
     cluster: str | None = None,
     *,
-    timeout_min: int = 30,
+    timeout_min: int = 60,
     cpus_per_task: int = 2,
     mem_gb: float | None = None,
     slurm_partition: str | None = None,
@@ -363,43 +468,44 @@ def _demo_designs() -> tuple[list[FaquadFilterDesign], dict[str, Any]]:
     return designs, eme_kwargs
 
 
-def main() -> dict[str, object]:
-    """Design the full matrix and run all FH+SH EMEs on the cluster.
-
-    Demonstrates both the blocking and the concurrent (async) workflows. By
-    default the EME jobs run as local subprocesses; set
-    ``MEOW_SLURM_CLUSTER=slurm`` (and ``MEOW_SLURM_PARTITION``) on a slurm login
-    node to run them on the cluster.
-    """
+def _submit_runs() -> list[_slurm.SavedRun]:
     designs, eme_kwargs = _demo_designs()
-    blocking = run_blocking(designs, executor=make_executor(), **eme_kwargs)
-    concurrent = asyncio.run(
-        run_concurrent(designs, executor=make_executor(), **eme_kwargs)
-    )
-    return {"blocking": blocking, "concurrent": concurrent}
-
-
-def submit_main() -> dict[str, object]:
-    """Session A: submit every design's FH+SH EME to the cluster and return."""
-    designs, eme_kwargs = _demo_designs()
-    records = submit_designs(
+    return submit_runs(
         designs,
-        executor=make_executor(),
         folder=JOB_FOLDER,
         num_cells=eme_kwargs["num_cells"],
         num_modes=eme_kwargs["num_modes"],
-        res=eme_kwargs["res"],
+        device_res=eme_kwargs["res"],
     )
+
+
+def main() -> dict[str, object]:
+    """Design the matrix and run each design's full analysis on the cluster.
+
+    Submits one analysis job per design (FH/SH spectra + propagation + plots +
+    GDS, each into its own timestamped subfolder of ``MEOW_SLURM_FOLDER``) and
+    awaits them. Set ``MEOW_SLURM_CLUSTER=slurm`` (and ``MEOW_SLURM_PARTITION``)
+    to dispatch to a cluster instead of local subprocesses.
+    """
+    _submit_runs()
+    return {"gathered": asyncio.run(agather_runs(JOB_FOLDER))}
+
+
+def submit_main() -> dict[str, object]:
+    """Session A: submit every design's analysis to the cluster and return."""
+    records = _submit_runs()
     return {
-        "submitted": {r.label: r.jobs.job_ids for r in records},
+        "submitted": {
+            r.label: {"job_id": r.job_id, "out_dir": r.out_dir} for r in records
+        },
         "folder": str(JOB_FOLDER),
         "next": "run 'gather' in a later session with the same MEOW_SLURM_FOLDER",
     }
 
 
 def gather_main() -> dict[str, object]:
-    """Session B (later): reload and collect the results from ``MEOW_SLURM_FOLDER``."""
-    return {"gathered": gather_results(JOB_FOLDER)}
+    """Session B (later): reload and collect the run summaries (any session)."""
+    return {"gathered": gather_runs(JOB_FOLDER)}
 
 
 if __name__ == "__main__":
