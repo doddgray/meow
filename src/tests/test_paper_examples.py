@@ -515,6 +515,57 @@ def test_example_defaults_are_128_cells_and_8_modes() -> None:
         assert default(fn, "num_modes") == 8
 
 
+def test_slurm_load_run_and_corrupt_records_skipped(tmp_path: Path) -> None:
+    """load_run targets a specific run dir; load_runs skips corrupt records."""
+    import pickle
+
+    from examples.papers import _slurm
+
+    folder = tmp_path / "runs"
+    good = folder / "20990101-000000-good"
+    good.mkdir(parents=True)
+    (good / "run.pkl").write_bytes(pickle.dumps({"label": "good", "ok": True}))
+    bad = folder / "20990101-000001-bad"
+    bad.mkdir(parents=True)
+    (bad / "run.pkl").write_bytes(b"not a valid pickle \x00\x01\x02")
+
+    # load_run loads a *specific* run by directory or by its run.pkl file
+    assert _slurm.load_run(good)["label"] == "good"
+    assert _slurm.load_run(good / "run.pkl")["ok"] is True
+
+    # load_runs skips the corrupt/incompatible record (warns) instead of crashing
+    with pytest.warns(UserWarning, match="unreadable run record"):
+        runs = _slurm.load_runs(folder)
+    assert [r["label"] for r in runs] == ["good"]
+
+
+def test_kwolek_designer_broadband_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The non-slurm kwolek_designer analysis saves a >1-octave spectrum, GDS and
+    FH/SH field plots for a design (run in-process via local worker threads)."""
+    monkeypatch.setenv("MEOW_NUM_CELLS", "4")
+    monkeypatch.setenv("MEOW_NUM_MODES", "2")
+    monkeypatch.setenv("MEOW_SPECTRUM_NPTS", "3")
+
+    d = kd.design_faquad_filter(
+        kd.tfln_platform(0.30), 1.55, 0.775, w_top=1.2, res=0.08
+    )
+    out = tmp_path / "design"
+    summary = kd.analyze_design(d, out, save_fields=True)
+
+    assert summary["kind"] == "faquad"
+    # the band spans more than one octave (0.8*SH .. 1.2*FH)
+    lo, hi = summary["band_nm"]
+    assert hi / lo > 2.0
+    produced = {p.name for p in out.iterdir()}
+    assert any(n.endswith("_spectrum.png") for n in produced)
+    assert any(n.endswith("_propagation.png") for n in produced)
+    assert any(n.endswith(".gds") for n in produced)
+    assert 0.0 <= summary["fh_cross"] <= 1.0
+    assert 0.0 <= summary["sh_bar"] <= 1.0
+
+
 def test_dichroic_designer_submit_runs_then_gather(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

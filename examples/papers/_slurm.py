@@ -191,20 +191,44 @@ def start_run(
     return run
 
 
+def load_run(run_path: str | Path) -> Any:
+    """Load a single analysis run from a specific run/job directory (or its file).
+
+    ``run_path`` may be the run's timestamped directory (its ``run.pkl`` is
+    loaded) or the ``run.pkl`` file itself. Use this to reattach to a *specific*
+    run rather than the most-recent / all matching runs of :func:`load_runs`.
+    """
+    import pickle
+
+    path = Path(run_path)
+    if path.is_dir():
+        path = path / RUN_RECORD
+    with path.open("rb") as f:
+        return pickle.load(f)
+
+
 def load_runs(folder: str | Path) -> list[Any]:
     """Load every analysis run persisted under ``folder`` (recursively).
 
     Each distributed analysis run pickles itself to ``<run_dir>/run.pkl`` (see
     :class:`examples.papers._analysis._Run`); this globs all of them under
     ``folder`` and unpickles them, so a later session can reattach to the
-    submitted jobs and :meth:`gather` the results.
+    submitted jobs and :meth:`gather` the results. Records that fail to unpickle
+    (e.g. corrupt, or written by an incompatible older version) are skipped with
+    a warning rather than crashing the whole load.
     """
     import pickle
+    import warnings
 
     runs: list[Any] = []
     for path in sorted(Path(folder).glob(f"**/{RUN_RECORD}")):
-        with path.open("rb") as f:
-            runs.append(pickle.load(f))
+        try:
+            with path.open("rb") as f:
+                runs.append(pickle.load(f))
+        except Exception as e:  # noqa: BLE001 - skip corrupt/incompatible records
+            warnings.warn(
+                f"skipping unreadable run record {path}: {e!r}", stacklevel=2
+            )
     return runs
 
 
