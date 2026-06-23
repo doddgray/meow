@@ -258,6 +258,61 @@ def test_async_submit_handle_matches_serial(
     np.testing.assert_allclose(np.asarray(S_par), np.asarray(S_ref), atol=1e-9)
 
 
+def test_submit_spectrum_handle_matches_and_reloads(
+    taper: tuple[list[mw.Cell], mw.Environment],
+    tmp_path,  # noqa: ANN001
+) -> None:
+    """submit_s_matrix_spectrum returns a picklable handle matching the spectrum."""
+    pytest.importorskip("submitit")
+    cells, env = taper
+    wls = np.array([1.5, 1.6])
+    executor = mw.slurm_executor(
+        folder=str(tmp_path / "spec"), cluster="local", timeout_min=10
+    )
+    handle = mw.submit_s_matrix_spectrum(
+        cells, env, executor=executor, wls=wls, num_modes=NUM_MODES
+    )
+    assert isinstance(handle, mw.ParallelEMESpectrumJobs)
+    reloaded = mw.ParallelEMESpectrumJobs.load(handle.save(tmp_path / "spec.pkl"))
+    got = reloaded.result()
+    ref = mw.compute_s_matrix_spectrum(
+        cells, env, wls=wls, num_modes=NUM_MODES,
+        executor=ThreadPoolExecutor(max_workers=2),
+    )
+    assert len(got) == len(wls)
+    for (S, _), (S_ref, _) in zip(got, ref, strict=True):
+        np.testing.assert_allclose(np.asarray(S), np.asarray(S_ref), atol=1e-9)
+
+
+def test_submit_cell_modes_keeps_fields_and_matches_serial(
+    taper: tuple[list[mw.Cell], mw.Environment],
+    serial_s_matrix: tuple,
+    tmp_path,  # noqa: ANN001
+) -> None:
+    """submit_cell_modes returns the full per-cell modes (with fields).
+
+    The single-cell decomposition keeps each cell's mode fields, so the modes
+    can be cascaded into the same S-matrix as the serial solve and reused for
+    field propagation. The handle is picklable for multi-session collection.
+    """
+    pytest.importorskip("submitit")
+    cells, env = taper
+    S_ref, pm_ref = serial_s_matrix
+    executor = mw.slurm_executor(
+        folder=str(tmp_path / "fields"), cluster="local", timeout_min=10
+    )
+    handle = mw.submit_cell_modes(cells, env, executor=executor, num_modes=NUM_MODES)
+    assert isinstance(handle, mw.ParallelFieldModeJobs)
+    reloaded = mw.ParallelFieldModeJobs.load(handle.save(tmp_path / "fields.pkl"))
+    modes = reloaded.result()
+    assert len(modes) == len(cells)
+    assert all(len(m) == NUM_MODES for m in modes)
+    # full fields preserved -> the modes cascade to the serial S-matrix
+    S_par, pm_par = mw.compute_s_matrix(modes, cells=cells)
+    assert pm_par == pm_ref
+    np.testing.assert_allclose(np.asarray(S_par), np.asarray(S_ref), atol=1e-9)
+
+
 def test_async_parallel_matches_serial(
     taper: tuple[list[mw.Cell], mw.Environment],
     serial_s_matrix: tuple,

@@ -24,7 +24,6 @@ handle from the submitting process.
 
 from __future__ import annotations
 
-import asyncio
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -154,95 +153,59 @@ def make_run_dir(folder: str | Path, label: str) -> Path:
     return run_dir
 
 
-@dataclass
-class SavedRun:
-    """A submitted analysis job (returning a summary dict) plus its location.
-
-    Picklable, so the submitting session can persist it into the run's
-    timestamped folder and a later session can reload it (reattaching to the
-    still-running submitit job) to collect the summary. The figures/GDS/data
-    are written by the job directly into ``out_dir`` on the shared filesystem.
-    """
-
-    job: Any
-    label: str
-    out_dir: str
-
-    @property
-    def job_id(self) -> str:
-        return str(getattr(self.job, "job_id", ""))
-
-    def done(self) -> bool:
-        is_done = getattr(self.job, "done", None)
-        if callable(is_done):
-            try:
-                return bool(is_done())
-            except Exception:  # noqa: BLE001 - a not-yet-known job isn't done
-                return False
-        return True
-
-    def result(self) -> dict:
-        return self.job.result()
-
-    async def aresult(self) -> dict:
-        return await asyncio.to_thread(self.job.result)
-
-    def save(self) -> Path:
-        path = Path(self.out_dir) / RUN_RECORD
-        path.parent.mkdir(parents=True, exist_ok=True)
-        import pickle
-
-        with path.open("wb") as f:
-            pickle.dump(self, f)
-        return path
-
-    @classmethod
-    def load(cls, path: str | Path) -> SavedRun:
-        import pickle
-
-        with Path(path).open("rb") as f:
-            obj = pickle.load(f)
-        if not isinstance(obj, cls):
-            msg = f"{path} is not a {cls.__name__}."
-            raise TypeError(msg)
-        return obj
-
-
-def submit_run(
-    analyze_fn: Any,
+def start_run(
+    submit_fn: Any,
     spec: dict,
     settings: dict,
     *,
-    executor_factory: Any,
     folder: str | Path,
     label: str,
-) -> SavedRun:
-    """Submit one analysis job into a fresh timestamped run folder and persist it.
+    executor_factory: Any,
+    save_fields: bool | None = None,
+) -> Any:
+    """Create a timestamped run folder, submit the distributed EME and persist it.
 
-    A fresh ``<timestamp>-<label>`` run folder is created under ``folder``;
-    ``executor_factory(submitit_dir)`` builds the executor (so submitit's own
-    logs/payloads land inside the run folder too), and
-    ``analyze_fn(out_dir, spec, settings)`` (e.g.
-    :func:`examples.papers._analysis.analyze_dichroic`) runs on the cluster and
-    writes all its outputs into the run folder. Returns immediately with a
-    persisted :class:`SavedRun` handle.
+    ``submit_fn(spec, settings, executor_factory=..., out_dir=run_dir,
+    save_fields=...)`` (e.g.
+    :func:`examples.papers._analysis.submit_dichroic_run`) submits the design's
+    EME as concurrent jobs into a fresh ``<timestamp>-<label>`` run folder and
+    returns a run object; this saves it to ``<run_dir>/run.pkl`` so a later
+    session can reload and :meth:`gather` it. ``executor_factory(dir)`` builds a
+    :func:`meow.slurm_executor` rooted at ``dir`` (under the run folder, so the
+    submitit logs are co-located); it is wrapped to accept a per-job-group name.
     """
     run_dir = make_run_dir(folder, label)
-    executor = executor_factory(run_dir / "submitit")
-    # the human label may contain path-unsafe characters (e.g. a "/"); pass a
-    # filesystem-safe stem for the output filenames alongside it.
     settings = {**settings, "label": label, "file_stem": _safe(label)}
-    job = executor.submit(analyze_fn, str(run_dir), spec, settings)
-    record = SavedRun(job=job, label=label, out_dir=str(run_dir))
-    record.save()
-    return record
+
+    def named_executor(name: str) -> Any:
+        return executor_factory(run_dir / "submitit" / name)
+
+    run = submit_fn(
+        spec,
+        settings,
+        executor_factory=named_executor,
+        out_dir=run_dir,
+        save_fields=save_fields,
+    )
+    run.save()
+    return run
 
 
-def load_runs(folder: str | Path) -> list[SavedRun]:
-    """Load every :class:`SavedRun` persisted under ``folder`` (recursively)."""
-    return [
-        SavedRun.load(p) for p in sorted(Path(folder).glob(f"**/{RUN_RECORD}"))
-    ]
+def load_runs(folder: str | Path) -> list[Any]:
+    """Load every analysis run persisted under ``folder`` (recursively).
+
+    Each distributed analysis run pickles itself to ``<run_dir>/run.pkl`` (see
+    :class:`examples.papers._analysis._Run`); this globs all of them under
+    ``folder`` and unpickles them, so a later session can reattach to the
+    submitted jobs and :meth:`gather` the results.
+    """
+    import pickle
+
+    runs: list[Any] = []
+    for path in sorted(Path(folder).glob(f"**/{RUN_RECORD}")):
+        with path.open("rb") as f:
+            runs.append(pickle.load(f))
+    return runs
 
 
 def cli_main(module: str, commands: dict[str, Any]) -> None:

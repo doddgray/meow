@@ -25,10 +25,12 @@ with the parallel engine are selected via the ``MEOW_PAPER_BACKEND`` and
 ``MEOW_PAPER_PARALLEL`` environment variables (see ``examples/papers/
 _backends.py``).
 
-Run with ``MEOW_EXAMPLE_FAST=1`` for a coarse-but-quick version (used by the
-test suite); the default settings take tens of minutes on a laptop.
-``MEOW_EXAMPLE_HIFI=1`` additionally overlays a (slow) full-device EME
-transmission spectrum on Fig. 5 with a larger wavelength and EME-cell budget.
+Resolution is selected with ``MEOW_EXAMPLE_RES`` in ``{low, medium, high}``
+(default ``medium``): ``low`` is a coarse-but-quick smoke test (used by the test
+suite), ``medium`` is the full-quality default (tens of minutes on a laptop) and
+``high`` increases the mesh resolution, mode count and spectral sampling to the
+point of convergence (slow). ``MEOW_EXAMPLE_HIFI=1`` additionally overlays a
+(slow) full-device EME transmission spectrum on Fig. 5.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import meow as mw
+from examples.papers import _resolution
 from examples.papers._backends import parallel_enabled, resolve_backend
 from examples.papers._plot import plot_component
 from examples.papers.magden2018_dichroic import (
@@ -67,17 +70,17 @@ from examples.papers.magden2018_dichroic import (
 
 gf.gpdk.PDK.activate()
 
-FAST = bool(int(os.environ.get("MEOW_EXAMPLE_FAST", "0")))
+pick = _resolution.pick
 # High-fidelity mode (slow): more spectral points and a full-device EME
 # transmission spectrum in Fig. 5, to approach the paper's modeled spectra.
 HIFI = bool(int(os.environ.get("MEOW_EXAMPLE_HIFI", "0")))
 FIGDIR = Path(__file__).parent / "figures"
 
-RES = 0.05 if FAST else 0.02
-NUM_MODES = 3 if FAST else 4
+RES = pick(low=0.05, medium=0.02, high=0.015)
+NUM_MODES = pick(low=3, medium=4, high=6)
 
 # Fig. 5 spectral sampling and (HIFI) EME cell budget for the modeled spectra.
-FIG5_N_WL = 41 if HIFI else (5 if FAST else 13)
+FIG5_N_WL = 41 if HIFI else pick(low=5, medium=13, high=21)
 FIG5_EME_CELLS = (12, 20, 80, 12) if HIFI else (6, 8, 12, 6)
 
 # FDE backend ("tidy3d"/"mpb"/"lumerical" or MEOW_PAPER_BACKEND) and whether to
@@ -118,7 +121,7 @@ def figure1() -> dict[str, float]:
         ax.set_xlabel("x [um]")
 
     # (bottom left/middle) Fig. 1e: isolated waveguide neff vs wavelength
-    n_wl = 5 if FAST else 11
+    n_wl = pick(low=5, medium=11, high=21)
     wls = np.linspace(1.49, 1.59, n_wl)
     widths_a = [0.312, 0.318, 0.324]
     ax_e = fig.add_subplot(grid[1, 0:2])
@@ -167,7 +170,7 @@ def figure1() -> dict[str, float]:
     # the splitting is purely 2*kappa). This guarantees the textbook ordering
     # psi_- <= psi_A, psi_B <= psi_+ that the paper's Fig. 1f shows.
     ax_f = fig.add_subplot(grid[1, 2])
-    n_wl_f = 5 if FAST else 9
+    n_wl_f = pick(low=5, medium=9, high=17)
     wl_c0 = cutoffs[f"{W_A * 1e3:.0f}"]
     wls_f = np.linspace(wl_c0 - 0.008, wl_c0 + 0.008, n_wl_f)
     # same isolated cross-sections as Fig. 1e, so psi_A and psi_B cross exactly
@@ -215,7 +218,7 @@ def figure2() -> dict[str, float]:
     over 0-15.
     """
     mesh = _mesh()
-    n_wl = 15 if FAST else 31
+    n_wl = pick(low=15, medium=31, high=61)
     wls = np.linspace(1.530, 1.550, n_wl)
     # self-consistent cutoff: the wavelength where delta = 0 (phase matching),
     # also the calibration point for |kappa|.
@@ -314,7 +317,9 @@ def _section_sweep(
 def figure3() -> dict[str, float]:
     """Layout + EME convergence of the four adiabatic sections (Fig. 3)."""
     component = dichroic_filter()
-    n1, n2, n3, n4 = (3, 4, 6, 3) if FAST else (6, 10, 48, 8)
+    n1, n2, n3, n4 = pick(
+        low=(3, 4, 6, 3), medium=(6, 10, 48, 8), high=(10, 16, 80, 12)
+    )
     cells = device_cells(component, cells_per_section=(n1, n2, n3, n4), mesh=_mesh())
     section_slices = {
         "(1) develop WGB": slice(0, n1),
@@ -322,7 +327,7 @@ def figure3() -> dict[str, float]:
         "(3) separate": slice(n1 + n2, n1 + n2 + n3),
         "(4) merge WGB": slice(n1 + n2 + n3, n1 + n2 + n3 + n4),
     }
-    n_lengths = 4 if FAST else 8
+    n_lengths = pick(low=4, medium=8, high=14)
     lengths = np.linspace(40, 1100, n_lengths)
     wls = (1.53, 1.55)  # below / above the ~1540 nm cutoff (paper Fig. 3b-d)
     sweeps = _section_sweep(cells, section_slices, wls, lengths)
@@ -426,7 +431,7 @@ def figure4(cutoffs: dict[str, float]) -> dict[str, float]:
     component = dichroic_filter()
     wl_c = cutoffs[f"{W_A * 1e3:.0f}"]
     wls = [1.30, 1.40, 1.53, 1.5396, 1.55, 1.70, 2.10, 2.50, 2.80]
-    n_sec = (4, 6, 14, 4) if FAST else (6, 8, 28, 6)
+    n_sec = pick(low=(4, 6, 14, 4), medium=(6, 8, 28, 6), high=(10, 14, 48, 10))
     mesh = device_mesh(res=RES)
     _, _, y_a_final = lateral_positions()
     cells = device_cells(component, cells_per_section=n_sec, mesh=mesh)

@@ -6,16 +6,17 @@ three stages of a slurm analysis explicitly:
 
 1. **prepare** (:func:`design_coupler`): design one Si3N4 dichroic coupler for a
    target cutoff wavelength.
-2. **asynchronously deploy** (:func:`submit`): submit the whole analysis as a
-   single slurm job (:func:`examples.papers._analysis.analyze_dichroic`) and
-   return *at once* - the job runs on the cluster, not in this process. A small
-   picklable :class:`_slurm.SavedRun` handle is written into the run's
-   timestamped output folder.
-3. **gather** (:func:`agather` / :func:`gather`): collect the finished job's
-   summary; the figures, GDS and data already live in the run folder.
+2. **asynchronously deploy** (:func:`submit`): break the coupler's EME into
+   **subsets of cells run concurrently as separate slurm jobs** - the dense
+   transmission spectrum as slice-group jobs and (when full fields are saved)
+   the propagation fields as single-cell jobs - returning *at once*. A picklable
+   run record (``run.pkl``) is written into the run's timestamped output folder.
+3. **gather** (:func:`agather` / :func:`gather`): reattach to the jobs, assemble
+   the spectrum + propagation and write the figures, GDS and data into the run
+   folder.
 
-The analysis job computes and saves, into a fresh **timestamped subfolder** of
-``MEOW_SLURM_FOLDER``:
+The :func:`gather` step computes and saves, into a fresh **timestamped
+subfolder** of ``MEOW_SLURM_FOLDER``:
 
 - a dense short-/long-pass **transmission spectrum** (``*_spectrum.png`` + the
   raw arrays in ``*_results.npz``);
@@ -25,12 +26,14 @@ The analysis job computes and saves, into a fresh **timestamped subfolder** of
 - the device **GDS** (``*.gds``) and a JSON summary.
 
 Because step 2 only *submits*, steps 2 and 3 can run in **different python
-sessions**: submit from a short-lived session, then reload the handle and gather
+sessions**: submit from a short-lived session, then reload the run and gather
 later, as long as both sessions point ``MEOW_SLURM_FOLDER`` at the same shared
 folder and the jobs outlive the submitter (true for ``cluster="slurm"``).
 Wavelength controls (spectrum/propagation bounds + counts) have sensible
 defaults and are overridable via the ``MEOW_SPECTRUM_*`` / ``MEOW_PROP_*`` env
-vars (see :mod:`examples.papers._analysis`).
+vars; full-field saving is toggled by ``save_fields`` / ``MEOW_SAVE_FIELDS`` and
+the resolution preset by ``MEOW_EXAMPLE_RES`` (see
+:mod:`examples.papers._analysis` / :mod:`examples.papers._resolution`).
 
 Run the full async flow in one process (job as a local subprocess) with::
 
@@ -54,12 +57,12 @@ from typing import Any
 
 import gdsfactory as gf
 
-from examples.papers import _analysis, _slurm
+from examples.papers import _analysis, _resolution, _slurm
 from examples.papers.dichroic_designer import DichroicDesign, design_dichroic, to_params
 from examples.papers.dichroic_designer_si3n4 import WGB_DESIGN, si3n4_platform
 from examples.papers.dichroic_designer_slurm import analysis_settings, make_executor
 
-FAST = bool(int(os.environ.get("MEOW_EXAMPLE_FAST", "0")))
+pick = _resolution.pick
 JOB_FOLDER = Path(os.environ.get("MEOW_SLURM_FOLDER", "meow_dichroic_coupler_jobs"))
 
 # the single coupler's run label (also the timestamped subfolder/file stem)
@@ -76,7 +79,7 @@ def design_coupler(cutoff_wl: float = 1.0, res: float = 0.05) -> DichroicDesign:
 
 
 # --------------------------------------------------------------------------
-# 2. asynchronously deploy: submit the analysis job and return immediately
+# 2. asynchronously deploy: distribute the EME jobs and return immediately
 # --------------------------------------------------------------------------
 def submit(
     design: DichroicDesign,
@@ -86,37 +89,41 @@ def submit(
     num_cells: int = 16,
     num_modes: int = 4,
     device_res: float = 0.05,
-) -> _slurm.SavedRun:
-    """Asynchronously deploy the coupler's full analysis as a single slurm job.
+    save_fields: bool | None = None,
+) -> Any:
+    """Asynchronously deploy the coupler's EME as concurrent cell-subset jobs.
 
-    Returns as soon as the job is queued, persisting a :class:`_slurm.SavedRun`
-    handle into a fresh timestamped subfolder of ``folder`` (where the job will
-    also write its spectrum/propagation/design figures, GDS and data). The
-    submitting session may then exit; collect the result later with
-    :func:`gather` / :func:`agather`. ``executor_factory(submitit_dir)`` builds
-    the executor (default :func:`make_executor`); use ``cluster="slurm"`` so the
-    job outlives this process.
+    Submits the dense transmission spectrum as slice-group jobs and (when
+    ``save_fields`` is on, the default) the propagation fields as single-cell
+    jobs, returning as soon as they are queued. A persisted run record
+    (``run.pkl``) is written into a fresh timestamped subfolder of ``folder``;
+    the submitting session may then exit and a later session can :func:`gather`
+    the assembled spectrum/propagation/design figures, GDS and data.
+    ``executor_factory(dir)`` builds the per-job executor (default
+    :func:`make_executor`); use ``cluster="slurm"`` so the jobs outlive this
+    process.
     """
     if executor_factory is None:
         def executor_factory(sub: Path) -> Any:
             return make_executor(folder=sub)
 
-    return _slurm.submit_run(
-        _analysis.analyze_dichroic,
+    return _slurm.start_run(
+        _analysis.submit_dichroic_run,
         to_params(design),
         analysis_settings(
             design, num_cells=num_cells, num_modes=num_modes, device_res=device_res
         ),
-        executor_factory=executor_factory,
         folder=folder,
         label=RECORD_LABEL,
+        executor_factory=executor_factory,
+        save_fields=save_fields,
     )
 
 
 # --------------------------------------------------------------------------
-# 3. gather: reload the handle and collect the finished result
+# 3. gather: reload the run and assemble + plot the results
 # --------------------------------------------------------------------------
-def _latest_run(folder: Path | str) -> _slurm.SavedRun:
+def _latest_run(folder: Path | str) -> Any:
     runs = [r for r in _slurm.load_runs(folder) if r.label == RECORD_LABEL]
     if not runs:
         msg = f"no '{RECORD_LABEL}' analysis run found under {folder}"
@@ -125,18 +132,19 @@ def _latest_run(folder: Path | str) -> _slurm.SavedRun:
 
 
 def gather(folder: Path | str = JOB_FOLDER) -> dict:
-    """Reload the persisted handle and block until the analysis is ready.
+    """Reload the run and assemble the distributed EME into figures + data.
 
     Can run in a **different session** from :func:`submit`: it reattaches to the
-    cluster job through the persisted :class:`_slurm.SavedRun` handle and returns
-    its summary (the figures/GDS/data are already in the run folder).
+    cluster jobs through the persisted run record, assembles the spectrum (and
+    propagation, if fields were saved) and writes the figures/GDS/data into the
+    run folder, returning the summary.
     """
-    return _latest_run(folder).result()
+    return _latest_run(folder).gather()
 
 
 async def agather(folder: Path | str = JOB_FOLDER) -> dict:
-    """Async :func:`gather` (awaits the job without blocking the event loop)."""
-    return await _latest_run(folder).aresult()
+    """Async :func:`gather` (assembles + plots off the event loop)."""
+    return await _latest_run(folder).agather()
 
 
 # --------------------------------------------------------------------------
@@ -145,14 +153,14 @@ async def agather(folder: Path | str = JOB_FOLDER) -> dict:
 def _settings() -> dict[str, Any]:
     return {
         "cutoff_wl": 1.0,
-        "design_res": 0.06 if FAST else 0.05,
-        "num_cells": 8 if FAST else 16,
-        "num_modes": 2 if FAST else 4,
-        "device_res": 0.07 if FAST else 0.05,
+        "design_res": pick(low=0.06, medium=0.05, high=0.03),
+        "num_cells": pick(low=8, medium=16, high=32),
+        "num_modes": pick(low=2, medium=4, high=6),
+        "device_res": pick(low=0.07, medium=0.05, high=0.035),
     }
 
 
-def _submit(folder: Path | str) -> _slurm.SavedRun:
+def _submit(folder: Path | str) -> Any:
     settings = _settings()
     design = design_coupler(settings["cutoff_wl"], res=settings["design_res"])
     return submit(
@@ -183,10 +191,10 @@ def main() -> dict[str, object]:
 
 
 def submit_main() -> dict[str, object]:
-    """Session A: design + asynchronously deploy the coupler's analysis, then return."""
+    """Session A: design + asynchronously deploy the coupler's EME, then return."""
     saved = _submit(JOB_FOLDER)
     return {
-        "submitted": {"job_id": saved.job_id, "out_dir": saved.out_dir},
+        "submitted": {"job_ids": saved.job_ids, "out_dir": saved.out_dir},
         "folder": str(JOB_FOLDER),
         "next": "run 'gather' in a later session with the same MEOW_SLURM_FOLDER",
     }

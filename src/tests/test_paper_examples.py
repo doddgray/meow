@@ -12,7 +12,7 @@ import meow as mw
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
-os.environ.setdefault("MEOW_EXAMPLE_FAST", "1")
+os.environ.setdefault("MEOW_EXAMPLE_RES", "low")  # coarse smoke-test resolution
 
 gf.gpdk.PDK.activate()
 
@@ -520,6 +520,7 @@ def test_thickness_sweep_slurm_submit_then_gather(
         executor_factory=lambda sub: ts.make_executor(folder=sub, cluster="local"),
         num_cells=4,
         num_modes=2,
+        save_fields=False,  # spectrum-only keeps the smoke test light
     )
     assert {r.label for r in records} == {"200nm-1000nm", "100nm-1000nm"}
     del records
@@ -531,6 +532,7 @@ def test_thickness_sweep_slurm_submit_then_gather(
         produced = {p.name for p in run_dir.iterdir()}
         assert any(n.endswith("_spectrum.png") for n in produced)
         assert f"{label}.gds" in produced
+        assert summary["saved_fields"] is False
 
 
 # --- Kwolek 2026: TFLN FAQUAD combiner ---
@@ -777,11 +779,10 @@ def test_kwolek_slurm_submit_runs_then_gather(
     tmp_path,  # noqa: ANN001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """submit_runs ships one analysis job/design (FH/SH spectra + propagation +
-    plots + GDS) into a timestamped folder; gather_runs reloads the summary."""
+    """submit_runs distributes each FH/SH sweep point as its own slice-group job
+    (spectrum-only here); gather_runs assembles the FH/SH spectra + GDS."""
     pytest.importorskip("submitit")
-    monkeypatch.setenv("MEOW_SPECTRUM_NPTS", "3")
-    monkeypatch.setenv("MEOW_PROP_NPTS", "3")
+    monkeypatch.setenv("MEOW_SPECTRUM_NPTS", "2")
 
     d = kd.design_faquad_filter(
         kd.tfln_platform(0.30), 1.55, 0.775, w_top=1.2, res=0.08
@@ -791,9 +792,10 @@ def test_kwolek_slurm_submit_runs_then_gather(
         [d],
         folder=folder,
         executor_factory=lambda sub: ks.make_executor(folder=sub, cluster="local"),
-        num_cells=5,
+        num_cells=4,
         num_modes=2,
         device_res=0.1,
+        save_fields=False,  # spectrum-only keeps the smoke test light
     )
     key = "TFLN-300nm/1550-775nm"
     assert [r.label for r in records] == [key]
@@ -804,8 +806,10 @@ def test_kwolek_slurm_submit_runs_then_gather(
     assert set(gathered) == {key}
     summary = gathered[key]
     produced = {p.name for p in run_dir.iterdir()}
-    for suffix in ("_spectrum.png", "_propagation.png", "_design.png"):
+    for suffix in ("_spectrum.png", "_design.png"):
         assert any(name.endswith(suffix) for name in produced)
+    assert f"{key.replace('/', '_')}.gds" in produced
     assert summary["kind"] == "faquad"
+    assert summary["saved_fields"] is False
     assert 0.0 <= summary["fh_cross"] <= 1.0
     assert 0.0 <= summary["sh_bar"] <= 1.0

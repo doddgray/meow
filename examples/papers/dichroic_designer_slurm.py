@@ -13,25 +13,29 @@ slurm cluster; the design workflows themselves can be run either
   submitted at once and awaited together with :func:`asyncio.gather`, so all the
   design workflows' jobs are in flight on the cluster simultaneously.
 
-**Analysis runs (plots + GDS).** The default workflow (:func:`submit_runs` /
-:func:`gather_runs`, used by ``main`` and the ``submit``/``gather``
-subcommands) submits *one slurm job per design* that runs the whole analysis -
-a dense short-/long-pass transmission spectrum, intensity-propagation plots at
-a few wavelengths around the cutoff, a layout + index-crossing design figure,
-and the device GDS - writing every figure, the GDS and the raw data into a
-fresh **timestamped subfolder** of ``MEOW_SLURM_FOLDER`` (one per submitted
-job). See :mod:`examples.papers._analysis` for the wavelength controls (env
-vars ``MEOW_SPECTRUM_SPAN``/``MEOW_SPECTRUM_NPTS`` and
-``MEOW_PROP_SPAN``/``MEOW_PROP_NPTS``/``MEOW_PROP_WLS``).
+**Distributed analysis runs (plots + GDS).** The default workflow
+(:func:`submit_runs` / :func:`gather_runs`, used by ``main`` and the
+``submit``/``gather`` subcommands) breaks each design's EME into **subsets of
+cells run concurrently as separate slurm jobs**: the dense short-/long-pass
+transmission spectrum is distributed as overlapping slice-group jobs (as in
+``examples/parallel_eme_spectrum.py``), and - when full fields are saved (the
+default, ``save_fields`` / ``MEOW_SAVE_FIELDS``) - the propagation fields are
+distributed as single-cell jobs that keep each cell's full mode fields. The
+:func:`gather_runs` step (a later session) reattaches to those jobs, assembles
+the spectrum + propagation, and writes the spectrum/propagation/design figures,
+the device GDS and the raw data into a fresh **timestamped subfolder** of
+``MEOW_SLURM_FOLDER`` (one per design). Wavelength controls: env vars
+``MEOW_SPECTRUM_SPAN``/``MEOW_SPECTRUM_NPTS`` and
+``MEOW_PROP_SPAN``/``MEOW_PROP_NPTS``/``MEOW_PROP_WLS`` (see
+:mod:`examples.papers._analysis`); the resolution preset (mesh / modes / cells)
+follows ``MEOW_EXAMPLE_RES`` in ``{low, medium, high}``.
 
 **Reloading results in a later session.** Because submitit persists every job
 in its ``folder``, submission and collection do not have to happen in the same
-process. :func:`gather_runs` - run in a *different* python session pointing at
-the same ``MEOW_SLURM_FOLDER`` - reloads the persisted :class:`_slurm.SavedRun`
-records, reattaches to the still-running jobs and returns their summaries (the
-figures/GDS already on disk). A lighter S-matrix-only multi-session path
-(:func:`submit_designs` / :func:`gather_results`, built on
-:class:`meow.ParallelEMEJobs`) is also kept for just the port powers.
+process. :func:`gather_runs` reloads the persisted run records
+(``<run_dir>/run.pkl``) and reattaches to the still-running jobs. A lighter
+S-matrix-only multi-session path (:func:`submit_designs` / :func:`gather_results`,
+built on :class:`meow.ParallelEMEJobs`) is also kept for just the port powers.
 
 See ``examples/papers/README.md`` ("Running EME on a slurm cluster") for how to
 configure the local and remote environments for blocking, async and
@@ -61,7 +65,7 @@ import gdsfactory as gf
 import numpy as np
 
 import meow as mw
-from examples.papers import _analysis, _slurm
+from examples.papers import _analysis, _resolution, _slurm
 from examples.papers.dichroic_designer import (
     DichroicDesign,
     Platform,
@@ -74,7 +78,7 @@ from examples.papers.dichroic_designer_si3n4 import (
     si3n4_platform,
 )
 
-FAST = bool(int(os.environ.get("MEOW_EXAMPLE_FAST", "0")))
+pick = _resolution.pick
 JOB_FOLDER = Path(os.environ.get("MEOW_SLURM_FOLDER", "meow_dichroic_jobs"))
 
 # EME cell + port-attribution helpers live in ``_analysis`` (shared with the
@@ -251,13 +255,13 @@ def analysis_settings(
         "num_modes": num_modes,
         "device_res": device_res,
         "spectrum_wls": _analysis.spectrum_wavelengths(
-            design.cutoff_wl, n=5 if FAST else None
+            design.cutoff_wl, n=pick(low=5, medium=None, high=121)
         ),
         "prop_wls": _analysis.propagation_wavelengths(
-            design.cutoff_wl, n=3 if FAST else None
+            design.cutoff_wl, n=pick(low=3, medium=5, high=7)
         ),
-        "n_neff": 4 if FAST else 9,
-        "num_z": 200 if FAST else 600,
+        "n_neff": pick(low=4, medium=9, high=15),
+        "num_z": pick(low=200, medium=600, high=1000),
     }
 
 
@@ -269,23 +273,26 @@ def submit_runs(
     num_cells: int = 16,
     num_modes: int = 4,
     device_res: float = 0.05,
-) -> list[_slurm.SavedRun]:
-    """Submit a full analysis (spectrum + propagation + plots + GDS) per design.
+    save_fields: bool | None = None,
+) -> list[Any]:
+    """Submit each design's *distributed* EME analysis; return the run records.
 
-    Each design becomes one slurm job (:func:`_analysis.analyze_dichroic`) that
-    writes all of its figures, GDS and data into a fresh timestamped subfolder
-    of ``folder``; this returns immediately with the persisted
-    :class:`_slurm.SavedRun` handles. Collect the summaries later (any session)
-    with :func:`gather_runs`. ``executor_factory(submitit_dir)`` builds the
-    per-run executor (default: :func:`make_executor`).
+    For each design the dense transmission spectrum is submitted as concurrent
+    slice-group jobs and (when ``save_fields`` is on, the default) the
+    propagation fields as concurrent single-cell jobs - see
+    :func:`_analysis.submit_dichroic_run`. Each design's jobs go into a fresh
+    timestamped subfolder of ``folder`` with a persisted ``run.pkl``; collect
+    the assembled spectra/propagation plots/GDS later (any session) with
+    :func:`gather_runs`. ``executor_factory(dir)`` builds the per-job executor
+    (default: :func:`make_executor`).
     """
     if executor_factory is None:
         def executor_factory(sub: Path) -> Any:
             return make_executor(folder=sub)
 
     return [
-        _slurm.submit_run(
-            _analysis.analyze_dichroic,
+        _slurm.start_run(
+            _analysis.submit_dichroic_run,
             to_params(design),
             analysis_settings(
                 design,
@@ -293,27 +300,30 @@ def submit_runs(
                 num_modes=num_modes,
                 device_res=device_res,
             ),
-            executor_factory=executor_factory,
             folder=folder,
             label=f"{design.cutoff_wl * 1e3:.0f}nm",
+            executor_factory=executor_factory,
+            save_fields=save_fields,
         )
         for design in designs
     ]
 
 
 def gather_runs(folder: Path | str = JOB_FOLDER) -> dict[str, dict]:
-    """Reload and collect the analysis summaries from ``folder`` (any session).
+    """Reload each run, collect its distributed EME jobs and write the outputs.
 
-    The figures/GDS/data already live in each run's timestamped subfolder; this
-    reattaches to the (persisted) jobs and returns their summary dicts.
+    Runs in any later session: reattaches to the persisted jobs, assembles the
+    transmission spectrum (and propagation, if fields were saved), and writes
+    the spectrum/propagation/design figures, the GDS and the data into each
+    run's timestamped subfolder, returning the summary dicts.
     """
-    return {r.label: r.result() for r in _slurm.load_runs(folder)}
+    return {r.label: r.gather() for r in _slurm.load_runs(folder)}
 
 
 async def agather_runs(folder: Path | str = JOB_FOLDER) -> dict[str, dict]:
-    """Async :func:`gather_runs` (awaits all the analysis jobs together)."""
+    """Async :func:`gather_runs` (assembles + plots all the runs together)."""
     runs = _slurm.load_runs(folder)
-    summaries = await asyncio.gather(*(r.aresult() for r in runs))
+    summaries = await asyncio.gather(*(r.agather() for r in runs))
     return {r.label: s for r, s in zip(runs, summaries, strict=True)}
 
 
@@ -356,17 +366,19 @@ def _demo_designs() -> tuple[list[DichroicDesign], dict[str, Any]]:
     """The designs + EME settings shared by every entry point of this demo."""
     gf.gpdk.PDK.activate()
     platform = si3n4_platform()
-    res = 0.06 if FAST else 0.045
-    cutoffs = TARGET_CUTOFFS[::3] if FAST else TARGET_CUTOFFS[:4]
+    res = pick(low=0.06, medium=0.045, high=0.03)
+    cutoffs = pick(
+        low=TARGET_CUTOFFS[::3], medium=TARGET_CUTOFFS[:4], high=TARGET_CUTOFFS
+    )
     eme_kwargs = {
-        "num_cells": 8 if FAST else 16,
-        "num_modes": 2 if FAST else 4,
-        "res": 0.07 if FAST else 0.05,
+        "num_cells": pick(low=8, medium=16, high=32),
+        "num_modes": pick(low=2, medium=4, high=6),
+        "res": pick(low=0.07, medium=0.05, high=0.035),
     }
     return _design_sweep(platform, cutoffs, res), eme_kwargs
 
 
-def _submit_runs() -> list[_slurm.SavedRun]:
+def _submit_runs() -> list[Any]:
     designs, eme_kwargs = _demo_designs()
     return submit_runs(
         designs,
@@ -378,27 +390,28 @@ def _submit_runs() -> list[_slurm.SavedRun]:
 
 
 def main() -> dict[str, object]:
-    """Design a few Si3N4 splitters and run their full analysis on the cluster.
+    """Design a few Si3N4 splitters and run their distributed analysis on slurm.
 
-    Submits one analysis job per design (spectrum + propagation + plots + GDS,
-    each into its own timestamped subfolder of ``MEOW_SLURM_FOLDER``) and awaits
-    them. By default the jobs run as local subprocesses; set
-    ``MEOW_SLURM_CLUSTER=slurm`` (and ``MEOW_SLURM_PARTITION``) to use a cluster.
+    Submits each design's EME as concurrent cell-subset jobs (dense spectrum +
+    propagation fields), then assembles + plots them, writing the figures, GDS
+    and data into per-design timestamped subfolders of ``MEOW_SLURM_FOLDER``. By
+    default the jobs run as local subprocesses; set ``MEOW_SLURM_CLUSTER=slurm``
+    (and ``MEOW_SLURM_PARTITION``) to use a cluster.
     """
     _submit_runs()
     return {"gathered": asyncio.run(agather_runs(JOB_FOLDER))}
 
 
 def submit_main() -> dict[str, object]:
-    """Session A: submit every design's analysis to the cluster and return.
+    """Session A: submit every design's distributed EME analysis and return.
 
-    Each design's figures/GDS/data land in a timestamped subfolder of
-    ``MEOW_SLURM_FOLDER``; collect the summaries later with :func:`gather_main`.
+    Each design's jobs land in a timestamped subfolder of ``MEOW_SLURM_FOLDER``;
+    assemble + plot them later with :func:`gather_main`.
     """
     records = _submit_runs()
     return {
         "submitted": {
-            r.label: {"job_id": r.job_id, "out_dir": r.out_dir} for r in records
+            r.label: {"job_ids": r.job_ids, "out_dir": r.out_dir} for r in records
         },
         "folder": str(JOB_FOLDER),
         "next": "run 'gather' in a later session with the same MEOW_SLURM_FOLDER",

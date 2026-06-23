@@ -122,25 +122,30 @@ each optimized device layout next to its simulated (coupled-mode) transmission
 spectrum.
 
 `dichroic_designer_slurm.py` is a **slurm-cluster version** of the Si3N4
-designer. It designs the same splitters and submits, for each one, a full
-analysis as an independent cluster job through a `meow.slurm_executor`. Each
-job (`submit_runs` -> `_analysis.analyze_dichroic`) writes everything into a
-fresh **timestamped subfolder** of the MEOW jobs folder:
+designer. It designs the same splitters and, for each one, breaks the EME into
+**subsets of cells run concurrently as separate slurm jobs** (`submit_runs` ->
+`_analysis.submit_dichroic_run`): the dense short-/long-pass transmission
+spectrum is distributed as overlapping slice-group jobs (the
+`examples/parallel_eme_spectrum.py` decomposition), and - when full fields are
+saved (`save_fields` keyword / `MEOW_SAVE_FIELDS` env var, default on) - the
+propagation fields are distributed as single-cell jobs that keep each cell's
+full mode fields. `gather_runs` (a later session) reattaches to those jobs,
+assembles the results and writes into a fresh **timestamped subfolder** of the
+MEOW jobs folder:
 
 - a dense **short-/long-pass transmission spectrum** (`*_spectrum.png` + the raw
   arrays in `*_results.npz`);
 - **intensity-propagation plots** `|Ex|^2(z, x)` at a few wavelengths on either
-  side of and at the cutoff (`*_propagation.png`);
+  side of and at the cutoff (`*_propagation.png`, when fields were saved);
 - a layout + WGA/WGB index-crossing **design figure** (`*_design.png`,
   analogous to `dichroic_designer.py`); and
 - the device **GDS** (`*.gds`) and a JSON summary.
 
-`gather_runs` reloads the persisted run handles and returns their summaries (the
-figures/GDS/data already on disk) - and, because submitit persists each job in
-its `folder`, that can happen in a *different* python session (see "Reloading /
-gathering results in a later python session" below). The wavelength bounds and
-counts have sensible defaults and are overridable per call or via the
-`MEOW_SPECTRUM_*` / `MEOW_PROP_*` env vars (see `_analysis.py`).
+Because submitit persists each job in its `folder`, submit and gather can happen
+in *different* python sessions (see "Reloading / gathering results in a later
+python session" below). Spectrum/propagation wavelength bounds/counts are set by
+`MEOW_SPECTRUM_*` / `MEOW_PROP_*` and the mesh/modes/cells resolution by
+`MEOW_EXAMPLE_RES` (see `_analysis.py` / `_resolution.py`).
 
 It also keeps the in-session EME helpers `run_blocking` / `run_concurrent`
 (blocking vs. `asyncio.gather` over `meow.compute_s_matrix_parallel` /
@@ -149,14 +154,13 @@ path `submit_designs` / `gather_results` (built on `meow.ParallelEMEJobs`,
 writing one `<cutoff>.eme.pkl` per design) for just the port powers.
 
 `dichroic_coupler_slurm.py` is a focused **single-design** companion: rather than
-an array of designs it prepares, asynchronously deploys and gathers the full
-analysis of *one* adiabatic dichroic coupler. It walks through the three stages
-explicitly - `design_coupler` (design one coupler), `submit` (asynchronously
-deploy the analysis job, returning immediately, into a timestamped subfolder)
-and `gather`/`agather` (reload the persisted `_slurm.SavedRun` handle and
-collect the summary) - so the submit and gather steps can run in separate python
-sessions, producing the same spectrum/propagation/design figures, GDS and data
-as above.
+an array of designs it prepares, asynchronously deploys and gathers the
+distributed analysis of *one* adiabatic dichroic coupler. It walks through the
+three stages explicitly - `design_coupler` (design one coupler), `submit`
+(distribute the EME cell-subset jobs, returning immediately, into a timestamped
+subfolder) and `gather`/`agather` (reload the persisted run record, assemble and
+plot) - so the submit and gather steps can run in separate python sessions,
+producing the same spectrum/propagation/design figures, GDS and data as above.
 
 ## Generalized FAQUAD wavelength-filter designer
 
@@ -181,27 +185,29 @@ adiabaticity. `main()` writes `figures/kwolek_designer.png` (optimized widths,
 the FH-vs-SH coupling contrast, and a designed layout).
 
 `kwolek_designer_slurm.py` is the **slurm-cluster version**. It designs the full
-(material x thickness x FH/SH) matrix and submits one analysis job per design
-(`submit_runs` -> `_analysis.analyze_faquad`) that writes, into a timestamped
-subfolder, the **FH/SH extinction-ratio and loss spectra** (`*_spectrum.png`,
-the model counterpart of paper Fig. 2), the **intensity-propagation plots** at
-the FH and SH (`*_propagation.png`, like Fig. 1e), a layout + FAQUAD gap/dTW +
-mixing-angle **design figure** (`*_design.png`, like Fig. 1a-c), the device
-**GDS** and a JSON summary; `gather_runs` reloads the summaries in any later
-session. It also keeps the in-session EME helpers `run_blocking` /
-`run_concurrent` (over `meow.compute_s_matrix_parallel` /
-`acompute_s_matrix_parallel`) and the lighter S-matrix-only `submit_designs` /
-`gather_results` multi-session path (one FH and one SH `.eme.pkl` per design)
-for just the figures of merit.
+(material x thickness x FH/SH) matrix and distributes each design's EME as
+concurrent cell-subset jobs (`submit_runs` -> `_analysis.submit_faquad_run`):
+each FH/SH spectrum sweep point is its own slice-group S-matrix job (the cells
+rebuilt at that wavelength so the anisotropic dispersion is correct), plus the
+single-cell field jobs when fields are saved. `gather_runs` assembles and writes,
+into a timestamped subfolder, the **FH/SH extinction-ratio and loss spectra**
+(`*_spectrum.png`, the model counterpart of paper Fig. 2), the
+**intensity-propagation plots** at the FH and SH (`*_propagation.png`, like
+Fig. 1e), a layout + FAQUAD gap/dTW + mixing-angle **design figure**
+(`*_design.png`, like Fig. 1a-c), the device **GDS** and a JSON summary. It also
+keeps the in-session EME helpers `run_blocking` / `run_concurrent` and the
+lighter S-matrix-only `submit_designs` / `gather_results` multi-session path
+(one FH and one SH `.eme.pkl` per design) for just the figures of merit.
 
 `dichroic_designer_si3n4_thickness_slurm.py` is the **slurm-cluster version of
 the thickness sweep** (`dichroic_designer_si3n4_thickness.py`). It designs the
 fully-etched Si3N4 splitters across the three core thicknesses (200/100/40 nm)
 and the 900-1200 nm cutoffs, then runs *all the simulation, analysis and
-plotting of each (thickness, cutoff) design asynchronously as its own slurm job*
-- each writing its spectrum/propagation/design figures, GDS and data into a
-fresh timestamped subfolder. As with the others, `submit_runs` returns
-immediately and `gather_runs` reloads every summary in a later session.
+plotting of each (thickness, cutoff) design asynchronously as slurm jobs* - each
+design's EME broken into concurrent cell-subset jobs writing its
+spectrum/propagation/design figures, GDS and data into a fresh timestamped
+subfolder. As with the others, `submit_runs` returns immediately and
+`gather_runs` assembles every run in a later session.
 
 ## Running
 
@@ -221,9 +227,21 @@ uv run python -m examples.papers.kwolek_designer_slurm
 Figures for the non-slurm examples are written to `examples/papers/figures/`.
 The slurm examples instead write each design's figures, GDS and data into a
 timestamped subfolder of the MEOW jobs folder (`MEOW_SLURM_FOLDER`, default
-`meow_*_jobs/`). The default settings take tens of minutes; set
-`MEOW_EXAMPLE_FAST=1` for a coarse smoke-test version (used by
-`src/tests/test_paper_examples.py`).
+`meow_*_jobs/`).
+
+**Resolution.** Every example takes a `MEOW_EXAMPLE_RES` resolution level in
+`{low, medium, high}` (default `medium`) instead of the old boolean
+`MEOW_EXAMPLE_FAST`:
+
+- `low` - a coarse smoke-test resolution (used by `src/tests/test_paper_examples.py`;
+  `MEOW_EXAMPLE_FAST=1` is still honoured and maps to `low`);
+- `medium` - the previous full-quality settings (tens of minutes);
+- `high` - finer mesh resolution, more modes per cross-section and more EME
+  cells, increased to the point where the simulated quantities are expected to
+  be converged (slow).
+
+`pick(low=..., medium=..., high=...)` from `_resolution.py` chooses each per-knob
+value for the active level.
 
 ### Backends and parallel EME
 
@@ -332,26 +350,41 @@ session and its results gathered later from another, as long as both point
 submitting process (true for `cluster="slurm"`, where the work runs under
 `sbatch`, not inside your python process).
 
-meow exposes a **submit/collect split** for exactly this:
-`meow.submit_s_matrix_parallel(cells, env, executor=...)` submits the
-slice-group jobs and returns a *picklable* `meow.ParallelEMEJobs` handle
-*without blocking*. Save the handle (`handle.save(path)`) right after
-submitting; in a later session `meow.ParallelEMEJobs.load(path)` reattaches to
-the still-running jobs (it pickles the submitit jobs, which reload their results
-from `folder`) and `handle.result()` / `await handle.aresult()` cascades the
-full EME S-matrix. Poll without blocking with `handle.done()`, and inspect
-`handle.job_ids` / `handle.folder`.
+meow exposes **submit/collect splits** for exactly this. Each one submits the
+jobs and returns a *picklable* handle *without blocking*; save it with
+`handle.save(path)` right after submitting and `<Handle>.load(path)` it in a
+later session to reattach to the still-running jobs (it pickles the submitit
+jobs, which reload their results from `folder`). Poll without blocking with
+`handle.done()` and inspect `handle.job_ids` / `handle.folder`:
 
-The **default analysis workflow** of every slurm example builds on the same
-idea at a coarser grain: `submit_runs` (the single-coupler example: `submit`)
-ships *one slurm job per design* that runs the whole simulation + analysis +
-plotting, and writes a small picklable `_slurm.SavedRun` handle (`run.pkl`)
-plus all of its figures, GDS and data into a fresh **timestamped subfolder** of
+- `meow.submit_s_matrix_parallel(cells, env, executor=...)` →
+  `meow.ParallelEMEJobs`: the slice-group jobs of a single-wavelength EME;
+  `handle.result()` cascades the full S-matrix.
+- `meow.submit_s_matrix_spectrum(cells, env, executor=..., wls=...)` →
+  `meow.ParallelEMESpectrumJobs`: the slice-group jobs of a dense **spectrum**
+  (each job solves its cells at every wavelength); `handle.result()` returns one
+  `(S, port_map)` per wavelength. This is the field-free decomposition used when
+  full fields are not needed (as in `examples/parallel_eme_spectrum.py`).
+- `meow.submit_cell_modes(cells, env, executor=...)` →
+  `meow.ParallelFieldModeJobs`: **one job per cell** that keeps each cell's
+  *full mode fields*; `handle.result()` returns the per-cell modes, for field
+  reconstruction / propagation (e.g. `meow.propagate_modes`) or
+  `meow.compute_s_matrix`. This is the single-cell decomposition used when full
+  fields are saved for subsequent analysis.
+
+The **default analysis workflow** of every slurm example uses these to break
+each design's EME into **subsets of cells run concurrently as separate slurm
+jobs**: `submit_runs` (the single-coupler example: `submit`) submits the dense
+transmission spectrum as slice-group spectrum jobs and - when full fields are
+saved (`save_fields` keyword / `MEOW_SAVE_FIELDS` env var, default on) - the
+propagation fields as single-cell jobs, persisting one picklable run record
+(`run.pkl`) per design into a fresh **timestamped subfolder** of
 `MEOW_SLURM_FOLDER`. `gather_runs` (`gather` / `agather`) walks those subfolders
-in a later session, reattaches to the persisted jobs and returns their
-summaries. The wavelength bounds and counts for the spectrum/propagation are set
-by `MEOW_SPECTRUM_SPAN` / `MEOW_SPECTRUM_NPTS` and `MEOW_PROP_SPAN` /
-`MEOW_PROP_NPTS` (or an explicit `MEOW_PROP_WLS` list).
+in a later session, reattaches to the jobs, assembles the spectrum + propagation
+and writes the figures, GDS and data. Spectrum/propagation wavelength bounds and
+counts are set by `MEOW_SPECTRUM_SPAN` / `MEOW_SPECTRUM_NPTS` and
+`MEOW_PROP_SPAN` / `MEOW_PROP_NPTS` (or an explicit `MEOW_PROP_WLS` list); the
+mesh / modes / cell resolution by `MEOW_EXAMPLE_RES`.
 
 A lighter S-matrix-only path is also available on the array examples
 (`submit_designs` / `gather_results`): it writes one small `<label>.eme.pkl`
@@ -376,21 +409,28 @@ MEOW_SLURM_FOLDER=$HOME/meow_dichroic_jobs \
 
 The single-design `dichroic_coupler_slurm.py` works the same way (`submit` then
 `gather`), and demonstrates the async path explicitly - `submit` returns the
-moment the job is queued and `agather` awaits it. For just an S-matrix (the
-lower-level building block), the underlying meow API call is:
+moment the jobs are queued and `agather` awaits them. The lower-level building
+blocks are the meow submit/collect handles - e.g. a dense spectrum distributed
+as slice-group jobs, with full fields disabled:
 
 ```python
 import meow as mw
 
-# session A: prepare + asynchronously deploy, then exit
-executor = mw.slurm_executor(folder="$HOME/meow_coupler_jobs", cluster="slurm")
-handle = mw.submit_s_matrix_parallel(cells, env, executor=executor, num_modes=4)
-handle.save("$HOME/meow_coupler_jobs/coupler.eme.pkl")   # nothing else needed
+# session A: distribute the spectrum jobs, then exit
+executor = mw.slurm_executor(folder="$HOME/meow_jobs", cluster="slurm")
+handle = mw.submit_s_matrix_spectrum(
+    cells, env, executor=executor, wls=wls, num_modes=4
+)
+handle.save("$HOME/meow_jobs/spectrum.pkl")     # nothing else needed
 
-# session B (later): reload and collect
-handle = mw.ParallelEMEJobs.load("$HOME/meow_coupler_jobs/coupler.eme.pkl")
+# session B (later): reload and collect one (S, port_map) per wavelength
+handle = mw.ParallelEMESpectrumJobs.load("$HOME/meow_jobs/spectrum.pkl")
 if handle.done():
-    S, port_map = handle.result()
+    spectra = handle.result()
+
+# to keep the full mode fields instead (single-cell jobs, for propagation):
+#   handle = mw.submit_cell_modes(cells, env, executor=executor, num_modes=4)
+#   modes_per_cell = mw.ParallelFieldModeJobs.load(path).result()
 ```
 
 Note on fidelity: quantitative numbers (cutoff wavelength, dB-level losses
