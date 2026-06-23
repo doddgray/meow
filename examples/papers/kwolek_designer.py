@@ -257,7 +257,7 @@ def _te_neffs(
     structures: list[mw.Structure3D],
     wl: float,
     mesh: mw.Mesh2D,
-    num_modes: int = 4,
+    num_modes: int = 8,
     num_te: int = 2,
     compute_modes: Callable | None = None,
 ) -> list[float]:
@@ -727,7 +727,7 @@ def device_mesh(platform: TFPlatform, component: gf.Component, res: float) -> mw
 def device_cells(
     design: FaquadFilterDesign,
     wl: float,
-    num_cells: int = 80,
+    num_cells: int = 128,
     res: float = 0.03,
 ) -> list[mw.Cell]:
     """Slice a designed device into adaptive FAQUAD EME cells."""

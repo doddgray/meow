@@ -428,6 +428,93 @@ def _tiny_analysis_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MEOW_PROP_NPTS", "3")
 
 
+# --- example settings: resolution levels, backend + parallel resources ---
+
+
+def test_resolution_levels_and_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """low/medium/high + the 128/8 high standard + MEOW_NUM_* overrides + FAST."""
+    from examples.papers import _resolution as r
+
+    monkeypatch.delenv("MEOW_NUM_CELLS", raising=False)
+    monkeypatch.delenv("MEOW_NUM_MODES", raising=False)
+    monkeypatch.delenv("MEOW_EXAMPLE_FAST", raising=False)
+
+    monkeypatch.setenv("MEOW_EXAMPLE_RES", "high")
+    assert r.level() == "high"
+    assert r.pick(low=1, medium=2, high=3) == 3
+    # high is the converged 128-cell / 8-mode standard
+    assert r.num_cells(low=8, medium=16) == 128
+    assert r.num_modes(low=2, medium=4) == 8
+
+    monkeypatch.setenv("MEOW_EXAMPLE_RES", "low")
+    assert r.is_low()
+    assert r.num_cells(low=8, medium=16) == 8
+
+    # env vars override the resolution-derived value (incl. the high standard)
+    monkeypatch.setenv("MEOW_NUM_CELLS", "55")
+    monkeypatch.setenv("MEOW_NUM_MODES", "9")
+    assert r.num_cells(low=8, medium=16) == 55
+    assert r.num_modes(low=2, medium=4) == 9
+
+    # legacy MEOW_EXAMPLE_FAST maps to low
+    monkeypatch.delenv("MEOW_EXAMPLE_RES")
+    monkeypatch.setenv("MEOW_EXAMPLE_FAST", "1")
+    assert r.level() == "low"
+
+
+def test_backend_and_resource_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The solver backend and parallel resources are env-configurable."""
+    from examples.papers import _backends as b
+
+    monkeypatch.setenv("MEOW_PAPER_BACKEND", "mpb")
+    assert b.backend_name() == "mpb"
+    assert b.resolve_backend() is mw.compute_modes_mpb
+    assert b.resolve_backend("tidy3d") is mw.compute_modes_tidy3d
+    assert b.resolve_backend("lumerical") is mw.compute_modes_lumerical
+
+    monkeypatch.setenv("MEOW_CPUS_PER_TASK", "6")
+    monkeypatch.setenv("MEOW_TIMEOUT_MIN", "42")
+    monkeypatch.setenv("MEOW_SLURM_PARTITION", "cpu")
+    monkeypatch.setenv("MEOW_SLURM_CLUSTER", "slurm")
+    assert b.cpus_per_task() == 6
+    assert b.timeout_min() == 42
+    assert b.slurm_partition() == "cpu"
+    assert b.slurm_cluster() == "slurm"
+    assert b.max_workers() == 6  # falls back to cpus_per_task
+
+
+def test_make_executor_honours_resource_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """make_executor reads the cpus/timeout/partition env vars."""
+    pytest.importorskip("submitit")
+    from examples.papers import dichroic_designer_slurm as ds
+
+    monkeypatch.setenv("MEOW_CPUS_PER_TASK", "3")
+    monkeypatch.setenv("MEOW_TIMEOUT_MIN", "7")
+    executor = ds.make_executor(folder=tmp_path / "e", cluster="local")
+    params = executor._executor.parameters
+    assert params["cpus_per_task"] == 3
+    assert params["timeout_min"] == 7
+
+
+def test_example_defaults_are_128_cells_and_8_modes() -> None:
+    """The example EME functions default to 128 cells and 8 modes."""
+    import inspect
+
+    from examples.papers import _analysis
+    from examples.papers import dichroic_designer_slurm as ds
+    from examples.papers import kwolek_designer_slurm as kslurm
+
+    def default(fn: object, name: str) -> int:
+        return inspect.signature(fn).parameters[name].default
+
+    assert default(_analysis.dichroic_device_cells, "num_cells") == 128
+    for fn in (ds.submit_runs, kslurm.submit_runs):
+        assert default(fn, "num_cells") == 128
+        assert default(fn, "num_modes") == 8
+
+
 def test_dichroic_designer_submit_runs_then_gather(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -435,6 +522,7 @@ def test_dichroic_designer_submit_runs_then_gather(
     gather_runs reloads its summary from a timestamped subfolder in 'session B'."""
     pytest.importorskip("submitit")
     _tiny_analysis_env(monkeypatch)
+    monkeypatch.setenv("MEOW_PAPER_BACKEND", "tidy3d")
     from examples.papers import dichroic_designer_slurm as ds
 
     design = _minimal_slurm_design()
@@ -448,6 +536,8 @@ def test_dichroic_designer_submit_runs_then_gather(
         device_res=0.1,
     )
     assert [r.label for r in records] == ["1000nm"]
+    # the chosen solver backend is recorded for the distributed jobs + gather
+    assert records[0].settings["backend"] == "tidy3d"
     run_dir = Path(records[0].out_dir)
     assert run_dir.parent == folder
     assert (run_dir / "run.pkl").exists()

@@ -360,7 +360,7 @@ def fundamental_neff(
     structures: list[mw.Structure3D],
     wl: float,
     mesh: mw.Mesh2D | None = None,
-    num_modes: int = 2,
+    num_modes: int = 8,
     compute_modes: Callable | None = None,
 ) -> float:
     """Effective index of the fundamental TE mode of a cross-section."""
@@ -375,7 +375,7 @@ def solve_modes(
     structures: list[mw.Structure3D],
     wl: float,
     mesh: mw.Mesh2D | None = None,
-    num_modes: int = 4,
+    num_modes: int = 8,
     compute_modes: Callable | None = None,
 ) -> list[mw.Mode]:
     """Solve the modes of a single cross-section at z=0.5.
@@ -586,7 +586,7 @@ def device_port_transmission(
     *,
     cells_per_section: tuple[int, int, int, int] = (6, 8, 12, 6),
     mesh: mw.Mesh2D | None = None,
-    num_modes: int = 4,
+    num_modes: int = 8,
     parallel: bool | None = None,
     compute_modes: Callable | None = None,
 ) -> tuple[float, float]:

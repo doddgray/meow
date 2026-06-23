@@ -49,6 +49,7 @@ import numpy as np
 
 import meow as mw
 import meow.eme.propagation as prop
+from examples.papers import _backends
 from examples.papers import dichroic_designer as dd
 from examples.papers import kwolek_designer as kd
 from examples.papers.magden2018_dichroic import GAP_OUT, lateral_positions
@@ -166,7 +167,7 @@ def dichroic_device_mesh(design: dd.DichroicDesign, res: float) -> mw.Mesh2D:
 
 
 def dichroic_device_cells(
-    design: dd.DichroicDesign, num_cells: int = 16, res: float = 0.06
+    design: dd.DichroicDesign, num_cells: int = 128, res: float = 0.06
 ) -> list[mw.Cell]:
     """Slice a designed dichroic device into ``num_cells`` equal-length cells."""
     structs = dd.device_structures(design)
@@ -422,7 +423,11 @@ def save_fields_enabled(save_fields: bool | None = None) -> bool:  # noqa: FBT00
 
 
 def _output_index_split(
-    cells: list[mw.Cell], env: mw.Environment, num_modes: int, split: float
+    cells: list[mw.Cell],
+    env: mw.Environment,
+    num_modes: int,
+    split: float,
+    backend: Callable | None = None,
 ) -> tuple[list[int], list[int]]:
     """(below, above) output-mode indices, by energy centroid vs ``split``.
 
@@ -431,7 +436,8 @@ def _output_index_split(
     so the field-free slice-group S-matrices can be attributed to ports without
     re-solving the output modes at each wavelength.
     """
-    out_modes = mw.compute_modes(
+    backend = backend or mw.compute_modes
+    out_modes = backend(
         mw.CrossSection.from_cell(cell=cells[-1], env=env), num_modes=num_modes
     )
     below = [i for i, m in enumerate(out_modes) if _centroid(m) < split]
@@ -440,10 +446,14 @@ def _output_index_split(
 
 
 def _bar_input_index(
-    cells: list[mw.Cell], env: mw.Environment, num_modes: int
+    cells: list[mw.Cell],
+    env: mw.Environment,
+    num_modes: int,
+    backend: Callable | None = None,
 ) -> int:
     """Index of the bar (most negative centroid) input mode of the first cell."""
-    in_modes = mw.compute_modes(
+    backend = backend or mw.compute_modes
+    in_modes = backend(
         mw.CrossSection.from_cell(cell=cells[0], env=env), num_modes=num_modes
     )
     return min(range(min(2, len(in_modes))), key=lambda k: _centroid(in_modes[k]))
@@ -544,8 +554,11 @@ class DichroicRun(_Run):
         cells = self.spectrum.cells
         spectrum_wls = np.asarray(self.spectrum.wls, dtype=float)
 
+        backend = _backends.resolve_backend(self.settings.get("backend"))
         env_c = mw.Environment(wl=design.cutoff_wl, T=25.0)
-        below, above = _output_index_split(cells, env_c, num_modes, self.split)
+        below, above = _output_index_split(
+            cells, env_c, num_modes, self.split, backend
+        )
         t_short, t_long = [], []
         for s_matrix, port_map in self.spectrum.result():
             b, a = _attribute_by_index(s_matrix, port_map, below, above)
@@ -622,10 +635,11 @@ class FaquadRun(_Run):
         self, pairs: list[tuple[float, mw.ParallelEMEJobs]], center_wl: float
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         num_modes = self.settings["num_modes"]
+        backend = _backends.resolve_backend(self.settings.get("backend"))
         wls = np.array([w for w, _ in pairs], dtype=float)
         rep = pairs[int(np.argmin(np.abs(wls - center_wl)))][1]
-        in_idx = _bar_input_index(rep.cells, rep.env, num_modes)
-        below, above = _output_index_split(rep.cells, rep.env, num_modes, 0.0)
+        in_idx = _bar_input_index(rep.cells, rep.env, num_modes, backend)
+        below, above = _output_index_split(rep.cells, rep.env, num_modes, 0.0, backend)
         bars, crosses = [], []
         for _, handle in pairs:
             s_matrix, port_map = handle.result()
@@ -759,6 +773,7 @@ def submit_dichroic_run(
 
     gf.gpdk.PDK.activate()
     save_fields = save_fields_enabled(save_fields)
+    backend = _backends.resolve_backend(settings.get("backend"))
     design = dd.design_from_params(**spec)
     cells = dichroic_device_cells(
         design, settings["num_cells"], settings["device_res"]
@@ -769,6 +784,7 @@ def submit_dichroic_run(
         executor=executor_factory("spectrum"),
         wls=np.asarray(settings["spectrum_wls"], dtype=float),
         num_modes=settings["num_modes"],
+        compute_modes=backend,
     )
     fields: dict[int, mw.ParallelFieldModeJobs] = {}
     if save_fields:
@@ -778,6 +794,7 @@ def submit_dichroic_run(
                 cells, mw.Environment(wl=float(wl), T=25.0),
                 executor=executor_factory(f"fields_{wl_nm}nm"),
                 num_modes=settings["num_modes"],
+                compute_modes=backend,
             )
     return DichroicRun(
         spec=spec, settings=settings, label=settings["label"],
@@ -806,6 +823,7 @@ def submit_faquad_run(
 
     gf.gpdk.PDK.activate()
     save_fields = save_fields_enabled(save_fields)
+    backend = _backends.resolve_backend(settings.get("backend"))
     design = kd.filter_from_params(**spec)
     num_cells, num_modes = settings["num_cells"], settings["num_modes"]
     res = settings["device_res"]
@@ -821,6 +839,7 @@ def submit_faquad_run(
                 cells, mw.Environment(wl=float(wl), T=25.0),
                 executor=executor_factory(f"{band}_{wl_nm}nm"),
                 num_modes=num_modes,
+                compute_modes=backend,
             )
             out.append((float(wl), handle))
         return out
@@ -836,6 +855,7 @@ def submit_faquad_run(
                 cells, mw.Environment(wl=float(wl), T=25.0),
                 executor=executor_factory(f"fields_{wl_nm}nm"),
                 num_modes=num_modes,
+                compute_modes=backend,
             )
     return FaquadRun(
         spec=spec, settings=settings, label=settings["label"],

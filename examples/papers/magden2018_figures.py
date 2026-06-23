@@ -77,7 +77,7 @@ HIFI = bool(int(os.environ.get("MEOW_EXAMPLE_HIFI", "0")))
 FIGDIR = Path(__file__).parent / "figures"
 
 RES = pick(low=0.05, medium=0.02, high=0.015)
-NUM_MODES = pick(low=3, medium=4, high=6)
+NUM_MODES = _resolution.num_modes(low=3, medium=4)  # high -> 8
 
 # Fig. 5 spectral sampling and (HIFI) EME cell budget for the modeled spectra.
 FIG5_N_WL = 41 if HIFI else pick(low=5, medium=13, high=21)

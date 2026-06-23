@@ -241,25 +241,55 @@ timestamped subfolder of the MEOW jobs folder (`MEOW_SLURM_FOLDER`, default
   be converged (slow).
 
 `pick(low=..., medium=..., high=...)` from `_resolution.py` chooses each per-knob
-value for the active level.
+value for the active level. The two main EME knobs have a fixed converged
+standard at `high` - **128 EME cells and 8 modes** per cross-section - which is
+also the default `num_cells` / `num_modes` of every example function. Two env
+vars override them directly (at any level, including `high`):
 
-### Backends and parallel EME
-
-Both examples are backend- and parallel-aware (see `_backends.py`):
-
-- `MEOW_PAPER_BACKEND=tidy3d|mpb|lumerical` selects the FDE mode solver used
-  for all the examples' serial solves (default `tidy3d`). The MPB backend
-  needs the `meep`/`mpb` conda-forge bindings.
-- `MEOW_PAPER_PARALLEL=1` cascades the device EME with the parallel
-  slice-group engine (`meow.compute_s_matrix_parallel`) instead of the serial
-  path. The parallel engine re-solves shared cells in separate processes and
-  checks them for consistency, so it always uses the deterministic tidy3d
-  backend (the two knobs are independent: parallel runs do not use MPB).
+| env var | overrides |
+| --- | --- |
+| `MEOW_NUM_CELLS` | number of EME cells |
+| `MEOW_NUM_MODES` | number of modes per cross-section |
 
 ```sh
-MEOW_PAPER_BACKEND=mpb uv run python -m examples.papers.magden2018_figures
-MEOW_PAPER_PARALLEL=1 uv run python -m examples.papers.kwolek2026_figures
+# converged run; or override just the cell/mode counts
+MEOW_EXAMPLE_RES=high uv run python -m examples.papers.dichroic_designer_slurm
+MEOW_NUM_CELLS=256 MEOW_NUM_MODES=12 uv run python -m examples.papers.dichroic_coupler_slurm
 ```
+
+### Backends and parallel resources
+
+Every example resolves its FDE mode-solver backend and its parallel/slurm
+resource settings from environment variables (see `_backends.py`):
+
+| env var | meaning | default |
+| --- | --- | --- |
+| `MEOW_PAPER_BACKEND` | mode solver: `tidy3d`, `mpb` or `lumerical` | `tidy3d` |
+| `MEOW_CPUS_PER_TASK` | cpus per parallel task / local worker count | `2` |
+| `MEOW_TIMEOUT_MIN` | per-job wall-clock limit [min] | `60` |
+| `MEOW_SLURM_PARTITION` | slurm partition to submit to | (unset) |
+| `MEOW_SLURM_CLUSTER` | submitit cluster: `slurm`/`local`/`debug` | `local` |
+| `MEOW_MAX_WORKERS` | local worker count (else `MEOW_CPUS_PER_TASK`) | (unset) |
+
+The chosen backend is threaded all the way through to the parallel slice-group
+jobs and the single-cell field jobs, so `tidy3d`/`mpb`/`lumerical` work both for
+the in-session local runs and for the slurm jobs (the slice-group cascade needs
+a *deterministic* backend - tidy3d or seeded mpb). `MEOW_CPUS_PER_TASK`,
+`MEOW_TIMEOUT_MIN` and `MEOW_SLURM_PARTITION` are applied to every executor the
+examples build (`make_executor`) and, as the worker count, to the local
+multithreaded/multiprocess runs.
+
+```sh
+# pick the mpb backend; 8 cpus and a 2-hour limit per job on the "cpu" partition
+MEOW_PAPER_BACKEND=mpb uv run python -m examples.papers.magden2018_figures
+MEOW_SLURM_CLUSTER=slurm MEOW_SLURM_PARTITION=cpu \
+MEOW_CPUS_PER_TASK=8 MEOW_TIMEOUT_MIN=120 MEOW_PAPER_BACKEND=tidy3d \
+  uv run python -m examples.papers.dichroic_designer_slurm submit
+```
+
+`MEOW_PAPER_PARALLEL=1` additionally makes the figure scripts
+(`magden2018_figures`, `kwolek2026_figures`) cascade their device EME with the
+parallel slice-group engine instead of the serial path.
 
 ### Running EME on a slurm cluster
 

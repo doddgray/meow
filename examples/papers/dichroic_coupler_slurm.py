@@ -86,8 +86,8 @@ def submit(
     *,
     folder: Path | str = JOB_FOLDER,
     executor_factory: Any | None = None,
-    num_cells: int = 16,
-    num_modes: int = 4,
+    num_cells: int = 128,
+    num_modes: int = 8,
     device_res: float = 0.05,
     save_fields: bool | None = None,
 ) -> Any:
@@ -154,8 +154,8 @@ def _settings() -> dict[str, Any]:
     return {
         "cutoff_wl": 1.0,
         "design_res": pick(low=0.06, medium=0.05, high=0.03),
-        "num_cells": pick(low=8, medium=16, high=32),
-        "num_modes": pick(low=2, medium=4, high=6),
+        "num_cells": _resolution.num_cells(low=8, medium=16),
+        "num_modes": _resolution.num_modes(low=2, medium=4),
         "device_res": pick(low=0.07, medium=0.05, high=0.035),
     }
 
