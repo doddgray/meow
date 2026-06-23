@@ -284,6 +284,47 @@ def test_submit_spectrum_handle_matches_and_reloads(
         np.testing.assert_allclose(np.asarray(S), np.asarray(S_ref), atol=1e-9)
 
 
+def test_spectrum_accepts_explicit_backend(
+    taper: tuple[list[mw.Cell], mw.Environment],
+) -> None:
+    """compute_s_matrix_spectrum threads a (deterministic) backend to its jobs.
+
+    Passing the tidy3d backend explicitly must match the default, and the same
+    ``compute_modes`` hook lets the seeded MPB backend run the spectrum jobs.
+    """
+    cells, env = taper
+    wls = np.array([1.5, 1.6])
+    kw = {"num_modes": NUM_MODES, "executor": ThreadPoolExecutor(max_workers=2)}
+    default = mw.compute_s_matrix_spectrum(cells, env, wls=wls, **kw)
+    explicit = mw.compute_s_matrix_spectrum(
+        cells, env, wls=wls, compute_modes=mw.compute_modes_tidy3d, **kw
+    )
+    for (S_a, _), (S_b, _) in zip(default, explicit, strict=True):
+        np.testing.assert_allclose(np.asarray(S_a), np.asarray(S_b), atol=1e-12)
+
+
+def test_submit_spectrum_handle_accepts_backend(
+    taper: tuple[list[mw.Cell], mw.Environment],
+    tmp_path,  # noqa: ANN001
+) -> None:
+    """submit_s_matrix_spectrum forwards the backend to the (slurm) jobs."""
+    pytest.importorskip("submitit")
+    cells, env = taper
+    wls = np.array([1.55])
+    executor = mw.slurm_executor(
+        folder=str(tmp_path / "sb"), cluster="local", timeout_min=10
+    )
+    handle = mw.submit_s_matrix_spectrum(
+        cells, env, executor=executor, wls=wls,
+        num_modes=NUM_MODES, compute_modes=mw.compute_modes_tidy3d,
+    )
+    (S, _), = handle.result()
+    css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
+    modes = [mw.compute_modes(cs, num_modes=NUM_MODES) for cs in css]
+    S_ref, _ = mw.compute_s_matrix(modes, cells=cells)
+    np.testing.assert_allclose(np.asarray(S), np.asarray(S_ref), atol=1e-9)
+
+
 def test_submit_cell_modes_keeps_fields_and_matches_serial(
     taper: tuple[list[mw.Cell], mw.Environment],
     serial_s_matrix: tuple,

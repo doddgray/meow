@@ -91,8 +91,8 @@ def submit_runs(
     *,
     folder: Path | str = JOB_FOLDER,
     executor_factory: Any | None = None,
-    num_cells: int = 16,
-    num_modes: int = 4,
+    num_cells: int = 128,
+    num_modes: int = 8,
     save_fields: bool | None = None,
 ) -> list[Any]:
     """Submit each (thickness, cutoff) design's *distributed* EME *without waiting*.
@@ -144,8 +144,8 @@ def _sweep_config() -> tuple[list[int], np.ndarray, dict[str, int]]:
     thicknesses = pick(low=[200, 40], medium=[200, 100, 40], high=[200, 100, 40])
     cutoffs = pick(low=CUTOFFS[::3], medium=CUTOFFS, high=CUTOFFS)
     settings = {
-        "num_cells": pick(low=8, medium=16, high=32),
-        "num_modes": pick(low=2, medium=4, high=6),
+        "num_cells": _resolution.num_cells(low=8, medium=16),
+        "num_modes": _resolution.num_modes(low=2, medium=4),
     }
     return thicknesses, cutoffs, settings
 

@@ -49,15 +49,16 @@ Run with ``python -m examples.papers.kwolek_designer``.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import gdsfactory as gf
 import numpy as np
 
 import meow as mw
-from examples.papers import _resolution
+from examples.papers import _backends, _resolution
 from examples.papers.kwolek2026_faquad import (
     LAYER_RIB,
     FaquadDesign,
@@ -257,7 +258,7 @@ def _te_neffs(
     structures: list[mw.Structure3D],
     wl: float,
     mesh: mw.Mesh2D,
-    num_modes: int = 4,
+    num_modes: int = 8,
     num_te: int = 2,
     compute_modes: Callable | None = None,
 ) -> list[float]:
@@ -727,7 +728,7 @@ def device_mesh(platform: TFPlatform, component: gf.Component, res: float) -> mw
 def device_cells(
     design: FaquadFilterDesign,
     wl: float,
-    num_cells: int = 80,
+    num_cells: int = 128,
     res: float = 0.03,
 ) -> list[mw.Cell]:
     """Slice a designed device into adaptive FAQUAD EME cells."""
@@ -737,6 +738,56 @@ def device_cells(
     ls = adaptive_cell_lengths(design.design, num_cells)
     ls = ls * (length / float(np.sum(ls)))
     mesh = device_mesh(platform, design.component, res)
+    return mw.create_cells(structs, mesh, ls, z_min=0.0)
+
+
+def dispersive_core(platform: TFPlatform, wls: Any) -> mw.SampledAnisotropicMaterial:
+    """A wavelength-sampled (dispersive) version of the platform core tensor.
+
+    Samples the closed-form LN/LT uniaxial indices over ``wls`` so the resulting
+    material is evaluated at the environment wavelength - which lets a *single*
+    EME job sweep the whole wavelength range (the slice-group spectrum engine
+    overrides ``env.wl`` per sweep point instead of rebuilding the cells).
+    """
+    wls = np.asarray(wls, dtype=float)
+    cores = [platform.core(float(w)) for w in wls]  # AnisotropicMaterial per wl
+    n = np.array(
+        [np.sqrt(np.real(np.diag(c.eps))) for c in cores]  # ty: ignore[unresolved-attribute]
+    )  # (N, 3) = (ne, no, no) per wavelength
+    return mw.SampledAnisotropicMaterial.from_n(f"{platform.name}_core_disp", wls, n)
+
+
+def dispersive_clad(platform: TFPlatform, wls: Any) -> mw.SampledMaterial:
+    """A wavelength-sampled (dispersive) SiO2 under-cladding for the platform."""
+    wls = np.asarray(wls, dtype=float)
+    clads = [platform.clad(float(w)) for w in wls]  # IndexMaterial per wl
+    n = np.array([c.n for c in clads], dtype=complex)  # ty: ignore[unresolved-attribute]
+    return mw.SampledMaterial(name="SiO2_clad_disp", n=n, params={"wl": wls})
+
+
+def device_cells_dispersive(
+    design: FaquadFilterDesign,
+    wls: Any,
+    num_cells: int = 128,
+    res: float = 0.03,
+) -> list[mw.Cell]:
+    """EME cells with a *dispersive* core/cladding sampled over ``wls``.
+
+    Unlike :func:`device_cells` (which bakes the material at a single
+    wavelength), these cells carry wavelength-sampled materials, so one EME job
+    can sweep the full ``wls`` band (FH..SH and beyond) by varying only the
+    environment wavelength - the decomposition used by the ``*_slurm`` examples.
+    """
+    wls = np.asarray(wls, dtype=float)
+    platform = design.platform
+    core_m = dispersive_core(platform, wls)
+    clad_m = dispersive_clad(platform, wls)
+    disp = replace(platform, core=lambda _wl: core_m, clad=lambda _wl: clad_m)
+    structs = device_structures(disp, design.component, float(wls.mean()))
+    length = float(design.component.xmax)
+    ls = adaptive_cell_lengths(design.design, num_cells)
+    ls = ls * (length / float(np.sum(ls)))
+    mesh = device_mesh(disp, design.component, res)
     return mw.create_cells(structs, mesh, ls, z_min=0.0)
 
 
@@ -790,10 +841,74 @@ def _summary(designs: list[FaquadFilterDesign]) -> dict[str, dict[str, float]]:
     }
 
 
+def faquad_label(design: FaquadFilterDesign) -> str:
+    """Human-readable design key (platform + FH/SH pair)."""
+    return f"{design.platform.name}/{design.fh_wl * 1e3:.0f}-{design.sh_wl * 1e3:.0f}nm"
+
+
+def _analysis_settings(design: FaquadFilterDesign) -> dict:
+    """Per-design settings for the broad-band transmission + FH/SH field analysis."""
+    from examples.papers import _analysis
+
+    return {
+        "label": faquad_label(design),
+        "num_cells": _resolution.num_cells(low=12, medium=48),
+        "num_modes": _resolution.num_modes(low=2, medium=4),
+        "device_res": pick(low=0.08, medium=0.05, high=0.035),
+        "backend": _backends.backend_name(),
+        "spectrum_wls": _analysis.faquad_band(
+            design.fh_wl, design.sh_wl, n=pick(low=9, medium=41, high=121)
+        ),
+        "prop_wls": np.array([design.sh_wl, design.fh_wl]),
+        "num_z": pick(low=200, medium=600, high=1000),
+    }
+
+
+def analyze_design(
+    design: FaquadFilterDesign,
+    out_dir: Path | str,
+    *,
+    executor_factory: Callable | None = None,
+    save_fields: bool = True,
+) -> dict:
+    """Compute + save a design's broad-band spectrum, GDS and FH/SH field plots.
+
+    Runs the same analysis as ``kwolek_designer_slurm`` but in-process (the EME
+    is distributed across local worker threads by default). Writes the
+    ``*_spectrum.png``, ``*_propagation.png``, ``*_design.png``, ``*.gds`` and
+    ``*_results.npz`` into ``out_dir`` and returns the summary dict.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from examples.papers import _analysis
+
+    if executor_factory is None:
+        workers = _backends.max_workers() or 4
+
+        def executor_factory(_name: str) -> ThreadPoolExecutor:
+            return ThreadPoolExecutor(max_workers=workers)
+
+    run = _analysis.submit_faquad_run(
+        to_params(design),
+        _analysis_settings(design),
+        executor_factory=executor_factory,
+        out_dir=out_dir,
+        save_fields=save_fields,
+    )
+    return run.gather()
+
+
 def main() -> dict[str, object]:
-    """Design the full matrix (a coarse subset at low resolution) and plot it."""
+    """Design the full matrix (a coarse subset at low resolution) and plot it.
+
+    Writes the designer summary figure ``figures/kwolek_designer.png`` and, for
+    *every* design, a dense broad-band (``0.8*SH .. 1.2*FH``) transmission
+    spectrum, the device GDS and FH/SH propagating-field plots into
+    ``figures/kwolek_designer/<design>/`` (see :func:`analyze_design`).
+    """
     import matplotlib.pyplot as plt
 
+    from examples.papers import _analysis
     from examples.papers._plot import plot_component
 
     FIGDIR.mkdir(exist_ok=True, parents=True)
@@ -878,7 +993,16 @@ def main() -> dict[str, object]:
     fig.tight_layout()
     fig.savefig(FIGDIR / "kwolek_designer.png", dpi=150)
     plt.close(fig)
-    return summary
+
+    # per-design broad-band transmission spectra + GDS + FH/SH field plots
+    analyses_root = FIGDIR / "kwolek_designer"
+    analyses = {
+        faquad_label(d): analyze_design(
+            d, analyses_root / _analysis._file_stem(faquad_label(d))
+        )
+        for d in designs
+    }
+    return {"designs": summary, "analyses": analyses}
 
 
 if __name__ == "__main__":

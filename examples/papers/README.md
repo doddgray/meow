@@ -182,22 +182,26 @@ budget) picks the largest top width whose FAQUAD device still meets the FH
 extinction target - maximizing SH rejection (the FH/SH coupling contrast grows
 with width) - then the shortest constant-gap length meeting the target
 adiabaticity. `main()` writes `figures/kwolek_designer.png` (optimized widths,
-the FH-vs-SH coupling contrast, and a designed layout).
+the FH-vs-SH coupling contrast, and a designed layout) and then, for *every*
+design, an analysis into `figures/kwolek_designer/<design>/`: a **dense,
+broad-band bar/cross transmission spectrum** spanning more than an octave (from
+0.8*SH to 1.2*FH; `*_spectrum.png` + `*_results.npz`), the device **GDS**, and
+**propagating-field plots at the FH and SH** (`*_propagation.png`). The EME is
+distributed across local worker threads (`analyze_design`).
 
-`kwolek_designer_slurm.py` is the **slurm-cluster version**. It designs the full
-(material x thickness x FH/SH) matrix and distributes each design's EME as
-concurrent cell-subset jobs (`submit_runs` -> `_analysis.submit_faquad_run`):
-each FH/SH spectrum sweep point is its own slice-group S-matrix job (the cells
-rebuilt at that wavelength so the anisotropic dispersion is correct), plus the
-single-cell field jobs when fields are saved. `gather_runs` assembles and writes,
-into a timestamped subfolder, the **FH/SH extinction-ratio and loss spectra**
-(`*_spectrum.png`, the model counterpart of paper Fig. 2), the
-**intensity-propagation plots** at the FH and SH (`*_propagation.png`, like
-Fig. 1e), a layout + FAQUAD gap/dTW + mixing-angle **design figure**
-(`*_design.png`, like Fig. 1a-c), the device **GDS** and a JSON summary. It also
-keeps the in-session EME helpers `run_blocking` / `run_concurrent` and the
-lighter S-matrix-only `submit_designs` / `gather_results` multi-session path
-(one FH and one SH `.eme.pkl` per design) for just the figures of merit.
+`kwolek_designer_slurm.py` is the **slurm-cluster version**: it produces the
+same per-design output (broad-band spectrum + GDS + FH/SH field plots) but
+distributes each design's EME as concurrent cell-subset jobs (`submit_runs` ->
+`_analysis.submit_faquad_run`). Like the dichroic examples, **each job runs the
+whole wavelength sweep within a single task**: the broad spectrum is a
+slice-group spectrum job set over *dispersive* cells (the LN/LT tensor is
+wavelength-sampled, so a single task sweeps the band by varying only the
+environment wavelength), plus single-cell field jobs at the FH/SH when fields
+are saved. `gather_runs` assembles and writes the figures, GDS and data into a
+timestamped subfolder. It also keeps the in-session EME helpers `run_blocking` /
+`run_concurrent` and the lighter S-matrix-only `submit_designs` /
+`gather_results` multi-session path (one FH and one SH `.eme.pkl` per design)
+for just the figures of merit.
 
 `dichroic_designer_si3n4_thickness_slurm.py` is the **slurm-cluster version of
 the thickness sweep** (`dichroic_designer_si3n4_thickness.py`). It designs the
@@ -241,25 +245,55 @@ timestamped subfolder of the MEOW jobs folder (`MEOW_SLURM_FOLDER`, default
   be converged (slow).
 
 `pick(low=..., medium=..., high=...)` from `_resolution.py` chooses each per-knob
-value for the active level.
+value for the active level. The two main EME knobs have a fixed converged
+standard at `high` - **128 EME cells and 8 modes** per cross-section - which is
+also the default `num_cells` / `num_modes` of every example function. Two env
+vars override them directly (at any level, including `high`):
 
-### Backends and parallel EME
-
-Both examples are backend- and parallel-aware (see `_backends.py`):
-
-- `MEOW_PAPER_BACKEND=tidy3d|mpb|lumerical` selects the FDE mode solver used
-  for all the examples' serial solves (default `tidy3d`). The MPB backend
-  needs the `meep`/`mpb` conda-forge bindings.
-- `MEOW_PAPER_PARALLEL=1` cascades the device EME with the parallel
-  slice-group engine (`meow.compute_s_matrix_parallel`) instead of the serial
-  path. The parallel engine re-solves shared cells in separate processes and
-  checks them for consistency, so it always uses the deterministic tidy3d
-  backend (the two knobs are independent: parallel runs do not use MPB).
+| env var | overrides |
+| --- | --- |
+| `MEOW_NUM_CELLS` | number of EME cells |
+| `MEOW_NUM_MODES` | number of modes per cross-section |
 
 ```sh
-MEOW_PAPER_BACKEND=mpb uv run python -m examples.papers.magden2018_figures
-MEOW_PAPER_PARALLEL=1 uv run python -m examples.papers.kwolek2026_figures
+# converged run; or override just the cell/mode counts
+MEOW_EXAMPLE_RES=high uv run python -m examples.papers.dichroic_designer_slurm
+MEOW_NUM_CELLS=256 MEOW_NUM_MODES=12 uv run python -m examples.papers.dichroic_coupler_slurm
 ```
+
+### Backends and parallel resources
+
+Every example resolves its FDE mode-solver backend and its parallel/slurm
+resource settings from environment variables (see `_backends.py`):
+
+| env var | meaning | default |
+| --- | --- | --- |
+| `MEOW_PAPER_BACKEND` | mode solver: `tidy3d`, `mpb` or `lumerical` | `tidy3d` |
+| `MEOW_CPUS_PER_TASK` | cpus per parallel task / local worker count | `2` |
+| `MEOW_TIMEOUT_MIN` | per-job wall-clock limit [min] | `60` |
+| `MEOW_SLURM_PARTITION` | slurm partition to submit to | (unset) |
+| `MEOW_SLURM_CLUSTER` | submitit cluster: `slurm`/`local`/`debug` | `local` |
+| `MEOW_MAX_WORKERS` | local worker count (else `MEOW_CPUS_PER_TASK`) | (unset) |
+
+The chosen backend is threaded all the way through to the parallel slice-group
+jobs and the single-cell field jobs, so `tidy3d`/`mpb`/`lumerical` work both for
+the in-session local runs and for the slurm jobs (the slice-group cascade needs
+a *deterministic* backend - tidy3d or seeded mpb). `MEOW_CPUS_PER_TASK`,
+`MEOW_TIMEOUT_MIN` and `MEOW_SLURM_PARTITION` are applied to every executor the
+examples build (`make_executor`) and, as the worker count, to the local
+multithreaded/multiprocess runs.
+
+```sh
+# pick the mpb backend; 8 cpus and a 2-hour limit per job on the "cpu" partition
+MEOW_PAPER_BACKEND=mpb uv run python -m examples.papers.magden2018_figures
+MEOW_SLURM_CLUSTER=slurm MEOW_SLURM_PARTITION=cpu \
+MEOW_CPUS_PER_TASK=8 MEOW_TIMEOUT_MIN=120 MEOW_PAPER_BACKEND=tidy3d \
+  uv run python -m examples.papers.dichroic_designer_slurm submit
+```
+
+`MEOW_PAPER_PARALLEL=1` additionally makes the figure scripts
+(`magden2018_figures`, `kwolek2026_figures`) cascade their device EME with the
+parallel slice-group engine instead of the serial path.
 
 ### Running EME on a slurm cluster
 
@@ -381,10 +415,14 @@ propagation fields as single-cell jobs, persisting one picklable run record
 (`run.pkl`) per design into a fresh **timestamped subfolder** of
 `MEOW_SLURM_FOLDER`. `gather_runs` (`gather` / `agather`) walks those subfolders
 in a later session, reattaches to the jobs, assembles the spectrum + propagation
-and writes the figures, GDS and data. Spectrum/propagation wavelength bounds and
-counts are set by `MEOW_SPECTRUM_SPAN` / `MEOW_SPECTRUM_NPTS` and
-`MEOW_PROP_SPAN` / `MEOW_PROP_NPTS` (or an explicit `MEOW_PROP_WLS` list); the
-mesh / modes / cell resolution by `MEOW_EXAMPLE_RES`.
+and writes the figures, GDS and data. To reattach to *one specific* run instead,
+`meow`'s example helper `examples.papers._slurm.load_run(run_dir)` loads a single
+run from its timestamped directory (or its `run.pkl` file); `load_runs(folder)`
+loads them all and **skips any corrupt or version-incompatible `run.pkl`** with a
+warning rather than crashing. Spectrum/propagation wavelength bounds and counts
+are set by `MEOW_SPECTRUM_SPAN` / `MEOW_SPECTRUM_NPTS` and `MEOW_PROP_SPAN` /
+`MEOW_PROP_NPTS` (or an explicit `MEOW_PROP_WLS` list); the mesh / modes / cell
+resolution by `MEOW_EXAMPLE_RES`.
 
 A lighter S-matrix-only path is also available on the array examples
 (`submit_designs` / `gather_results`): it writes one small `<label>.eme.pkl`

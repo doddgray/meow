@@ -54,8 +54,8 @@ WL_SH = 0.775
 # (RES), the number of EME cells (NUM_CELLS) and the modes per cross-section
 # (NUM_MODES) further still.
 RES = pick(low=0.06, medium=0.02, high=0.015)
-NUM_CELLS = pick(low=12, medium=120, high=200)
-NUM_MODES = pick(low=3, medium=6, high=8)
+NUM_CELLS = _resolution.num_cells(low=12, medium=120)  # high -> 128
+NUM_MODES = _resolution.num_modes(low=3, medium=6)  # high -> 8
 
 
 def _show(fig: plt.Figure) -> None:

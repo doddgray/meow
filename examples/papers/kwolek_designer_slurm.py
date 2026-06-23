@@ -18,17 +18,20 @@ slurm cluster; the design workflows themselves can be run either
 
 **Distributed analysis runs (plots + GDS).** The default workflow
 (:func:`submit_runs` / :func:`gather_runs`, used by ``main`` and the
-``submit``/``gather`` subcommands) breaks each design's EME into **subsets of
-cells run concurrently as separate slurm jobs**: each FH/SH spectrum sweep
-point is its own slice-group S-matrix job (the cells rebuilt at that wavelength
-so the anisotropic dispersion is correct), and - when full fields are saved
-(``save_fields`` / ``MEOW_SAVE_FIELDS``, the default) - the propagation fields
-are distributed as single-cell jobs keeping each cell's full mode fields.
-:func:`gather_runs` (a later session) reattaches to those jobs and writes the
-FH/SH extinction-ratio and loss spectra, the FH/SH intensity-propagation plots,
-a layout + FAQUAD-profile design figure, the device GDS and the raw data into a
-fresh **timestamped subfolder** of ``MEOW_SLURM_FOLDER`` (one per design).
-Wavelength controls: ``MEOW_SPECTRUM_*`` / ``MEOW_PROP_*``; resolution preset:
+``submit``/``gather`` subcommands) produces, for *every* design, the same
+output as the non-slurm :mod:`examples.papers.kwolek_designer`: a dense,
+broad-band (``0.8*SH .. 1.2*FH``, more than an octave) bar/cross transmission
+spectrum, the device GDS, and propagating-field plots at the FH and SH. The EME
+is broken into **subsets of cells run concurrently as separate slurm jobs**, and
+- like the dichroic examples - each job runs the *whole wavelength sweep within
+a single task*: the broad spectrum is a slice-group spectrum job set over
+*dispersive* cells (the LN/LT tensor is wavelength-sampled, so the sweep only
+varies the environment wavelength), and the FH/SH propagation fields (saved when
+``save_fields`` / ``MEOW_SAVE_FIELDS`` is on, the default) are single-cell mode
+jobs. :func:`gather_runs` (a later session) reattaches to the jobs and writes the
+spectrum/propagation/design figures, GDS and data into a fresh **timestamped
+subfolder** of ``MEOW_SLURM_FOLDER`` (one per design). Wavelength density:
+``MEOW_SPECTRUM_NPTS`` / ``MEOW_PROP_WLS``; resolution preset:
 ``MEOW_EXAMPLE_RES`` in ``{low, medium, high}``.
 
 **Reloading results in a later session.** Because submitit persists every job
@@ -66,7 +69,7 @@ import gdsfactory as gf
 import numpy as np
 
 import meow as mw
-from examples.papers import _analysis, _resolution, _slurm
+from examples.papers import _analysis, _backends, _resolution, _slurm
 from examples.papers.kwolek_designer import (
     WAVELENGTH_PAIRS,
     FaquadFilterDesign,
@@ -166,8 +169,8 @@ def eme_filter(
     design: FaquadFilterDesign,
     *,
     executor: Any | None = None,
-    num_cells: int = 48,
-    num_modes: int = 4,
+    num_cells: int = 128,
+    num_modes: int = 8,
     res: float = 0.05,
     max_workers: int | None = None,
 ) -> dict[str, float]:
@@ -192,8 +195,8 @@ async def aeme_filter(
     design: FaquadFilterDesign,
     *,
     executor: Any | None = None,
-    num_cells: int = 48,
-    num_modes: int = 4,
+    num_cells: int = 128,
+    num_modes: int = 8,
     res: float = 0.05,
     max_workers: int | None = None,
 ) -> dict[str, float]:
@@ -261,8 +264,8 @@ def submit_designs(
     *,
     executor: Any,
     folder: Path | str = JOB_FOLDER,
-    num_cells: int = 48,
-    num_modes: int = 4,
+    num_cells: int = 128,
+    num_modes: int = 8,
     res: float = 0.05,
 ) -> list[_slurm.SavedEME]:
     """Submit every design's FH *and* SH EME to the cluster *without waiting*.
@@ -329,39 +332,31 @@ def analysis_settings(
     num_modes: int,
     device_res: float,
 ) -> dict[str, Any]:
-    """Per-design analysis settings (FH/SH spectra + propagation wavelengths).
+    """Per-design analysis settings (dense broad-band spectrum + FH/SH fields).
 
-    Bounds/counts default to bands around the FH and SH and honour the
-    ``MEOW_SPECTRUM_*`` / ``MEOW_PROP_*`` env vars (see
-    :mod:`examples.papers._analysis`).
+    The transmission spectrum spans the broad band ``0.8*SH .. 1.2*FH`` (more
+    than an octave); ``MEOW_SPECTRUM_NPTS`` overrides its density. Propagation
+    fields are computed at the FH and SH design wavelengths.
     """
-    fh_wls = _analysis.spectrum_wavelengths(
-        design.fh_wl, span=0.03, n=pick(low=5, medium=11, high=21)
-    )
-    sh_wls = _analysis.spectrum_wavelengths(
-        design.sh_wl, span=0.03, n=pick(low=3, medium=7, high=13)
-    )
-    prop_fh = _analysis.propagation_wavelengths(
-        design.fh_wl, span=0.02, n=pick(low=3, medium=3, high=5)
-    )
-    prop_sh = _analysis.propagation_wavelengths(
-        design.sh_wl, span=0.02, n=pick(low=3, medium=5, high=5)
-    )
-    explicit = os.environ.get("MEOW_PROP_WLS")
-    prop_wls = (
-        np.array([float(x) for x in explicit.split(",") if x.strip()])
-        if explicit
-        else np.concatenate([prop_fh, prop_sh])
-    )
     return {
         "num_cells": num_cells,
         "num_modes": num_modes,
         "device_res": device_res,
-        "fh_wls": fh_wls,
-        "sh_wls": sh_wls,
-        "prop_wls": prop_wls,
+        "backend": _backends.backend_name(),
+        "spectrum_wls": _analysis.faquad_band(
+            design.fh_wl, design.sh_wl, n=pick(low=9, medium=41, high=121)
+        ),
+        "prop_wls": faquad_prop_wls(design),
         "num_z": pick(low=200, medium=600, high=1000),
     }
+
+
+def faquad_prop_wls(design: FaquadFilterDesign) -> np.ndarray:
+    """Propagation-field wavelengths [um]: the SH and FH (env ``MEOW_PROP_WLS``)."""
+    explicit = os.environ.get("MEOW_PROP_WLS")
+    if explicit:
+        return np.array([float(x) for x in explicit.split(",") if x.strip()])
+    return np.array([design.sh_wl, design.fh_wl])
 
 
 def submit_runs(
@@ -369,8 +364,8 @@ def submit_runs(
     *,
     folder: Path | str = JOB_FOLDER,
     executor_factory: Any | None = None,
-    num_cells: int = 48,
-    num_modes: int = 4,
+    num_cells: int = 128,
+    num_modes: int = 8,
     device_res: float = 0.05,
     save_fields: bool | None = None,
 ) -> list[Any]:
@@ -422,27 +417,27 @@ def make_executor(
     folder: Path | str = JOB_FOLDER,
     cluster: str | None = None,
     *,
-    timeout_min: int = 60,
-    cpus_per_task: int = 2,
+    timeout_min: int | None = None,
+    cpus_per_task: int | None = None,
     mem_gb: float | None = None,
     slurm_partition: str | None = None,
 ) -> Any:
     """A :func:`meow.slurm_executor` for the EME jobs.
 
-    ``cluster`` selects the backend: ``"slurm"`` (require a cluster), ``"local"``
-    (local subprocesses, the default here), ``"debug"`` (in-process), or ``None``
-    (auto: slurm if available, else local). ``MEOW_SLURM_CLUSTER`` and
-    ``MEOW_SLURM_PARTITION`` override the demo defaults.
+    The cluster, per-task cpu count, wall-clock timeout and partition default to
+    the ``MEOW_SLURM_CLUSTER``, ``MEOW_CPUS_PER_TASK``, ``MEOW_TIMEOUT_MIN`` and
+    ``MEOW_SLURM_PARTITION`` environment variables (shared by every example's
+    parallel/slurm runs).
     """
-    cluster = cluster or os.environ.get("MEOW_SLURM_CLUSTER", "local")
-    slurm_partition = slurm_partition or os.environ.get("MEOW_SLURM_PARTITION")
     return mw.slurm_executor(
         folder=str(folder),
-        cluster=cluster,
-        timeout_min=timeout_min,
-        cpus_per_task=cpus_per_task,
+        cluster=cluster or _backends.slurm_cluster(),
+        timeout_min=_backends.timeout_min() if timeout_min is None else timeout_min,
+        cpus_per_task=(
+            _backends.cpus_per_task() if cpus_per_task is None else cpus_per_task
+        ),
         mem_gb=mem_gb,
-        slurm_partition=slurm_partition,
+        slurm_partition=slurm_partition or _backends.slurm_partition(),
     )
 
 
@@ -471,8 +466,8 @@ def _demo_designs() -> tuple[list[FaquadFilterDesign], dict[str, Any]]:
     else:
         designs = design_matrix(res=res)
     eme_kwargs = {
-        "num_cells": pick(low=16, medium=48, high=96),
-        "num_modes": pick(low=2, medium=4, high=6),
+        "num_cells": _resolution.num_cells(low=16, medium=48),
+        "num_modes": _resolution.num_modes(low=2, medium=4),
         "res": pick(low=0.07, medium=0.05, high=0.035),
     }
     return designs, eme_kwargs

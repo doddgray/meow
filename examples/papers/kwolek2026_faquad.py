@@ -375,7 +375,7 @@ def solve_te_neffs(
     structures: list[mw.Structure3D],
     wl: float,
     mesh: mw.Mesh2D,
-    num_modes: int = 4,
+    num_modes: int = 8,
     num_te: int = 2,
     compute_modes: Callable | None = None,
 ) -> list[float]:
@@ -549,7 +549,7 @@ def adaptive_cell_lengths(design: FaquadDesign, num_cells: int) -> np.ndarray:
 def device_cells(
     component: gf.Component,
     wl: float,
-    num_cells: int = 24,
+    num_cells: int = 128,
     res: float = 0.04,
     design: FaquadDesign | None = None,
 ) -> list[mw.Cell]:
@@ -567,7 +567,7 @@ def device_cells(
 def bar_cross_transmission(
     cells: list[mw.Cell],
     wl: float,
-    num_modes: int = 4,
+    num_modes: int = 8,
     *,
     parallel: bool | None = None,
     compute_modes: Callable | None = None,

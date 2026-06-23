@@ -195,7 +195,7 @@ def _te_modes(
     structures: list[mw.Structure3D],
     wl: float,
     mesh: mw.Mesh2D,
-    num_modes: int = 4,
+    num_modes: int = 8,
     compute_modes: Callable | None = None,
 ) -> list[mw.Mode]:
     compute_modes = compute_modes or mw.compute_modes

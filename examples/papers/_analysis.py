@@ -49,6 +49,7 @@ import numpy as np
 
 import meow as mw
 import meow.eme.propagation as prop
+from examples.papers import _backends
 from examples.papers import dichroic_designer as dd
 from examples.papers import kwolek_designer as kd
 from examples.papers.magden2018_dichroic import GAP_OUT, lateral_positions
@@ -101,6 +102,15 @@ def propagation_wavelengths(
     n = int(os.environ.get("MEOW_PROP_NPTS", n or DEFAULT_PROP_NPTS))
     n = max(3, n | 1)
     return np.linspace(cutoff_wl * (1 - span), cutoff_wl * (1 + span), n)
+
+
+def faquad_band(fh_wl: float, sh_wl: float, *, n: int | None = None) -> np.ndarray:
+    """Dense, broad FAQUAD spectrum band [um]: ``0.8*SH .. 1.2*FH`` (>1 octave).
+
+    ``n`` falls back to ``MEOW_SPECTRUM_NPTS`` then the module default.
+    """
+    n = int(os.environ.get("MEOW_SPECTRUM_NPTS", n or DEFAULT_SPECTRUM_NPTS))
+    return np.linspace(0.8 * sh_wl, 1.2 * fh_wl, max(3, n))
 
 
 # ==========================================================================
@@ -166,7 +176,7 @@ def dichroic_device_mesh(design: dd.DichroicDesign, res: float) -> mw.Mesh2D:
 
 
 def dichroic_device_cells(
-    design: dd.DichroicDesign, num_cells: int = 16, res: float = 0.06
+    design: dd.DichroicDesign, num_cells: int = 128, res: float = 0.06
 ) -> list[mw.Cell]:
     """Slice a designed dichroic device into ``num_cells`` equal-length cells."""
     structs = dd.device_structures(design)
@@ -249,43 +259,36 @@ def plot_transmission_dichroic(
     plt.close(fig)
 
 
-def plot_transmission_faquad(
-    wls_fh: np.ndarray,
-    bar_fh: np.ndarray,
-    cross_fh: np.ndarray,
-    wls_sh: np.ndarray,
-    bar_sh: np.ndarray,
-    cross_sh: np.ndarray,
+def plot_transmission_faquad_broad(
+    wls: np.ndarray,
+    bar: np.ndarray,
+    cross: np.ndarray,
+    fh_wl: float,
+    sh_wl: float,
     path: Path,
     title: str,
 ) -> None:
-    """FH/SH extinction-ratio and loss spectra (model counterpart of Fig. 2)."""
+    """Dense, broad-band bar/cross transmission spectrum of a FAQUAD filter.
+
+    Spans more than an octave (from ~0.8*SH to ~1.2*FH); the SH should stay in
+    the bar port and the FH transfer to the cross port. The FH and SH design
+    wavelengths are marked.
+    """
     plt = _use_agg()
-    eps = 1e-9
-    fig, axes = plt.subplots(1, 3, figsize=(13, 3.8))
-    er_fh = 10 * np.log10(np.maximum(cross_fh, eps) / np.maximum(bar_fh, eps))
-    axes[0].plot(wls_fh * 1e3, er_fh, "C0o-")
-    axes[0].set_xlabel("FH wavelength [nm]")
-    axes[0].set_ylabel("extinction ratio [dB]")
-    axes[0].set_title("ER at FH (cross / bar)")
-    axes[0].grid(visible=True)
-    er_sh = 10 * np.log10(np.maximum(bar_sh, eps) / np.maximum(cross_sh, eps))
-    axes[1].plot(wls_sh * 1e3, er_sh, "C3o-")
-    axes[1].set_xlabel("SH wavelength [nm]")
-    axes[1].set_ylabel("extinction ratio [dB]")
-    axes[1].set_title("ER at SH (bar / cross)")
-    axes[1].grid(visible=True)
-    loss_fh = -10 * np.log10(np.maximum(bar_fh + cross_fh, eps))
-    loss_sh = -10 * np.log10(np.maximum(bar_sh + cross_sh, eps))
-    axes[2].plot(wls_fh * 1e3, loss_fh, "C0o-", label="FH")
-    ax2 = axes[2].twiny()
-    ax2.plot(wls_sh * 1e3, loss_sh, "C3s-", label="SH")
-    axes[2].set_xlabel("FH wavelength [nm]")
-    ax2.set_xlabel("SH wavelength [nm]")
-    axes[2].set_ylabel("total loss [dB]")
-    axes[2].set_title("total loss")
-    axes[2].grid(visible=True)
-    fig.suptitle(title)
+    eps = 1e-6
+    fig, ax = plt.subplots(figsize=(8, 4))
+    bar_db = 10 * np.log10(np.clip(bar, eps, None))
+    cross_db = 10 * np.log10(np.clip(cross, eps, None))
+    ax.plot(wls * 1e3, bar_db, "C0", label="bar (input guide)")
+    ax.plot(wls * 1e3, cross_db, "C3", label="cross (coupled guide)")
+    ax.axvline(fh_wl * 1e3, color="C2", ls=":", lw=1.0, label=f"FH {fh_wl * 1e3:.0f}nm")
+    ax.axvline(sh_wl * 1e3, color="C1", ls=":", lw=1.0, label=f"SH {sh_wl * 1e3:.0f}nm")
+    ax.set_xlabel("wavelength [nm]")
+    ax.set_ylabel("transmission [dB]")
+    ax.set_ylim(max(-42.0, float(min(bar_db.min(), cross_db.min())) - 3), 2)
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    ax.grid(visible=True)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -422,7 +425,11 @@ def save_fields_enabled(save_fields: bool | None = None) -> bool:  # noqa: FBT00
 
 
 def _output_index_split(
-    cells: list[mw.Cell], env: mw.Environment, num_modes: int, split: float
+    cells: list[mw.Cell],
+    env: mw.Environment,
+    num_modes: int,
+    split: float,
+    backend: Callable | None = None,
 ) -> tuple[list[int], list[int]]:
     """(below, above) output-mode indices, by energy centroid vs ``split``.
 
@@ -431,7 +438,8 @@ def _output_index_split(
     so the field-free slice-group S-matrices can be attributed to ports without
     re-solving the output modes at each wavelength.
     """
-    out_modes = mw.compute_modes(
+    backend = backend or mw.compute_modes
+    out_modes = backend(
         mw.CrossSection.from_cell(cell=cells[-1], env=env), num_modes=num_modes
     )
     below = [i for i, m in enumerate(out_modes) if _centroid(m) < split]
@@ -440,10 +448,14 @@ def _output_index_split(
 
 
 def _bar_input_index(
-    cells: list[mw.Cell], env: mw.Environment, num_modes: int
+    cells: list[mw.Cell],
+    env: mw.Environment,
+    num_modes: int,
+    backend: Callable | None = None,
 ) -> int:
     """Index of the bar (most negative centroid) input mode of the first cell."""
-    in_modes = mw.compute_modes(
+    backend = backend or mw.compute_modes
+    in_modes = backend(
         mw.CrossSection.from_cell(cell=cells[0], env=env), num_modes=num_modes
     )
     return min(range(min(2, len(in_modes))), key=lambda k: _centroid(in_modes[k]))
@@ -544,8 +556,11 @@ class DichroicRun(_Run):
         cells = self.spectrum.cells
         spectrum_wls = np.asarray(self.spectrum.wls, dtype=float)
 
+        backend = _backends.resolve_backend(self.settings.get("backend"))
         env_c = mw.Environment(wl=design.cutoff_wl, T=25.0)
-        below, above = _output_index_split(cells, env_c, num_modes, self.split)
+        below, above = _output_index_split(
+            cells, env_c, num_modes, self.split, backend
+        )
         t_short, t_long = [], []
         for s_matrix, port_map in self.spectrum.result():
             b, a = _attribute_by_index(s_matrix, port_map, below, above)
@@ -605,36 +620,18 @@ class DichroicRun(_Run):
 class FaquadRun(_Run):
     """A distributed FAQUAD-filter analysis run.
 
-    The FH and SH cells depend on wavelength (the anisotropic core tensor is
-    evaluated at each wavelength), so each FH/SH sweep point is its own
-    :class:`meow.ParallelEMEJobs` (single-wavelength slice-group decomposition);
-    the optional propagation ``fields`` keep the full per-cell modes.
+    The dense, broad-band bar/cross transmission spectrum (from ~0.8*SH to
+    ~1.2*FH, more than an octave) is a single :class:`meow.ParallelEMESpectrumJobs`
+    over *dispersive* cells (so each slice-group job sweeps the whole band in one
+    task); the optional propagation ``fields`` are single-cell
+    :class:`meow.ParallelFieldModeJobs` at the FH and SH.
     """
 
-    fh: list[tuple[float, mw.ParallelEMEJobs]]
-    sh: list[tuple[float, mw.ParallelEMEJobs]]
+    spectrum: mw.ParallelEMESpectrumJobs
     fields: dict[int, mw.ParallelFieldModeJobs]
 
     def handles(self) -> list[Any]:
-        return [h for _, h in (*self.fh, *self.sh)] + list(self.fields.values())
-
-    def _band(
-        self, pairs: list[tuple[float, mw.ParallelEMEJobs]], center_wl: float
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        num_modes = self.settings["num_modes"]
-        wls = np.array([w for w, _ in pairs], dtype=float)
-        rep = pairs[int(np.argmin(np.abs(wls - center_wl)))][1]
-        in_idx = _bar_input_index(rep.cells, rep.env, num_modes)
-        below, above = _output_index_split(rep.cells, rep.env, num_modes, 0.0)
-        bars, crosses = [], []
-        for _, handle in pairs:
-            s_matrix, port_map = handle.result()
-            t_bar, t_cross = _attribute_by_index(
-                s_matrix, port_map, below, above, in_port=f"left@{in_idx}"
-            )
-            bars.append(t_bar)
-            crosses.append(t_cross)
-        return wls, np.asarray(bars), np.asarray(crosses)
+        return [self.spectrum, *self.fields.values()]
 
     def gather(self) -> dict:
         import gdsfactory as gf
@@ -643,9 +640,24 @@ class FaquadRun(_Run):
         out = Path(self.out_dir)
         out.mkdir(parents=True, exist_ok=True)
         design = kd.filter_from_params(**self.spec)
+        num_modes = self.settings["num_modes"]
+        backend = _backends.resolve_backend(self.settings.get("backend"))
+        cells = self.spectrum.cells
+        wls = np.asarray(self.spectrum.wls, dtype=float)
 
-        fh_wls, bar_fh, cross_fh = self._band(self.fh, design.fh_wl)
-        sh_wls, bar_sh, cross_sh = self._band(self.sh, design.sh_wl)
+        # bar/cross port mapping solved once at the FH (stable across the band)
+        env_ref = mw.Environment(wl=design.fh_wl, T=25.0)
+        in_idx = _bar_input_index(cells, env_ref, num_modes, backend)
+        below, above = _output_index_split(cells, env_ref, num_modes, 0.0, backend)
+        bar, cross = [], []
+        for s_matrix, port_map in self.spectrum.result():
+            t_bar, t_cross = _attribute_by_index(
+                s_matrix, port_map, below, above, in_port=f"left@{in_idx}"
+            )
+            bar.append(t_bar)
+            cross.append(t_cross)
+        bar, cross = np.asarray(bar), np.asarray(cross)
+
         panels = _propagation_panels(
             self.fields, design.platform.core_thickness / 2.0,
             int(self.settings.get("num_z", 400)), input_kind="bar",
@@ -654,28 +666,28 @@ class FaquadRun(_Run):
         stem = self.stem
         design.component.write_gds(str(out / f"{stem}.gds"))
         plot_faquad_design(design, out / f"{stem}_design.png")
-        plot_transmission_faquad(
-            fh_wls, bar_fh, cross_fh, sh_wls, bar_sh, cross_sh,
+        plot_transmission_faquad_broad(
+            wls, bar, cross, design.fh_wl, design.sh_wl,
             out / f"{stem}_spectrum.png",
-            f"{self.label}: FAQUAD filter ER / loss spectra",
+            f"{self.label}: FAQUAD broad-band transmission (bar input)",
         )
         if panels:
             plot_propagation(
                 panels, out / f"{stem}_propagation.png",
-                f"{self.label}: intensity propagation (bar input)",
+                f"{self.label}: intensity propagation at FH / SH (bar input)",
                 ylim=(-3, 3),
             )
         np.savez(
             out / f"{stem}_results.npz",
-            fh_wls=fh_wls, bar_fh=bar_fh, cross_fh=cross_fh,
-            sh_wls=sh_wls, bar_sh=bar_sh, cross_sh=cross_sh,
+            wls=wls, bar=bar, cross=cross,
+            fh_wl=design.fh_wl, sh_wl=design.sh_wl,
             prop_wls=np.asarray(self.settings.get("prop_wls", []), dtype=float),
         )
         eps = 1e-9
-        i_fh = int(np.argmin(np.abs(fh_wls - design.fh_wl)))
-        i_sh = int(np.argmin(np.abs(sh_wls - design.sh_wl)))
-        fh_er = float(10 * np.log10(max(cross_fh[i_fh], eps) / max(bar_fh[i_fh], eps)))
-        sh_er = float(10 * np.log10(max(bar_sh[i_sh], eps) / max(cross_sh[i_sh], eps)))
+        i_fh = int(np.argmin(np.abs(wls - design.fh_wl)))
+        i_sh = int(np.argmin(np.abs(wls - design.sh_wl)))
+        fh_er = float(10 * np.log10(max(cross[i_fh], eps) / max(bar[i_fh], eps)))
+        sh_er = float(10 * np.log10(max(bar[i_sh], eps) / max(cross[i_sh], eps)))
         summary = {
             "label": self.label,
             "kind": "faquad",
@@ -683,10 +695,11 @@ class FaquadRun(_Run):
             "fh_nm": round(design.fh_wl * 1e3, 0),
             "sh_nm": round(design.sh_wl * 1e3, 0),
             "length_um": round(design.total_length, 0),
-            "fh_cross": round(float(cross_fh[i_fh]), 4),
-            "fh_bar": round(float(bar_fh[i_fh]), 4),
-            "sh_bar": round(float(bar_sh[i_sh]), 4),
-            "sh_cross": round(float(cross_sh[i_sh]), 4),
+            "band_nm": [round(float(wls[0]) * 1e3, 0), round(float(wls[-1]) * 1e3, 0)],
+            "fh_cross": round(float(cross[i_fh]), 4),
+            "fh_bar": round(float(bar[i_fh]), 4),
+            "sh_bar": round(float(bar[i_sh]), 4),
+            "sh_cross": round(float(cross[i_sh]), 4),
             "fh_er_db": round(fh_er, 2),
             "sh_er_db": round(sh_er, 2),
             "saved_fields": bool(self.fields),
@@ -759,6 +772,7 @@ def submit_dichroic_run(
 
     gf.gpdk.PDK.activate()
     save_fields = save_fields_enabled(save_fields)
+    backend = _backends.resolve_backend(settings.get("backend"))
     design = dd.design_from_params(**spec)
     cells = dichroic_device_cells(
         design, settings["num_cells"], settings["device_res"]
@@ -769,6 +783,7 @@ def submit_dichroic_run(
         executor=executor_factory("spectrum"),
         wls=np.asarray(settings["spectrum_wls"], dtype=float),
         num_modes=settings["num_modes"],
+        compute_modes=backend,
     )
     fields: dict[int, mw.ParallelFieldModeJobs] = {}
     if save_fields:
@@ -778,6 +793,7 @@ def submit_dichroic_run(
                 cells, mw.Environment(wl=float(wl), T=25.0),
                 executor=executor_factory(f"fields_{wl_nm}nm"),
                 num_modes=settings["num_modes"],
+                compute_modes=backend,
             )
     return DichroicRun(
         spec=spec, settings=settings, label=settings["label"],
@@ -797,47 +813,39 @@ def submit_faquad_run(
 ) -> FaquadRun:
     """Submit one FAQUAD design's distributed EME and return a :class:`FaquadRun`.
 
-    Each FH/SH sweep point is submitted as its own slice-group S-matrix job
-    (:func:`meow.submit_s_matrix_parallel`, with the cells rebuilt at that
-    wavelength so the anisotropic dispersion is correct); when ``save_fields``
-    is on, the propagation fields are submitted as single-cell mode jobs.
+    The dense, broad-band (``0.8*SH .. 1.2*FH``) bar/cross spectrum is submitted
+    as slice-group jobs over *dispersive* cells (:func:`meow.submit_s_matrix_spectrum`),
+    so each job sweeps the whole band within a single task; when ``save_fields``
+    is on, the FH/SH propagation fields are submitted as single-cell mode jobs.
     """
     import gdsfactory as gf
 
     gf.gpdk.PDK.activate()
     save_fields = save_fields_enabled(save_fields)
+    backend = _backends.resolve_backend(settings.get("backend"))
     design = kd.filter_from_params(**spec)
-    num_cells, num_modes = settings["num_cells"], settings["num_modes"]
-    res = settings["device_res"]
-
-    def per_wl_jobs(
-        band: str, wls: Any
-    ) -> list[tuple[float, mw.ParallelEMEJobs]]:
-        out = []
-        for wl in np.asarray(wls, dtype=float):
-            wl_nm = round(float(wl) * 1e3)
-            cells = kd.device_cells(design, float(wl), num_cells=num_cells, res=res)
-            handle = mw.submit_s_matrix_parallel(
-                cells, mw.Environment(wl=float(wl), T=25.0),
-                executor=executor_factory(f"{band}_{wl_nm}nm"),
-                num_modes=num_modes,
-            )
-            out.append((float(wl), handle))
-        return out
-
-    fh = per_wl_jobs("fh", settings["fh_wls"])
-    sh = per_wl_jobs("sh", settings["sh_wls"])
+    num_modes = settings["num_modes"]
+    spectrum_wls = np.asarray(settings["spectrum_wls"], dtype=float)
+    cells = kd.device_cells_dispersive(
+        design, spectrum_wls,
+        num_cells=settings["num_cells"], res=settings["device_res"],
+    )
+    spectrum = mw.submit_s_matrix_spectrum(
+        cells, mw.Environment(wl=design.fh_wl, T=25.0),
+        executor=executor_factory("spectrum"),
+        wls=spectrum_wls, num_modes=num_modes, compute_modes=backend,
+    )
     fields: dict[int, mw.ParallelFieldModeJobs] = {}
     if save_fields:
         for wl in np.asarray(settings["prop_wls"], dtype=float):
             wl_nm = round(float(wl) * 1e3)
-            cells = kd.device_cells(design, float(wl), num_cells=num_cells, res=res)
             fields[wl_nm] = mw.submit_cell_modes(
                 cells, mw.Environment(wl=float(wl), T=25.0),
                 executor=executor_factory(f"fields_{wl_nm}nm"),
-                num_modes=num_modes,
+                num_modes=num_modes, compute_modes=backend,
             )
     return FaquadRun(
         spec=spec, settings=settings, label=settings["label"],
-        out_dir=str(out_dir), save_fields=save_fields, fh=fh, sh=sh, fields=fields,
+        out_dir=str(out_dir), save_fields=save_fields,
+        spectrum=spectrum, fields=fields,
     )

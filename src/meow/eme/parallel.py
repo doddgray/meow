@@ -200,6 +200,7 @@ def compute_group_spectrum(
     num_modes: int = 10,
     compute_modes_kwargs: dict[str, Any] | None = None,
     interface_kwargs: dict[str, Any] | None = None,
+    compute_modes: Callable | None = None,
 ) -> GroupSpectrumResult:
     """Solve one slice group at every sweep wavelength.
 
@@ -217,6 +218,8 @@ def compute_group_spectrum(
         num_modes: number of modes to compute per cell.
         compute_modes_kwargs: extra kwargs for ``compute_modes``.
         interface_kwargs: extra kwargs for ``compute_interface_s_matrix``.
+        compute_modes: the (picklable, deterministic) FDE backend to use
+            (default: ``meow.fde.compute_modes``, tidy3d).
     """
     cells: list[dict[str, Any] | Cell] = [Cell.model_validate(c) for c in cells_data]
     env_dict = Environment.model_validate(env_data).model_dump()
@@ -229,6 +232,7 @@ def compute_group_spectrum(
             num_modes,
             compute_modes_kwargs,
             interface_kwargs,
+            compute_modes,
         )
         for wl in wls
     ]
@@ -259,6 +263,7 @@ def compute_s_matrix_spectrum(
     neff_atol: float = 1e-6,
     compute_modes_kwargs: dict[str, Any] | None = None,
     interface_kwargs: dict[str, Any] | None = None,
+    compute_modes: Callable | None = None,
 ) -> list[sax.SDenseMM]:
     """Compute EME S-matrix spectra using concurrent slice-group jobs.
 
@@ -283,6 +288,8 @@ def compute_s_matrix_spectrum(
         neff_atol: tolerance of the shared-cell consistency check.
         compute_modes_kwargs: extra kwargs for ``compute_modes``.
         interface_kwargs: extra kwargs for ``compute_interface_s_matrix``.
+        compute_modes: the (picklable, deterministic) FDE backend to run in
+            each job (default: ``meow.fde.compute_modes``, tidy3d).
 
     Returns:
         A list of ``(S, port_map)`` tuples, one per sweep point, in the
@@ -303,6 +310,7 @@ def compute_s_matrix_spectrum(
                 num_modes,
                 compute_modes_kwargs,
                 interface_kwargs,
+                compute_modes,
             )
             results = [job.result() for job in jobs]
     else:
@@ -315,6 +323,7 @@ def compute_s_matrix_spectrum(
             num_modes,
             compute_modes_kwargs,
             interface_kwargs,
+            compute_modes,
         )
         results = [job.result() for job in jobs]
     return _assemble_spectrum(
@@ -336,6 +345,7 @@ async def acompute_s_matrix_spectrum(
     neff_atol: float = 1e-6,
     compute_modes_kwargs: dict[str, Any] | None = None,
     interface_kwargs: dict[str, Any] | None = None,
+    compute_modes: Callable | None = None,
 ) -> list[sax.SDenseMM]:
     """Async version of :func:`compute_s_matrix_spectrum`."""
     wls_arr = _resolve_wls(wls, freqs)
@@ -355,6 +365,7 @@ async def acompute_s_matrix_spectrum(
             num_modes,
             compute_modes_kwargs,
             interface_kwargs,
+            compute_modes,
         )
         results = list(
             await asyncio.gather(*(asyncio.to_thread(job.result) for job in jobs))
@@ -376,6 +387,7 @@ def _submit_spectrum_jobs(
     num_modes: int,
     compute_modes_kwargs: dict[str, Any] | None,
     interface_kwargs: dict[str, Any] | None,
+    compute_modes: Callable | None = None,
 ) -> list[Any]:
     cells_data = [cell.model_dump() for cell in cells]
     env_data = env.model_dump()
@@ -389,6 +401,7 @@ def _submit_spectrum_jobs(
             num_modes,
             compute_modes_kwargs,
             interface_kwargs,
+            compute_modes,
         )
         for start, stop in groups
     ]
@@ -824,6 +837,7 @@ def submit_s_matrix_spectrum(
     neff_atol: float = 1e-6,
     compute_modes_kwargs: dict[str, Any] | None = None,
     interface_kwargs: dict[str, Any] | None = None,
+    compute_modes: Callable | None = None,
 ) -> ParallelEMESpectrumJobs:
     """Submit the slice-group jobs of an EME *spectrum* without awaiting them.
 
@@ -852,6 +866,7 @@ def submit_s_matrix_spectrum(
         num_modes,
         compute_modes_kwargs,
         interface_kwargs,
+        compute_modes,
     )
     return ParallelEMESpectrumJobs(
         jobs=jobs,
