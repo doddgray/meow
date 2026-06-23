@@ -560,8 +560,66 @@ async def acompute_s_matrix_parallel(
     )
 
 
+class _SubmittedJobs:
+    """Mixin for a picklable handle over a list of submitted ``jobs``.
+
+    Provides the bits shared by every submit/collect handle: inspecting the
+    submitit job ids / folder, polling whether the jobs are done without
+    blocking, and pickling the whole handle to disk so a *different python
+    session* can reload it and collect the results (the submitit jobs persist
+    their results in their ``folder`` and reload them on unpickling).
+    """
+
+    jobs: list[Any]
+
+    @property
+    def job_ids(self) -> list[str]:
+        """The submitit job ids (empty strings for executors without ids)."""
+        return [str(getattr(job, "job_id", "")) for job in self.jobs]
+
+    @property
+    def folder(self) -> str | None:
+        """The submitit job folder the results are persisted in, if any."""
+        for job in self.jobs:
+            paths = getattr(job, "paths", None)
+            folder = getattr(paths, "folder", None)
+            if folder is not None:
+                return str(folder)
+        return None
+
+    def done(self) -> bool:
+        """Whether every job has finished (best-effort, never blocks)."""
+        for job in self.jobs:
+            is_done = getattr(job, "done", None)
+            if callable(is_done):
+                try:
+                    if not is_done():
+                        return False
+                except Exception:  # noqa: BLE001 - a not-yet-known job isn't done
+                    return False
+        return True
+
+    def save(self, path: str | Path) -> Path:
+        """Pickle this handle to ``path`` so a later session can collect it."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as f:
+            pickle.dump(self, f)
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path):  # noqa: ANN206 - returns cls
+        """Load a handle saved by :meth:`save` (e.g. in a later session)."""
+        with Path(path).open("rb") as f:
+            obj = pickle.load(f)
+        if not isinstance(obj, cls):
+            msg = f"{path} does not contain a {cls.__name__}."
+            raise TypeError(msg)
+        return obj
+
+
 @dataclass
-class ParallelEMEJobs:
+class ParallelEMEJobs(_SubmittedJobs):
     """Handle for a submitted - but not yet collected - parallel EME run.
 
     Returned by :func:`submit_s_matrix_parallel`. It bundles the submitted
@@ -594,38 +652,6 @@ class ParallelEMEJobs:
     sax_backend: sax.Backend = "klu"
     neff_atol: float = 1e-6
 
-    @property
-    def job_ids(self) -> list[str]:
-        """The submitit job ids (empty strings for executors without ids)."""
-        return [str(getattr(job, "job_id", "")) for job in self.jobs]
-
-    @property
-    def folder(self) -> str | None:
-        """The submitit job folder the results are persisted in, if any."""
-        for job in self.jobs:
-            paths = getattr(job, "paths", None)
-            folder = getattr(paths, "folder", None)
-            if folder is not None:
-                return str(folder)
-        return None
-
-    def done(self) -> bool:
-        """Whether every job has finished (best-effort, never blocks).
-
-        Uses each job's ``done()`` if it exposes one (submitit does); jobs
-        without it are assumed finished. Use this to poll a submitted run
-        before collecting it, e.g. across sessions.
-        """
-        for job in self.jobs:
-            is_done = getattr(job, "done", None)
-            if callable(is_done):
-                try:
-                    if not is_done():
-                        return False
-                except Exception:  # noqa: BLE001 - a not-yet-known job isn't done
-                    return False
-        return True
-
     def result(self) -> sax.SDenseMM:
         """Block until all jobs finish, then cascade the full EME S-matrix.
 
@@ -654,29 +680,6 @@ class ParallelEMEJobs:
             neff_atol=self.neff_atol,
         )
 
-    def save(self, path: str | Path) -> Path:
-        """Pickle this handle to ``path`` so a later session can collect it.
-
-        Pickling stores the jobs (which know their submitit ``folder`` and
-        job ids) together with the cells and environment, so a later session
-        only needs this one file to reattach to the running jobs and assemble
-        the result.
-        """
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("wb") as f:
-            pickle.dump(self, f)
-        return path
-
-    @classmethod
-    def load(cls, path: str | Path) -> ParallelEMEJobs:
-        """Load a handle saved by :meth:`save` (e.g. in a later session)."""
-        with Path(path).open("rb") as f:
-            obj = pickle.load(f)
-        if not isinstance(obj, cls):
-            msg = f"{path} does not contain a {cls.__name__}."
-            raise TypeError(msg)
-        return obj
 
 
 def submit_s_matrix_parallel(
@@ -752,6 +755,208 @@ def submit_s_matrix_parallel(
         sax_backend=sax_backend,
         neff_atol=neff_atol,
     )
+
+
+@dataclass
+class ParallelEMESpectrumJobs(_SubmittedJobs):
+    """Handle for a submitted - but not yet collected - parallel EME *spectrum*.
+
+    Returned by :func:`submit_s_matrix_spectrum`; the spectrum analogue of
+    :class:`ParallelEMEJobs`. Each slice-group job solves the dispersive modes
+    of its cells at every sweep wavelength and returns only the per-wavelength
+    effective indices and interface S-matrices (no mode fields). Picklable, so
+    it can be saved after submission and reloaded in a later session to gather
+    the per-wavelength S-matrices.
+
+    Attributes:
+        jobs: the submitted slice-group spectrum jobs.
+        cells: the cells of the EME chain.
+        env: the simulation environment (its ``wl`` is overridden per point).
+        wls: the swept wavelengths [um], in result order.
+        sax_backend: SAX backend used to cascade the S-matrices.
+        neff_atol: tolerance of the shared-cell consistency check.
+    """
+
+    jobs: list[Any]
+    cells: list[Cell]
+    env: Environment
+    wls: np.ndarray
+    sax_backend: sax.Backend = "klu"
+    neff_atol: float = 1e-6
+
+    def result(self) -> list[sax.SDenseMM]:
+        """Block until all jobs finish; return one ``(S, port_map)`` per wl."""
+        results = [job.result() for job in self.jobs]
+        return _assemble_spectrum(
+            results,
+            self.cells,
+            self.env,
+            self.wls,
+            sax_backend=self.sax_backend,
+            neff_atol=self.neff_atol,
+        )
+
+    async def aresult(self) -> list[sax.SDenseMM]:
+        """Async :meth:`result` (awaits the jobs without blocking the loop)."""
+        results = list(
+            await asyncio.gather(*(asyncio.to_thread(job.result) for job in self.jobs))
+        )
+        return _assemble_spectrum(
+            results,
+            self.cells,
+            self.env,
+            self.wls,
+            sax_backend=self.sax_backend,
+            neff_atol=self.neff_atol,
+        )
+
+
+def submit_s_matrix_spectrum(
+    cells: list[Cell],
+    env: Environment,
+    *,
+    executor: JobExecutor,
+    wls: Any | None = None,
+    freqs: Any | None = None,
+    num_modes: int = 10,
+    max_interfaces_per_job: int = 2,
+    sax_backend: sax.Backend = "klu",
+    neff_atol: float = 1e-6,
+    compute_modes_kwargs: dict[str, Any] | None = None,
+    interface_kwargs: dict[str, Any] | None = None,
+) -> ParallelEMESpectrumJobs:
+    """Submit the slice-group jobs of an EME *spectrum* without awaiting them.
+
+    The non-blocking, multi-session half of :func:`compute_s_matrix_spectrum`:
+    it chunks the cells, submits one spectrum job per slice group (each solving
+    its cells at *every* sweep wavelength) and returns a
+    :class:`ParallelEMESpectrumJobs` handle immediately. Use it - like
+    :func:`submit_s_matrix_parallel` - to distribute a dense spectrum as
+    concurrent slurm jobs and collect it later (possibly in another session).
+    """
+    if executor is None:
+        msg = (
+            "submit_s_matrix_spectrum requires an executor whose jobs persist "
+            "(e.g. meow.slurm_executor(...)). For an in-process run use "
+            "compute_s_matrix_spectrum instead."
+        )
+        raise ValueError(msg)
+    wls_arr = _resolve_wls(wls, freqs)
+    groups = chunk_cell_indices(len(cells), max_interfaces_per_job)
+    jobs = _submit_spectrum_jobs(
+        executor,
+        cells,
+        env,
+        groups,
+        wls_arr,
+        num_modes,
+        compute_modes_kwargs,
+        interface_kwargs,
+    )
+    return ParallelEMESpectrumJobs(
+        jobs=jobs,
+        cells=cells,
+        env=env,
+        wls=wls_arr,
+        sax_backend=sax_backend,
+        neff_atol=neff_atol,
+    )
+
+
+def compute_cell_modes(
+    cell_data: dict[str, Any] | Cell,
+    env_data: dict[str, Any] | Environment,
+    num_modes: int = 10,
+    compute_modes_kwargs: dict[str, Any] | None = None,
+    compute_modes: Callable | None = None,
+) -> list[Any]:
+    """Solve and return the *full* modes (with fields) of a single cell.
+
+    Unlike :func:`compute_group_result` (which returns only effective indices
+    and interface matrices), this keeps the complete :class:`~meow.Mode`
+    objects, so the returned modes can be saved per cell and reused later for
+    field reconstruction / propagation. This is the per-cell job used by
+    :func:`submit_cell_modes`.
+    """
+    if compute_modes is None:
+        from meow.fde import compute_modes  # fmt: skip
+
+    cell = Cell.model_validate(cell_data)
+    env = Environment.model_validate(env_data)
+    cs = CrossSection.from_cell(cell=cell, env=env)
+    return list(compute_modes(cs, num_modes=num_modes, **(compute_modes_kwargs or {})))
+
+
+@dataclass
+class ParallelFieldModeJobs(_SubmittedJobs):
+    """Handle for submitted *single-cell* mode jobs that keep the full fields.
+
+    Returned by :func:`submit_cell_modes`. Each job solves the modes of one
+    cell and returns the complete :class:`~meow.Mode` objects (fields included),
+    so :meth:`result` yields the per-cell mode bases needed to reconstruct or
+    propagate fields (e.g. with :func:`meow.propagate_modes`) or to cascade the
+    S-matrix with :func:`meow.compute_s_matrix`. Picklable for multi-session
+    collection; note the field data makes these results much larger than the
+    slice-group handles.
+
+    Attributes:
+        jobs: the submitted per-cell mode jobs (one per cell, in chain order).
+        cells: the cells of the EME chain (aligned with ``jobs``).
+        env: the simulation environment.
+    """
+
+    jobs: list[Any]
+    cells: list[Cell]
+    env: Environment
+
+    def result(self) -> list[list[Any]]:
+        """Block until all jobs finish; return the modes of each cell."""
+        return [job.result() for job in self.jobs]
+
+    async def aresult(self) -> list[list[Any]]:
+        """Async :meth:`result` (awaits the jobs without blocking the loop)."""
+        return list(
+            await asyncio.gather(*(asyncio.to_thread(job.result) for job in self.jobs))
+        )
+
+
+def submit_cell_modes(
+    cells: list[Cell],
+    env: Environment,
+    *,
+    executor: JobExecutor,
+    num_modes: int = 10,
+    compute_modes_kwargs: dict[str, Any] | None = None,
+    compute_modes: Callable | None = None,
+) -> ParallelFieldModeJobs:
+    """Submit one mode-solve job per cell, keeping the full mode fields.
+
+    The single-cell decomposition used when the complete mode fields must be
+    saved for later analysis (field reconstruction / propagation), as opposed
+    to the field-free slice-group decomposition of
+    :func:`submit_s_matrix_parallel`. Each cell is solved as its own concurrent
+    job (e.g. a slurm task) and the returned :class:`ParallelFieldModeJobs`
+    handle is picklable for multi-session collection.
+    """
+    if executor is None:
+        msg = (
+            "submit_cell_modes requires an executor whose jobs persist "
+            "(e.g. meow.slurm_executor(...))."
+        )
+        raise ValueError(msg)
+    env_data = env.model_dump()
+    jobs = [
+        executor.submit(
+            compute_cell_modes,
+            cell.model_dump(),
+            env_data,
+            num_modes,
+            compute_modes_kwargs,
+            compute_modes,
+        )
+        for cell in cells
+    ]
+    return ParallelFieldModeJobs(jobs=jobs, cells=cells, env=env)
 
 
 def slurm_executor(

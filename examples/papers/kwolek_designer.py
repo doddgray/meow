@@ -48,7 +48,6 @@ Run with ``python -m examples.papers.kwolek_designer``.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -58,6 +57,7 @@ import gdsfactory as gf
 import numpy as np
 
 import meow as mw
+from examples.papers import _resolution
 from examples.papers.kwolek2026_faquad import (
     LAYER_RIB,
     FaquadDesign,
@@ -67,7 +67,7 @@ from examples.papers.kwolek2026_faquad import (
 )
 
 FIGDIR = Path(__file__).parent / "figures"
-FAST = bool(int(os.environ.get("MEOW_EXAMPLE_FAST", "0")))
+pick = _resolution.pick
 
 
 # --------------------------------------------------------------------------
@@ -791,16 +791,16 @@ def _summary(designs: list[FaquadFilterDesign]) -> dict[str, dict[str, float]]:
 
 
 def main() -> dict[str, object]:
-    """Design the full matrix (a coarse subset in FAST mode) and plot it."""
+    """Design the full matrix (a coarse subset at low resolution) and plot it."""
     import matplotlib.pyplot as plt
 
     from examples.papers._plot import plot_component
 
     FIGDIR.mkdir(exist_ok=True, parents=True)
     gf.gpdk.PDK.activate()
-    res = 0.06 if FAST else 0.04
+    res = pick(low=0.06, medium=0.04, high=0.03)
 
-    if FAST:
+    if _resolution.is_low():
         platforms = [tfln_platform(0.30), tflt_platform(0.50)]
         pairs = WAVELENGTH_PAIRS[:1]
     else:

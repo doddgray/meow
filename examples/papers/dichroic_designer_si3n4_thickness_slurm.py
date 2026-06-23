@@ -3,22 +3,24 @@
 This is the cluster version of :mod:`examples.papers.dichroic_designer_si3n4_thickness`:
 it designs fully-etched Si3N4 dichroic splitters across three core thicknesses
 (200, 100, 40 nm) and the 900-1200 nm cutoffs, and then runs **all the
-simulation, analysis and plotting of each design asynchronously as a slurm
-job**. Each (thickness, cutoff) design becomes one job
-(:func:`examples.papers._analysis.analyze_dichroic`) that computes a dense
-short-/long-pass transmission spectrum and the intensity propagation across the
-cutoff, and writes its spectrum/propagation/design figures, the device GDS and
-the raw data into a fresh **timestamped subfolder** of ``MEOW_SLURM_FOLDER``.
+simulation, analysis and plotting of each design asynchronously as slurm
+jobs**. Each (thickness, cutoff) design's EME is broken into **subsets of cells
+run concurrently as separate slurm jobs** (a dense short-/long-pass transmission
+spectrum distributed as slice-group jobs, plus - when full fields are saved -
+single-cell field jobs for the intensity propagation across the cutoff). The
+:func:`gather_runs` step assembles them and writes each design's
+spectrum/propagation/design figures, GDS and data into a fresh **timestamped
+subfolder** of ``MEOW_SLURM_FOLDER``.
 
 Because submitit persists every job in its folder, the jobs can be submitted
-from one (short-lived) python session and their summaries reloaded/gathered in a
-*different* session later - see the ``submit`` / ``gather`` subcommands. The
-figures/GDS/data are written directly into the shared run folders, so the later
-session only collects the small summary dicts.
+from one (short-lived) python session and their results reloaded/assembled in a
+*different* session later - see the ``submit`` / ``gather`` subcommands.
 
 Wavelength controls (spectrum/propagation bounds + counts) default sensibly and
-are overridable via the ``MEOW_SPECTRUM_*`` / ``MEOW_PROP_*`` env vars (see
-:mod:`examples.papers._analysis`).
+are overridable via the ``MEOW_SPECTRUM_*`` / ``MEOW_PROP_*`` env vars; the
+resolution preset (mesh / modes / cells) follows ``MEOW_EXAMPLE_RES`` in
+``{low, medium, high}`` (see :mod:`examples.papers._analysis` /
+:mod:`examples.papers._resolution`).
 
 Run the full async flow in one process (jobs as local subprocesses) with::
 
@@ -43,7 +45,7 @@ from typing import Any
 import gdsfactory as gf
 import numpy as np
 
-from examples.papers import _analysis, _slurm
+from examples.papers import _analysis, _resolution, _slurm
 from examples.papers.dichroic_designer import DichroicDesign, to_params
 from examples.papers.dichroic_designer_si3n4_thickness import (
     CUTOFFS,
@@ -53,7 +55,7 @@ from examples.papers.dichroic_designer_si3n4_thickness import (
 )
 from examples.papers.dichroic_designer_slurm import analysis_settings, make_executor
 
-FAST = bool(int(os.environ.get("MEOW_EXAMPLE_FAST", "0")))
+pick = _resolution.pick
 JOB_FOLDER = Path(os.environ.get("MEOW_SLURM_FOLDER", "meow_si3n4_thickness_jobs"))
 
 
@@ -73,7 +75,7 @@ def thickness_designs(
     out: list[tuple[int, DichroicDesign, float]] = []
     for t_nm in thicknesses:
         t_um, clad_t, wgb, res = THICKNESS_CONFIGS[t_nm]
-        if FAST:
+        if _resolution.is_low():
             res = max(res, 0.06)
         plat = platform(t_um, clad_t)
         out.extend(
@@ -91,46 +93,47 @@ def submit_runs(
     executor_factory: Any | None = None,
     num_cells: int = 16,
     num_modes: int = 4,
-) -> list[_slurm.SavedRun]:
-    """Submit one analysis job per (thickness, cutoff) design *without waiting*.
+    save_fields: bool | None = None,
+) -> list[Any]:
+    """Submit each (thickness, cutoff) design's *distributed* EME *without waiting*.
 
-    Each job writes its figures/GDS/data into a fresh timestamped subfolder of
-    ``folder``; returns the persisted :class:`_slurm.SavedRun` handles. Collect
-    the summaries later with :func:`gather_runs`.
+    Each design's EME is broken into concurrent cell-subset jobs (slice-group
+    spectrum + optional single-cell field jobs); the run records are persisted
+    into per-design timestamped subfolders of ``folder``. Collect/assemble them
+    later with :func:`gather_runs`.
     """
     if executor_factory is None:
         def executor_factory(sub: Path) -> Any:
             return make_executor(folder=sub)
 
-    records = []
-    for t_nm, design, device_res in designs:
-        records.append(
-            _slurm.submit_run(
-                _analysis.analyze_dichroic,
-                to_params(design),
-                analysis_settings(
-                    design,
-                    num_cells=num_cells,
-                    num_modes=num_modes,
-                    device_res=device_res,
-                ),
-                executor_factory=executor_factory,
-                folder=folder,
-                label=_label(t_nm, design),
-            )
+    return [
+        _slurm.start_run(
+            _analysis.submit_dichroic_run,
+            to_params(design),
+            analysis_settings(
+                design,
+                num_cells=num_cells,
+                num_modes=num_modes,
+                device_res=device_res,
+            ),
+            folder=folder,
+            label=_label(t_nm, design),
+            executor_factory=executor_factory,
+            save_fields=save_fields,
         )
-    return records
+        for t_nm, design, device_res in designs
+    ]
 
 
 def gather_runs(folder: Path | str = JOB_FOLDER) -> dict[str, dict]:
-    """Reload and collect every analysis summary from ``folder`` (any session)."""
-    return {r.label: r.result() for r in _slurm.load_runs(folder)}
+    """Reload + assemble every run from ``folder`` (any session)."""
+    return {r.label: r.gather() for r in _slurm.load_runs(folder)}
 
 
 async def agather_runs(folder: Path | str = JOB_FOLDER) -> dict[str, dict]:
-    """Async :func:`gather_runs` (awaits all the analysis jobs together)."""
+    """Async :func:`gather_runs` (assembles + plots all the runs together)."""
     runs = _slurm.load_runs(folder)
-    summaries = await asyncio.gather(*(r.aresult() for r in runs))
+    summaries = await asyncio.gather(*(r.agather() for r in runs))
     return {r.label: s for r, s in zip(runs, summaries, strict=True)}
 
 
@@ -138,13 +141,16 @@ async def agather_runs(folder: Path | str = JOB_FOLDER) -> dict[str, dict]:
 # entry points
 # --------------------------------------------------------------------------
 def _sweep_config() -> tuple[list[int], np.ndarray, dict[str, int]]:
-    thicknesses = [200, 40] if FAST else [200, 100, 40]
-    cutoffs = CUTOFFS[::3] if FAST else CUTOFFS
-    settings = {"num_cells": 8 if FAST else 16, "num_modes": 2 if FAST else 4}
+    thicknesses = pick(low=[200, 40], medium=[200, 100, 40], high=[200, 100, 40])
+    cutoffs = pick(low=CUTOFFS[::3], medium=CUTOFFS, high=CUTOFFS)
+    settings = {
+        "num_cells": pick(low=8, medium=16, high=32),
+        "num_modes": pick(low=2, medium=4, high=6),
+    }
     return thicknesses, cutoffs, settings
 
 
-def _submit_all() -> list[_slurm.SavedRun]:
+def _submit_all() -> list[Any]:
     thicknesses, cutoffs, settings = _sweep_config()
     designs = thickness_designs(thicknesses, cutoffs)
     return submit_runs(designs, folder=JOB_FOLDER, **settings)
@@ -157,11 +163,12 @@ def main() -> dict[str, object]:
 
 
 def submit_main() -> dict[str, object]:
-    """Session A: submit the whole sweep's analysis jobs and return."""
+    """Session A: submit the whole sweep's distributed EME jobs and return."""
     records = _submit_all()
     return {
         "submitted": {
-            r.label: {"job_id": r.job_id, "out_dir": r.out_dir} for r in records
+            r.label: {"n_jobs": len(r.job_ids), "out_dir": r.out_dir}
+            for r in records
         },
         "folder": str(JOB_FOLDER),
         "next": "run 'gather' in a later session with the same MEOW_SLURM_FOLDER",

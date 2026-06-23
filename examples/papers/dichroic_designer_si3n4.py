@@ -18,13 +18,13 @@ Run with ``python -m examples.papers.dichroic_designer_si3n4``.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import gdsfactory as gf
 import numpy as np
 
 import meow as mw
+from examples.papers import _resolution
 from examples.papers._plot import plot_component
 from examples.papers.dichroic_designer import (
     WGB,
@@ -36,7 +36,7 @@ from examples.papers.dichroic_designer import (
 )
 
 FIGDIR = Path(__file__).parent / "figures"
-FAST = bool(int(os.environ.get("MEOW_EXAMPLE_FAST", "0")))
+pick = _resolution.pick
 
 
 def si3n4_platform() -> Platform:
@@ -77,8 +77,8 @@ def main() -> dict[str, object]:
     FIGDIR.mkdir(exist_ok=True, parents=True)
     gf.gpdk.PDK.activate()
     platform = si3n4_platform()
-    res = 0.05 if FAST else 0.035
-    cutoffs = TARGET_CUTOFFS[::3] if FAST else TARGET_CUTOFFS
+    res = pick(low=0.05, medium=0.035, high=0.025)
+    cutoffs = pick(low=TARGET_CUTOFFS[::3], medium=TARGET_CUTOFFS, high=TARGET_CUTOFFS)
 
     designs = [
         design_dichroic(platform, float(wl_c), wgb=WGB_DESIGN, res=res)
@@ -100,7 +100,7 @@ def main() -> dict[str, object]:
 
     # (a) WGA/WGB index crossings = the targeted cutoffs
     ax = fig.add_subplot(grid[0, 0])
-    wls = np.linspace(0.85, 1.27, 6 if FAST else 13)
+    wls = np.linspace(0.85, 1.27, pick(low=6, medium=13, high=21))
     n_b = [segmented_neff(platform, WGB_DESIGN, wl, res=res) for wl in wls]
     ax.plot(wls * 1e3, n_b, "k--", lw=2, label="WGB (3x200 nm rails)")
     for d in designs:

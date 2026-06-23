@@ -13,14 +13,15 @@ examples care about:
   crossings for the dichroic coupler; layout + FAQUAD profiles for the filter);
 - the device **GDS** (``<label>.gds``) and a JSON summary.
 
-The two entry points :func:`analyze_dichroic` and :func:`analyze_faquad` are
-plain top-level functions that take a *picklable* parameter dict (see
-``dichroic_designer.to_params`` / ``kwolek_designer.to_params``) plus a settings
-dict, write all their outputs into ``out_dir`` and return a small summary dict.
-That makes them shippable to a slurm job: the whole simulation + analysis +
-plotting runs on the cluster and only the summary travels back, while the
-figures/GDS/data land directly in the job's (timestamped) output folder on the
-shared filesystem.
+The EME itself is **distributed as concurrent jobs**: :func:`submit_dichroic_run`
+/ :func:`submit_faquad_run` rebuild the design from a *picklable* parameter dict
+(``dichroic_designer.to_params`` / ``kwolek_designer.to_params``) and submit the
+dense transmission spectrum as slice-group jobs (no fields) plus - when full
+fields are saved - the propagation fields as single-cell jobs, returning a
+picklable :class:`DichroicRun` / :class:`FaquadRun`. A later session reloads it
+(see :func:`load_run`) and calls :meth:`~_Run.gather` to collect the distributed
+results, assemble the spectra/fields and write the figures, GDS and data into
+the run's output folder.
 
 Wavelength controls (sensible defaults, overridable per call or via env vars):
 
@@ -34,10 +35,13 @@ Wavelength controls (sensible defaults, overridable per call or via env vars):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import pickle
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -118,32 +122,6 @@ def _cell_modes(
         backend(mw.CrossSection.from_cell(cell=c, env=env), num_modes=num_modes)
         for c in cells
     ]
-
-
-def propagate_field(
-    cells: list[mw.Cell],
-    env: mw.Environment,
-    num_modes: int,
-    *,
-    y: float,
-    input_kind: str = "fundamental",
-    num_z: int = 400,
-    backend: Callable | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Propagate the input excitation and return ``(|Ex|^2(z, x), x, z)``.
-
-    ``input_kind`` selects the launched mode of the first cell: ``"fundamental"``
-    excites mode 0; ``"bar"`` excites the mode whose energy centroid is furthest
-    to negative x (the FAQUAD bar/input guide).
-    """
-    modes = _cell_modes(cells, env, num_modes, backend)
-    if input_kind == "bar":
-        idx = min(range(min(2, len(modes[0]))), key=lambda k: _centroid(modes[0][k]))
-    else:
-        idx = 0
-    z = np.linspace(0.0, float(sum(c.length for c in cells)), num_z)
-    Ex, x = prop.propagate_modes(modes, cells, excite_mode_l=idx, y=y, z=z)
-    return np.abs(np.asarray(Ex)) ** 2, np.asarray(x), z
 
 
 def _attribute_split(
@@ -428,192 +406,438 @@ def save_json(path: Path, data: dict) -> None:
 
 
 # ==========================================================================
-# top-level analysis jobs (picklable, shippable to a slurm task)
+# field-saving control + port attribution from a precomputed mode mapping
 # ==========================================================================
-def analyze_dichroic(out_dir: str, spec: dict, settings: dict) -> dict:
-    """Full analysis of one dichroic coupler design; returns a summary dict.
+def save_fields_enabled(save_fields: bool | None = None) -> bool:  # noqa: FBT001
+    """Whether to save full per-cell mode fields (single-cell job decomposition).
 
-    Rebuilds the design from ``spec`` (``dichroic_designer.to_params``), computes
-    the short-/long-pass transmission spectrum and the propagation fields, and
-    writes the spectrum/propagation/design figures, the GDS and the raw data
-    into ``out_dir``. Designed to run as a slurm job.
+    When enabled, propagation/field analysis is possible and each cell is solved
+    as its own job keeping the full fields; when disabled, only the field-free
+    slice-group spectrum is computed. Falls back to the ``MEOW_SAVE_FIELDS`` env
+    var (default on).
     """
-    import gdsfactory as gf
+    if save_fields is not None:
+        return save_fields
+    return bool(int(os.environ.get("MEOW_SAVE_FIELDS", "1")))
 
-    gf.gpdk.PDK.activate()
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    label = settings["label"]
-    stem = settings.get("file_stem") or _file_stem(label)
-    num_cells = settings["num_cells"]
-    num_modes = settings["num_modes"]
-    res = settings["device_res"]
-    spectrum_wls = np.asarray(settings["spectrum_wls"], dtype=float)
-    prop_wls = np.asarray(settings["prop_wls"], dtype=float)
-    num_z = int(settings.get("num_z", 400))
-    n_neff = int(settings.get("n_neff", 7))
 
-    design = dd.design_from_params(**spec)
-    cells = dichroic_device_cells(design, num_cells, res)
-    split = dichroic_short_pass_split(design)
-    y_core = design.platform.core_thickness / 2.0
+def _output_index_split(
+    cells: list[mw.Cell], env: mw.Environment, num_modes: int, split: float
+) -> tuple[list[int], list[int]]:
+    """(below, above) output-mode indices, by energy centroid vs ``split``.
 
-    # transmission spectrum (cells are wavelength-independent geometry)
-    t_short, t_long = [], []
-    for wl in spectrum_wls:
-        env = mw.Environment(wl=float(wl), T=25.0)
-        modes = _cell_modes(cells, env, num_modes)
-        s_matrix, port_map = mw.compute_s_matrix(modes, cells=cells)
-        below, above = _attribute_split(modes[-1], s_matrix, port_map, split)
-        t_short.append(below)
-        t_long.append(above)
-    t_short = np.asarray(t_short)
-    t_long = np.asarray(t_long)
+    Solved once on the final cell; the deterministic mode ordering lets the same
+    index->port mapping be reused for every (nearby) wavelength of a spectrum,
+    so the field-free slice-group S-matrices can be attributed to ports without
+    re-solving the output modes at each wavelength.
+    """
+    out_modes = mw.compute_modes(
+        mw.CrossSection.from_cell(cell=cells[-1], env=env), num_modes=num_modes
+    )
+    below = [i for i, m in enumerate(out_modes) if _centroid(m) < split]
+    above = [i for i in range(len(out_modes)) if i not in below]
+    return below, above
 
-    # propagation maps around the cutoff
-    panels = []
-    for wl in prop_wls:
-        env = mw.Environment(wl=float(wl), T=25.0)
-        intensity, x, z = propagate_field(
-            cells, env, num_modes, y=y_core, num_z=num_z
+
+def _bar_input_index(
+    cells: list[mw.Cell], env: mw.Environment, num_modes: int
+) -> int:
+    """Index of the bar (most negative centroid) input mode of the first cell."""
+    in_modes = mw.compute_modes(
+        mw.CrossSection.from_cell(cell=cells[0], env=env), num_modes=num_modes
+    )
+    return min(range(min(2, len(in_modes))), key=lambda k: _centroid(in_modes[k]))
+
+
+def _attribute_by_index(
+    s_matrix: Any,
+    port_map: dict[str, int],
+    below: list[int],
+    above: list[int],
+    in_port: str = "left@0",
+) -> tuple[float, float]:
+    """(below, above) output power for ``in_port`` using a fixed index mapping."""
+    s = np.asarray(s_matrix)
+
+    def power(i: int) -> float:
+        return float(np.abs(s[port_map[f"right@{i}"], port_map[in_port]]) ** 2)
+
+    return sum(power(i) for i in below), sum(power(i) for i in above)
+
+
+# ==========================================================================
+# distributed analysis runs: EME as concurrent jobs, assembled + plotted
+# at gather time (a different python session)
+# ==========================================================================
+@dataclass
+class _Run:
+    """A submitted, distributed analysis run (base class).
+
+    Holds the picklable design ``spec`` and ``settings`` plus the submitted EME
+    job handles (in the subclasses). It is pickled into ``<out_dir>/run.pkl`` by
+    :meth:`save`; a later session reloads it and calls :meth:`gather` to collect
+    the distributed EME results, assemble the spectra/fields and write the
+    figures, GDS and data into ``out_dir``.
+    """
+
+    spec: dict
+    settings: dict
+    label: str
+    out_dir: str
+    save_fields: bool
+
+    @property
+    def stem(self) -> str:
+        return self.settings.get("file_stem") or _file_stem(self.label)
+
+    def handles(self) -> list[Any]:
+        """All submitted job handles (overridden by subclasses)."""
+        raise NotImplementedError
+
+    @property
+    def job_ids(self) -> list[str]:
+        return [jid for h in self.handles() for jid in h.job_ids]
+
+    def done(self) -> bool:
+        return all(h.done() for h in self.handles())
+
+    def save(self) -> Path:
+        path = Path(self.out_dir) / "run.pkl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as f:
+            pickle.dump(self, f)
+        return path
+
+    def gather(self) -> dict:
+        raise NotImplementedError
+
+    async def agather(self) -> dict:
+        """Async :meth:`gather` (collects + plots off the event loop)."""
+        return await asyncio.to_thread(self.gather)
+
+
+@dataclass
+class DichroicRun(_Run):
+    """A distributed dichroic-coupler analysis run.
+
+    The transmission spectrum is a single :class:`meow.ParallelEMESpectrumJobs`
+    (slice-group decomposition, no fields); the optional propagation ``fields``
+    are :class:`meow.ParallelFieldModeJobs` (single-cell decomposition keeping
+    the full fields), one per propagation wavelength.
+    """
+
+    spectrum: mw.ParallelEMESpectrumJobs
+    fields: dict[int, mw.ParallelFieldModeJobs]
+    split: float
+
+    def handles(self) -> list[Any]:
+        return [self.spectrum, *self.fields.values()]
+
+    def gather(self) -> dict:
+        import gdsfactory as gf
+
+        gf.gpdk.PDK.activate()
+        out = Path(self.out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        design = dd.design_from_params(**self.spec)
+        num_modes = self.settings["num_modes"]
+        cells = self.spectrum.cells
+        spectrum_wls = np.asarray(self.spectrum.wls, dtype=float)
+
+        env_c = mw.Environment(wl=design.cutoff_wl, T=25.0)
+        below, above = _output_index_split(cells, env_c, num_modes, self.split)
+        t_short, t_long = [], []
+        for s_matrix, port_map in self.spectrum.result():
+            b, a = _attribute_by_index(s_matrix, port_map, below, above)
+            t_short.append(b)
+            t_long.append(a)
+        t_short, t_long = np.asarray(t_short), np.asarray(t_long)
+
+        panels = _propagation_panels(
+            self.fields, design.platform.core_thickness / 2.0,
+            int(self.settings.get("num_z", 400)), input_kind="fundamental",
         )
-        panels.append((f"{wl * 1e3:.0f} nm", intensity, x, z))
 
-    # figures + GDS + data
-    design.component.write_gds(str(out / f"{stem}.gds"))
-    plot_dichroic_design(design, out / f"{stem}_design.png", n_neff=n_neff)
-    plot_transmission_dichroic(
-        spectrum_wls, t_short, t_long, design.cutoff_wl,
-        out / f"{stem}_spectrum.png",
-        f"{label}: dichroic transmission spectrum",
-    )
-    plot_propagation(
-        panels, out / f"{stem}_propagation.png",
-        f"{label}: intensity propagation across the cutoff",
-    )
-    np.savez(
-        out / f"{stem}_results.npz",
-        spectrum_wls=spectrum_wls,
-        t_short=t_short,
-        t_long=t_long,
-        prop_wls=prop_wls,
-    )
-
-    i_c = int(np.argmin(np.abs(spectrum_wls - design.cutoff_wl)))
-    summary = {
-        "label": label,
-        "kind": "dichroic",
-        "cutoff_nm": round(design.cutoff_wl * 1e3, 1),
-        "w_a_nm": round(design.w_a * 1e3, 1),
-        "gap_nm": round(design.gap * 1e3, 0),
-        "length_um": round(design.total_length, 0),
-        "short_pass_at_cutoff": round(float(t_short[i_c]), 4),
-        "long_pass_at_cutoff": round(float(t_long[i_c]), 4),
-        "out_dir": str(out),
-        "files": sorted(p.name for p in out.glob(f"{stem}*")),
-    }
-    save_json(out / f"{stem}_summary.json", summary)
-    return summary
-
-
-def analyze_faquad(out_dir: str, spec: dict, settings: dict) -> dict:
-    """Full analysis of one FAQUAD filter design; returns a summary dict.
-
-    Rebuilds the design from ``spec`` (``kwolek_designer.to_params``), computes
-    the FH and SH bar/cross transmission spectra and the FH/SH propagation
-    fields, and writes the spectrum/propagation/design figures, the GDS and the
-    raw data into ``out_dir``. Designed to run as a slurm job.
-    """
-    import gdsfactory as gf
-
-    gf.gpdk.PDK.activate()
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    label = settings["label"]
-    stem = settings.get("file_stem") or _file_stem(label)
-    num_cells = settings["num_cells"]
-    num_modes = settings["num_modes"]
-    res = settings["device_res"]
-    fh_wls = np.asarray(settings["fh_wls"], dtype=float)
-    sh_wls = np.asarray(settings["sh_wls"], dtype=float)
-    prop_wls = np.asarray(settings["prop_wls"], dtype=float)
-    num_z = int(settings.get("num_z", 400))
-
-    design = kd.filter_from_params(**spec)
-    y_core = design.platform.core_thickness / 2.0
-
-    def bar_cross_spectrum(wls: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        bars, crosses = [], []
-        for wl in wls:
-            cells = kd.device_cells(design, float(wl), num_cells=num_cells, res=res)
-            env = mw.Environment(wl=float(wl), T=25.0)
-            modes = _cell_modes(cells, env, num_modes)
-            s_matrix, port_map = mw.compute_s_matrix(modes, cells=cells)
-            # input = bar fundamental (most negative centroid of first cell)
-            in_idx = min(
-                range(min(2, len(modes[0]))), key=lambda k: _centroid(modes[0][k])
+        stem = self.stem
+        design.component.write_gds(str(out / f"{stem}.gds"))
+        plot_dichroic_design(
+            design, out / f"{stem}_design.png",
+            n_neff=int(self.settings.get("n_neff", 7)),
+        )
+        plot_transmission_dichroic(
+            spectrum_wls, t_short, t_long, design.cutoff_wl,
+            out / f"{stem}_spectrum.png",
+            f"{self.label}: dichroic transmission spectrum",
+        )
+        if panels:
+            plot_propagation(
+                panels, out / f"{stem}_propagation.png",
+                f"{self.label}: intensity propagation across the cutoff",
             )
-            t_bar, t_cross = _attribute_split(
-                modes[-1], s_matrix, port_map, 0.0, in_port=f"left@{in_idx}"
+        np.savez(
+            out / f"{stem}_results.npz",
+            spectrum_wls=spectrum_wls, t_short=t_short, t_long=t_long,
+            prop_wls=np.asarray(self.settings.get("prop_wls", []), dtype=float),
+        )
+        i_c = int(np.argmin(np.abs(spectrum_wls - design.cutoff_wl)))
+        summary = {
+            "label": self.label,
+            "kind": "dichroic",
+            "cutoff_nm": round(design.cutoff_wl * 1e3, 1),
+            "w_a_nm": round(design.w_a * 1e3, 1),
+            "gap_nm": round(design.gap * 1e3, 0),
+            "length_um": round(design.total_length, 0),
+            "short_pass_at_cutoff": round(float(t_short[i_c]), 4),
+            "long_pass_at_cutoff": round(float(t_long[i_c]), 4),
+            "saved_fields": bool(self.fields),
+            "out_dir": str(out),
+            "files": sorted(
+                p.name
+                for p in out.glob(f"{stem}*")
+                if not p.name.endswith("_summary.json")
+            ),
+        }
+        save_json(out / f"{stem}_summary.json", summary)
+        return summary
+
+
+@dataclass
+class FaquadRun(_Run):
+    """A distributed FAQUAD-filter analysis run.
+
+    The FH and SH cells depend on wavelength (the anisotropic core tensor is
+    evaluated at each wavelength), so each FH/SH sweep point is its own
+    :class:`meow.ParallelEMEJobs` (single-wavelength slice-group decomposition);
+    the optional propagation ``fields`` keep the full per-cell modes.
+    """
+
+    fh: list[tuple[float, mw.ParallelEMEJobs]]
+    sh: list[tuple[float, mw.ParallelEMEJobs]]
+    fields: dict[int, mw.ParallelFieldModeJobs]
+
+    def handles(self) -> list[Any]:
+        return [h for _, h in (*self.fh, *self.sh)] + list(self.fields.values())
+
+    def _band(
+        self, pairs: list[tuple[float, mw.ParallelEMEJobs]], center_wl: float
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        num_modes = self.settings["num_modes"]
+        wls = np.array([w for w, _ in pairs], dtype=float)
+        rep = pairs[int(np.argmin(np.abs(wls - center_wl)))][1]
+        in_idx = _bar_input_index(rep.cells, rep.env, num_modes)
+        below, above = _output_index_split(rep.cells, rep.env, num_modes, 0.0)
+        bars, crosses = [], []
+        for _, handle in pairs:
+            s_matrix, port_map = handle.result()
+            t_bar, t_cross = _attribute_by_index(
+                s_matrix, port_map, below, above, in_port=f"left@{in_idx}"
             )
             bars.append(t_bar)
             crosses.append(t_cross)
-        return np.asarray(bars), np.asarray(crosses)
+        return wls, np.asarray(bars), np.asarray(crosses)
 
-    bar_fh, cross_fh = bar_cross_spectrum(fh_wls)
-    bar_sh, cross_sh = bar_cross_spectrum(sh_wls)
+    def gather(self) -> dict:
+        import gdsfactory as gf
 
-    # propagation at the FH/SH cutoffs and the requested neighbours
-    panels = []
-    for wl in prop_wls:
-        cells = kd.device_cells(design, float(wl), num_cells=num_cells, res=res)
-        env = mw.Environment(wl=float(wl), T=25.0)
-        intensity, x, z = propagate_field(
-            cells, env, num_modes, y=y_core, input_kind="bar", num_z=num_z
+        gf.gpdk.PDK.activate()
+        out = Path(self.out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        design = kd.filter_from_params(**self.spec)
+
+        fh_wls, bar_fh, cross_fh = self._band(self.fh, design.fh_wl)
+        sh_wls, bar_sh, cross_sh = self._band(self.sh, design.sh_wl)
+        panels = _propagation_panels(
+            self.fields, design.platform.core_thickness / 2.0,
+            int(self.settings.get("num_z", 400)), input_kind="bar",
         )
-        panels.append((f"{wl * 1e3:.0f} nm", intensity, x, z))
 
-    design.component.write_gds(str(out / f"{stem}.gds"))
-    plot_faquad_design(design, out / f"{stem}_design.png")
-    plot_transmission_faquad(
-        fh_wls, bar_fh, cross_fh, sh_wls, bar_sh, cross_sh,
-        out / f"{stem}_spectrum.png",
-        f"{label}: FAQUAD filter ER / loss spectra",
+        stem = self.stem
+        design.component.write_gds(str(out / f"{stem}.gds"))
+        plot_faquad_design(design, out / f"{stem}_design.png")
+        plot_transmission_faquad(
+            fh_wls, bar_fh, cross_fh, sh_wls, bar_sh, cross_sh,
+            out / f"{stem}_spectrum.png",
+            f"{self.label}: FAQUAD filter ER / loss spectra",
+        )
+        if panels:
+            plot_propagation(
+                panels, out / f"{stem}_propagation.png",
+                f"{self.label}: intensity propagation (bar input)",
+                ylim=(-3, 3),
+            )
+        np.savez(
+            out / f"{stem}_results.npz",
+            fh_wls=fh_wls, bar_fh=bar_fh, cross_fh=cross_fh,
+            sh_wls=sh_wls, bar_sh=bar_sh, cross_sh=cross_sh,
+            prop_wls=np.asarray(self.settings.get("prop_wls", []), dtype=float),
+        )
+        eps = 1e-9
+        i_fh = int(np.argmin(np.abs(fh_wls - design.fh_wl)))
+        i_sh = int(np.argmin(np.abs(sh_wls - design.sh_wl)))
+        fh_er = float(10 * np.log10(max(cross_fh[i_fh], eps) / max(bar_fh[i_fh], eps)))
+        sh_er = float(10 * np.log10(max(bar_sh[i_sh], eps) / max(cross_sh[i_sh], eps)))
+        summary = {
+            "label": self.label,
+            "kind": "faquad",
+            "platform": design.platform.name,
+            "fh_nm": round(design.fh_wl * 1e3, 0),
+            "sh_nm": round(design.sh_wl * 1e3, 0),
+            "length_um": round(design.total_length, 0),
+            "fh_cross": round(float(cross_fh[i_fh]), 4),
+            "fh_bar": round(float(bar_fh[i_fh]), 4),
+            "sh_bar": round(float(bar_sh[i_sh]), 4),
+            "sh_cross": round(float(cross_sh[i_sh]), 4),
+            "fh_er_db": round(fh_er, 2),
+            "sh_er_db": round(sh_er, 2),
+            "saved_fields": bool(self.fields),
+            "out_dir": str(out),
+            "files": sorted(
+                p.name
+                for p in out.glob(f"{stem}*")
+                if not p.name.endswith("_summary.json")
+            ),
+        }
+        save_json(out / f"{stem}_summary.json", summary)
+        return summary
+
+
+def _propagation_panels(
+    fields: dict[int, mw.ParallelFieldModeJobs],
+    y_core: float,
+    num_z: int,
+    *,
+    input_kind: str,
+) -> list[tuple[str, np.ndarray, np.ndarray, np.ndarray]]:
+    """Collect propagation panels from the per-cell field-mode handles."""
+    panels = []
+    for wl_nm, handle in sorted(fields.items()):
+        modes = handle.result()
+        if input_kind == "bar":
+            n_in = min(2, len(modes[0]))
+            idx = min(range(n_in), key=lambda k: _centroid(modes[0][k]))
+        else:
+            idx = 0
+        z = np.linspace(0.0, float(sum(c.length for c in handle.cells)), num_z)
+        field, x = prop.propagate_modes(
+            modes, handle.cells, excite_mode_l=idx, y=y_core, z=z
+        )
+        panels.append((f"{wl_nm} nm", np.abs(np.asarray(field)) ** 2, np.asarray(x), z))
+    return panels
+
+
+def load_run(path: str | Path) -> _Run:
+    """Load a :class:`_Run` saved by :meth:`_Run.save` (e.g. in a later session)."""
+    with Path(path).open("rb") as f:
+        obj = pickle.load(f)
+    if not isinstance(obj, _Run):
+        msg = f"{path} is not an analysis run record."
+        raise TypeError(msg)
+    return obj
+
+
+# ==========================================================================
+# submission: distribute one design's EME as concurrent jobs
+# ==========================================================================
+def submit_dichroic_run(
+    spec: dict,
+    settings: dict,
+    *,
+    executor_factory: Callable[[str], Any],
+    out_dir: str | Path,
+    save_fields: bool | None = None,
+) -> DichroicRun:
+    """Submit one dichroic design's distributed EME and return a :class:`DichroicRun`.
+
+    The dense transmission spectrum is submitted as slice-group jobs
+    (:func:`meow.submit_s_matrix_spectrum`); when ``save_fields`` is on, the
+    propagation fields are additionally submitted as single-cell mode jobs
+    (:func:`meow.submit_cell_modes`), one per propagation wavelength.
+    ``executor_factory(name)`` builds a :func:`meow.slurm_executor` per job group
+    (so submitit logs land in distinct subfolders).
+    """
+    import gdsfactory as gf
+
+    gf.gpdk.PDK.activate()
+    save_fields = save_fields_enabled(save_fields)
+    design = dd.design_from_params(**spec)
+    cells = dichroic_device_cells(
+        design, settings["num_cells"], settings["device_res"]
     )
-    plot_propagation(
-        panels, out / f"{stem}_propagation.png",
-        f"{label}: intensity propagation (bar input)",
-        ylim=(-3, 3),
+    env = mw.Environment(wl=design.cutoff_wl, T=25.0)
+    spectrum = mw.submit_s_matrix_spectrum(
+        cells, env,
+        executor=executor_factory("spectrum"),
+        wls=np.asarray(settings["spectrum_wls"], dtype=float),
+        num_modes=settings["num_modes"],
     )
-    np.savez(
-        out / f"{stem}_results.npz",
-        fh_wls=fh_wls, bar_fh=bar_fh, cross_fh=cross_fh,
-        sh_wls=sh_wls, bar_sh=bar_sh, cross_sh=cross_sh,
-        prop_wls=prop_wls,
+    fields: dict[int, mw.ParallelFieldModeJobs] = {}
+    if save_fields:
+        for wl in np.asarray(settings["prop_wls"], dtype=float):
+            wl_nm = round(float(wl) * 1e3)
+            fields[wl_nm] = mw.submit_cell_modes(
+                cells, mw.Environment(wl=float(wl), T=25.0),
+                executor=executor_factory(f"fields_{wl_nm}nm"),
+                num_modes=settings["num_modes"],
+            )
+    return DichroicRun(
+        spec=spec, settings=settings, label=settings["label"],
+        out_dir=str(out_dir), save_fields=save_fields,
+        spectrum=spectrum, fields=fields,
+        split=dichroic_short_pass_split(design),
     )
 
-    eps = 1e-9
-    i_fh = int(np.argmin(np.abs(fh_wls - design.fh_wl)))
-    i_sh = int(np.argmin(np.abs(sh_wls - design.sh_wl)))
-    summary = {
-        "label": label,
-        "kind": "faquad",
-        "platform": design.platform.name,
-        "fh_nm": round(design.fh_wl * 1e3, 0),
-        "sh_nm": round(design.sh_wl * 1e3, 0),
-        "length_um": round(design.total_length, 0),
-        "fh_cross": round(float(cross_fh[i_fh]), 4),
-        "fh_bar": round(float(bar_fh[i_fh]), 4),
-        "sh_bar": round(float(bar_sh[i_sh]), 4),
-        "sh_cross": round(float(cross_sh[i_sh]), 4),
-        "fh_er_db": round(
-            float(10 * np.log10(max(cross_fh[i_fh], eps) / max(bar_fh[i_fh], eps))), 2
-        ),
-        "sh_er_db": round(
-            float(10 * np.log10(max(bar_sh[i_sh], eps) / max(cross_sh[i_sh], eps))), 2
-        ),
-        "out_dir": str(out),
-        "files": sorted(p.name for p in out.glob(f"{stem}*")),
-    }
-    save_json(out / f"{stem}_summary.json", summary)
-    return summary
+
+def submit_faquad_run(
+    spec: dict,
+    settings: dict,
+    *,
+    executor_factory: Callable[[str], Any],
+    out_dir: str | Path,
+    save_fields: bool | None = None,
+) -> FaquadRun:
+    """Submit one FAQUAD design's distributed EME and return a :class:`FaquadRun`.
+
+    Each FH/SH sweep point is submitted as its own slice-group S-matrix job
+    (:func:`meow.submit_s_matrix_parallel`, with the cells rebuilt at that
+    wavelength so the anisotropic dispersion is correct); when ``save_fields``
+    is on, the propagation fields are submitted as single-cell mode jobs.
+    """
+    import gdsfactory as gf
+
+    gf.gpdk.PDK.activate()
+    save_fields = save_fields_enabled(save_fields)
+    design = kd.filter_from_params(**spec)
+    num_cells, num_modes = settings["num_cells"], settings["num_modes"]
+    res = settings["device_res"]
+
+    def per_wl_jobs(
+        band: str, wls: Any
+    ) -> list[tuple[float, mw.ParallelEMEJobs]]:
+        out = []
+        for wl in np.asarray(wls, dtype=float):
+            wl_nm = round(float(wl) * 1e3)
+            cells = kd.device_cells(design, float(wl), num_cells=num_cells, res=res)
+            handle = mw.submit_s_matrix_parallel(
+                cells, mw.Environment(wl=float(wl), T=25.0),
+                executor=executor_factory(f"{band}_{wl_nm}nm"),
+                num_modes=num_modes,
+            )
+            out.append((float(wl), handle))
+        return out
+
+    fh = per_wl_jobs("fh", settings["fh_wls"])
+    sh = per_wl_jobs("sh", settings["sh_wls"])
+    fields: dict[int, mw.ParallelFieldModeJobs] = {}
+    if save_fields:
+        for wl in np.asarray(settings["prop_wls"], dtype=float):
+            wl_nm = round(float(wl) * 1e3)
+            cells = kd.device_cells(design, float(wl), num_cells=num_cells, res=res)
+            fields[wl_nm] = mw.submit_cell_modes(
+                cells, mw.Environment(wl=float(wl), T=25.0),
+                executor=executor_factory(f"fields_{wl_nm}nm"),
+                num_modes=num_modes,
+            )
+    return FaquadRun(
+        spec=spec, settings=settings, label=settings["label"],
+        out_dir=str(out_dir), save_fields=save_fields, fh=fh, sh=sh, fields=fields,
+    )

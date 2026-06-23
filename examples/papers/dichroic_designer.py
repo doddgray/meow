@@ -35,7 +35,6 @@ Run with ``python -m examples.papers.dichroic_designer``.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,10 +44,11 @@ import numpy as np
 from scipy.optimize import brentq
 
 import meow as mw
+from examples.papers import _resolution
 from examples.papers.magden2018_dichroic import LAYER_WG, dichroic_filter
 
 FIGDIR = Path(__file__).parent / "figures"
-FAST = bool(int(os.environ.get("MEOW_EXAMPLE_FAST", "0")))
+pick = _resolution.pick
 
 SCALAR_KAPPA_CORRECTION = 0.4
 """Empirical correction for the scalar overlap's high-index-contrast
@@ -632,8 +632,12 @@ def main() -> dict[str, object]:
     gf.gpdk.PDK.activate()
     platform = _silicon_platform()
     wgb = WGB(rail_width=0.25, gap=0.10, n_rails=3)
-    res = 0.05 if FAST else 0.03
-    targets = [1.40, 1.55] if FAST else [1.40, 1.50, 1.60, 1.70]
+    res = pick(low=0.05, medium=0.03, high=0.02)
+    targets = pick(
+        low=[1.40, 1.55],
+        medium=[1.40, 1.50, 1.60, 1.70],
+        high=[1.40, 1.50, 1.60, 1.70],
+    )
 
     designs = [design_dichroic(platform, wl_c, wgb=wgb, res=res) for wl_c in targets]
     summary = {
@@ -650,7 +654,7 @@ def main() -> dict[str, object]:
     # n_eff crossings + cutoff-vs-width + a designed layout
     fig = plt.figure(figsize=(13, 7))
     grid = fig.add_gridspec(2, 2, height_ratios=[1.2, 1])
-    wls = np.linspace(1.30, 1.80, 5 if FAST else 11)
+    wls = np.linspace(1.30, 1.80, pick(low=5, medium=11, high=21))
     ax = fig.add_subplot(grid[0, 0])
     n_b = [segmented_neff(platform, wgb, wl, res=res) for wl in wls]
     ax.plot(wls * 1e3, n_b, "k--", lw=2, label="WGB (sub-wavelength)")

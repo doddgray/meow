@@ -20,13 +20,13 @@ Run with ``python -m examples.papers.dichroic_designer_si3n4_thickness``.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import gdsfactory as gf
 import numpy as np
 
 import meow as mw
+from examples.papers import _resolution
 from examples.papers._plot import plot_component
 from examples.papers.dichroic_designer import (
     WGB,
@@ -39,7 +39,7 @@ from examples.papers.dichroic_designer import (
 from examples.papers.magden2018_dichroic import analytical_transmission
 
 FIGDIR = Path(__file__).parent / "figures"
-FAST = bool(int(os.environ.get("MEOW_EXAMPLE_FAST", "0")))
+pick = _resolution.pick
 
 # 900..1200 nm by 50 nm, plus 990 nm.
 CUTOFFS = np.array([0.90, 0.95, 0.99, 1.00, 1.05, 1.10, 1.15, 1.20])
@@ -155,7 +155,7 @@ def result_figure(
     grid = fig.add_gridspec(2, 2, height_ratios=[1.2, 1])
 
     ax = fig.add_subplot(grid[0, 0])
-    wls = np.linspace(0.85, 1.27, 6 if FAST else 11)
+    wls = np.linspace(0.85, 1.27, pick(low=6, medium=11, high=21))
     n_b = [segmented_neff(plat, wgb, wl, res=res) for wl in wls]
     ax.plot(wls * 1e3, n_b, "k--", lw=2, label="WGB (sub-wavelength)")
     for d in ok:
@@ -249,14 +249,16 @@ def main() -> dict[str, object]:
     """Design + plot the Si3N4 thickness sweep (200, 100, 40 nm)."""
     FIGDIR.mkdir(exist_ok=True, parents=True)
     gf.gpdk.PDK.activate()
-    cutoffs = CUTOFFS[::3] if FAST else CUTOFFS
-    thicknesses = [200, 40] if FAST else [200, 100, 40]
+    cutoffs = pick(low=CUTOFFS[::3], medium=CUTOFFS, high=CUTOFFS)
+    thicknesses = pick(low=[200, 40], medium=[200, 100, 40], high=[200, 100, 40])
 
     out: dict[str, object] = {}
     for t_nm in thicknesses:
         t_um, clad_t, wgb, res = THICKNESS_CONFIGS[t_nm]
-        if FAST:
+        if _resolution.is_low():
             res = max(res, 0.06)
+        elif _resolution.level() == "high":
+            res = min(res, 0.03)
         name = f"{t_nm}nm"
         print(f"=== {name} ===", flush=True)
         plat = platform(t_um, clad_t)

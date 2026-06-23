@@ -11,13 +11,14 @@ Generates (into ``examples/papers/figures/``):
 - ``kwolek2026_fig2.png``: extinction ratio and total loss spectra at FH
   and SH (the model counterparts of paper Fig. 2a-c).
 
-Run with ``MEOW_EXAMPLE_FAST=1`` for a coarse-but-quick version (used by
-the test suite).
+Resolution is selected with ``MEOW_EXAMPLE_RES`` in ``{low, medium, high}``
+(default ``medium``): ``low`` is a coarse-but-quick version (used by the test
+suite), ``medium`` is the converged full-quality reproduction and ``high``
+pushes the mesh / modes / cell count further still.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import gdsfactory as gf
@@ -27,6 +28,7 @@ import numpy as np
 
 import meow as mw
 import meow.eme.propagation as prop
+from examples.papers import _resolution
 from examples.papers._backends import parallel_enabled, resolve_backend
 from examples.papers._plot import plot_component
 from examples.papers.kwolek2026_faquad import (
@@ -42,17 +44,18 @@ from examples.papers.kwolek2026_faquad import (
 
 gf.gpdk.PDK.activate()
 
-FAST = bool(int(os.environ.get("MEOW_EXAMPLE_FAST", "0")))
+pick = _resolution.pick
 FIGDIR = Path(__file__).parent / "figures"
 
 WL_FH = 1.55
 WL_SH = 0.775
-# Accuracy knobs. The non-FAST values were raised for a converged
-# reproduction: a finer mode-solver grid (RES), more EME cells (NUM_CELLS),
-# and more mode-solver modes/nodes per cross-section (NUM_MODES).
-RES = 0.06 if FAST else 0.02
-NUM_CELLS = 12 if FAST else 120
-NUM_MODES = 3 if FAST else 6
+# Accuracy knobs (low / medium / high via MEOW_EXAMPLE_RES). The medium values
+# already give a converged reproduction; high pushes the mode-solver grid
+# (RES), the number of EME cells (NUM_CELLS) and the modes per cross-section
+# (NUM_MODES) further still.
+RES = pick(low=0.06, medium=0.02, high=0.015)
+NUM_CELLS = pick(low=12, medium=120, high=200)
+NUM_MODES = pick(low=3, medium=6, high=8)
 
 
 def _show(fig: plt.Figure) -> None:
@@ -146,7 +149,9 @@ def figure1() -> dict[str, float]:
         ex_l = np.zeros(len(modes[0]))
         ex_l[in_idx] = 1.0
         ex_r = np.zeros(len(modes[-1]))
-        z_pts = np.linspace(0.0, sum(c.length for c in cells), 400 if FAST else 800)
+        z_pts = np.linspace(
+            0.0, sum(c.length for c in cells), pick(low=400, medium=800, high=1200)
+        )
         Ex, x_pts = prop.propagate_modes(
             modes, cells, excitation_l=ex_l, excitation_r=ex_r, y=0.25, z=z_pts
         )
@@ -189,8 +194,8 @@ def figure2() -> dict[str, float]:
     """Extinction-ratio and loss spectra at FH and SH (paper Fig. 2)."""
     design, component = _design()
 
-    n_fh = 3 if FAST else 7
-    n_sh = 2 if FAST else 5
+    n_fh = pick(low=3, medium=7, high=13)
+    n_sh = pick(low=2, medium=5, high=9)
     wls_fh = np.linspace(1.50, 1.60, n_fh)
     wls_sh = np.linspace(0.755, 0.795, n_sh)
 
