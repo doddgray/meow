@@ -875,8 +875,10 @@ def analyze_design(
 
     Runs the same analysis as ``kwolek_designer_slurm`` but in-process (the EME
     is distributed across local worker threads by default). Writes the
-    ``*_spectrum.png``, ``*_propagation.png``, ``*_design.png``, ``*.gds`` and
-    ``*_results.npz`` into ``out_dir`` and returns the summary dict.
+    ``*_spectrum.png``, ``*_propagation.png``, ``*_design.png``, ``*.gds``, the
+    spectrum as ``*_spectrum.csv`` / ``*_spectrum.json``, the per-cell mode
+    fields as a compressed HDF5 ``*_fields.h5`` and a ``*_summary.csv`` /
+    ``*_summary.json`` into ``out_dir`` and returns the summary dict.
     """
     from concurrent.futures import ThreadPoolExecutor
 

@@ -934,6 +934,36 @@ class ParallelFieldModeJobs(_SubmittedJobs):
             await asyncio.gather(*(asyncio.to_thread(job.result) for job in self.jobs))
         )
 
+    def to_dataset(self, *, attrs: dict[str, Any] | None = None) -> Any:
+        """Collect the modes and bundle their fields into an xarray Dataset.
+
+        Blocks until the per-cell jobs finish, then returns a dataset of the
+        complex ``Ex..Hz`` fields and ``neff`` (see
+        :func:`meow.eme.io.modes_to_dataset`). Save it to a single compressed
+        HDF5 file with :meth:`save_fields` / :func:`meow.eme.io.save_fields`.
+        """
+        from meow.eme.io import modes_to_dataset
+
+        return modes_to_dataset(self.result(), attrs=attrs)
+
+    def save_fields(
+        self,
+        path: str | Path,
+        *,
+        complevel: int = 4,
+        attrs: dict[str, Any] | None = None,
+    ) -> Path:
+        """Save the full per-cell mode fields to a compressed HDF5 file.
+
+        Collects the modes (blocking until the jobs finish) and writes their
+        complete ``Ex..Hz`` fields and effective indices to a single gzip-
+        compressed netCDF (HDF5) dataset at ``path`` (see
+        :func:`meow.eme.io.save_fields`).
+        """
+        from meow.eme.io import save_fields
+
+        return save_fields(self.to_dataset(attrs=attrs), path, complevel=complevel)
+
 
 def submit_cell_modes(
     cells: list[Cell],

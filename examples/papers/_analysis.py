@@ -5,13 +5,16 @@ FAQUAD wavelength filter) into the figures and data products the paper-based
 examples care about:
 
 - a **transmission spectrum** to each output port over a dense set of
-  wavelengths (``<label>_spectrum.png`` + the raw arrays in
-  ``<label>_results.npz``);
+  wavelengths (``<label>_spectrum.png`` + the raw arrays saved redundantly as
+  ``<label>_spectrum.csv`` and ``<label>_spectrum.json``);
 - **propagation plots** of the optical intensity ``|Ex|^2`` along the device at
-  a few wavelengths around the cutoff (``<label>_propagation.png``);
+  a few wavelengths around the cutoff (``<label>_propagation.png``), with the
+  underlying per-cell mode fields saved to a single compressed HDF5 dataset
+  (``<label>_fields.h5``) via :func:`meow.save_fields`;
 - a **design figure** analogous to the paper reproductions (layout + index
   crossings for the dichroic coupler; layout + FAQUAD profiles for the filter);
-- the device **GDS** (``<label>.gds``) and a JSON summary.
+- the device **GDS** (``<label>.gds``) and a scalar summary written redundantly
+  as ``<label>_summary.csv`` and ``<label>_summary.json``.
 
 The EME itself is **distributed as concurrent jobs**: :func:`submit_dichroic_run`
 / :func:`submit_faquad_run` rebuild the design from a *picklable* parameter dict
@@ -35,11 +38,7 @@ Wavelength controls (sensible defaults, overridable per call or via env vars):
 
 from __future__ import annotations
 
-import asyncio
-import json
 import os
-import pickle
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +53,11 @@ from examples.papers import dichroic_designer as dd
 from examples.papers import kwolek_designer as kd
 from examples.papers.magden2018_dichroic import GAP_OUT, lateral_positions
 
+# the generic, distributed analysis-run base class + its loader now live in the
+# main library (meow.eme.run); the device-specific runs below subclass it.
+AnalysisRun = mw.AnalysisRun
+_Run = mw.AnalysisRun  # historical alias
+
 # defaults for the wavelength controls
 DEFAULT_SPECTRUM_SPAN = 0.06  # fractional half-width about the cutoff
 DEFAULT_SPECTRUM_NPTS = 61
@@ -63,7 +67,7 @@ DEFAULT_PROP_NPTS = 5
 
 def _file_stem(label: str) -> str:
     """Filesystem-safe stem for output filenames derived from a run label."""
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("_")
+    return mw.safe_label(label)
 
 
 # ==========================================================================
@@ -403,11 +407,6 @@ def plot_faquad_design(design: kd.FaquadFilterDesign, path: Path) -> None:
     plt.close(fig)
 
 
-def save_json(path: Path, data: dict) -> None:
-    with Path(path).open("w") as f:
-        json.dump(data, f, indent=2, default=str)
-
-
 # ==========================================================================
 # field-saving control + port attribution from a precomputed mode mapping
 # ==========================================================================
@@ -479,55 +478,10 @@ def _attribute_by_index(
 
 # ==========================================================================
 # distributed analysis runs: EME as concurrent jobs, assembled + plotted
-# at gather time (a different python session)
+# at gather time (a different python session). The generic base class
+# (:class:`meow.AnalysisRun`) and its loaders now live in the main library;
+# the device-specific runs below subclass it and fill in :meth:`gather`.
 # ==========================================================================
-@dataclass
-class _Run:
-    """A submitted, distributed analysis run (base class).
-
-    Holds the picklable design ``spec`` and ``settings`` plus the submitted EME
-    job handles (in the subclasses). It is pickled into ``<out_dir>/run.pkl`` by
-    :meth:`save`; a later session reloads it and calls :meth:`gather` to collect
-    the distributed EME results, assemble the spectra/fields and write the
-    figures, GDS and data into ``out_dir``.
-    """
-
-    spec: dict
-    settings: dict
-    label: str
-    out_dir: str
-    save_fields: bool
-
-    @property
-    def stem(self) -> str:
-        return self.settings.get("file_stem") or _file_stem(self.label)
-
-    def handles(self) -> list[Any]:
-        """All submitted job handles (overridden by subclasses)."""
-        raise NotImplementedError
-
-    @property
-    def job_ids(self) -> list[str]:
-        return [jid for h in self.handles() for jid in h.job_ids]
-
-    def done(self) -> bool:
-        return all(h.done() for h in self.handles())
-
-    def save(self) -> Path:
-        path = Path(self.out_dir) / "run.pkl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("wb") as f:
-            pickle.dump(self, f)
-        return path
-
-    def gather(self) -> dict:
-        raise NotImplementedError
-
-    async def agather(self) -> dict:
-        """Async :meth:`gather` (collects + plots off the event loop)."""
-        return await asyncio.to_thread(self.gather)
-
-
 @dataclass
 class DichroicRun(_Run):
     """A distributed dichroic-coupler analysis run.
@@ -589,10 +543,12 @@ class DichroicRun(_Run):
                 panels, out / f"{stem}_propagation.png",
                 f"{self.label}: intensity propagation across the cutoff",
             )
-        np.savez(
-            out / f"{stem}_results.npz",
-            spectrum_wls=spectrum_wls, t_short=t_short, t_long=t_long,
-            prop_wls=np.asarray(self.settings.get("prop_wls", []), dtype=float),
+        # dense per-cell mode fields -> one compressed HDF5 dataset per run;
+        # the (less dense) transmission spectrum -> redundant CSV + JSON
+        _save_field_datasets(self.fields, out / f"{stem}_fields.h5")
+        mw.save_table(
+            out / f"{stem}_spectrum",
+            {"wavelength_um": spectrum_wls, "t_short": t_short, "t_long": t_long},
         )
         i_c = int(np.argmin(np.abs(spectrum_wls - design.cutoff_wl)))
         summary = {
@@ -609,10 +565,10 @@ class DichroicRun(_Run):
             "files": sorted(
                 p.name
                 for p in out.glob(f"{stem}*")
-                if not p.name.endswith("_summary.json")
+                if not p.name.endswith(("_summary.json", "_summary.csv"))
             ),
         }
-        save_json(out / f"{stem}_summary.json", summary)
+        mw.save_summary(out / f"{stem}_summary", summary)
         return summary
 
 
@@ -677,11 +633,12 @@ class FaquadRun(_Run):
                 f"{self.label}: intensity propagation at FH / SH (bar input)",
                 ylim=(-3, 3),
             )
-        np.savez(
-            out / f"{stem}_results.npz",
-            wls=wls, bar=bar, cross=cross,
-            fh_wl=design.fh_wl, sh_wl=design.sh_wl,
-            prop_wls=np.asarray(self.settings.get("prop_wls", []), dtype=float),
+        # dense per-cell mode fields -> one compressed HDF5 dataset per run;
+        # the (less dense) broad-band bar/cross spectrum -> redundant CSV + JSON
+        _save_field_datasets(self.fields, out / f"{stem}_fields.h5")
+        mw.save_table(
+            out / f"{stem}_spectrum",
+            {"wavelength_um": wls, "bar": bar, "cross": cross},
         )
         eps = 1e-9
         i_fh = int(np.argmin(np.abs(wls - design.fh_wl)))
@@ -707,11 +664,33 @@ class FaquadRun(_Run):
             "files": sorted(
                 p.name
                 for p in out.glob(f"{stem}*")
-                if not p.name.endswith("_summary.json")
+                if not p.name.endswith(("_summary.json", "_summary.csv"))
             ),
         }
-        save_json(out / f"{stem}_summary.json", summary)
+        mw.save_summary(out / f"{stem}_summary", summary)
         return summary
+
+
+def _save_field_datasets(
+    fields: dict[int, mw.ParallelFieldModeJobs], path: Path
+) -> Path | None:
+    """Save the per-cell mode fields of every propagation wavelength to one HDF5.
+
+    Each wavelength's :class:`meow.ParallelFieldModeJobs` is bundled into an
+    xarray dataset (complex ``Ex..Hz`` + ``neff``) and the wavelengths are
+    concatenated along a ``wl`` dimension, then written as a single gzip-
+    compressed netCDF (HDF5) file. Returns ``None`` when no fields were saved.
+    """
+    if not fields:
+        return None
+    import xarray as xr
+
+    per_wl = []
+    for wl_nm, handle in sorted(fields.items()):
+        ds = handle.to_dataset(attrs={"wl_nm": int(wl_nm)})
+        per_wl.append(ds.expand_dims(wl_nm=[int(wl_nm)]))
+    combined = xr.concat(per_wl, dim="wl_nm") if len(per_wl) > 1 else per_wl[0]
+    return mw.save_fields(combined, path)
 
 
 def _propagation_panels(
@@ -738,11 +717,10 @@ def _propagation_panels(
     return panels
 
 
-def load_run(path: str | Path) -> _Run:
-    """Load a :class:`_Run` saved by :meth:`_Run.save` (e.g. in a later session)."""
-    with Path(path).open("rb") as f:
-        obj = pickle.load(f)
-    if not isinstance(obj, _Run):
+def load_run(path: str | Path) -> AnalysisRun:
+    """Load an :class:`meow.AnalysisRun` saved by :meth:`~meow.AnalysisRun.save`."""
+    obj = mw.load_run(path)
+    if not isinstance(obj, AnalysisRun):
         msg = f"{path} is not an analysis run record."
         raise TypeError(msg)
     return obj
