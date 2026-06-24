@@ -10,6 +10,13 @@ coupler and a designer 75/25 coupler, and saves for each:
 - the **propagating |E| field** for the TE port-1 input at 1.31 um;
 - a **section-annotated layout** (Regions I-V) with the design parameters.
 
+Note: this tightly-guided SOI ADC has strong S-bends, so the *absolute* EME
+insertion loss is under-resolved at feasible cell counts (it converges only with
+several hundred cells). The plotted **splitting ratio is normalized**
+(``upper/(upper+lower)``) and is robust to that uniform truncation loss - it is
+the paper's reported quantity - while the saved ``total_transmission`` column
+records the (under-resolved) absolute throughput.
+
 Run with ``python -m examples.papers.mao2019_eme``.
 """
 
@@ -82,10 +89,10 @@ def _upper_input_index(modes_in: list[Any]) -> int:
     return max(cands, key=lambda i: np.real(modes_in[i].neff))
 
 
-def split_powers_db(
+def split_powers(
     component: Any, wl: float, *, num_cells: int, num_modes: int, fine_res: float
 ) -> tuple[float, float]:
-    """(upper, lower) output power transmission [dB] for the TE port-1 input."""
+    """(upper, lower) output power for the TE port-1 input (linear)."""
     import meow as mw
 
     cells = device_cells(component, num_cells=num_cells, fine_res=fine_res)
@@ -100,7 +107,7 @@ def split_powers_db(
             up += p
         else:
             dn += p
-    return 10 * np.log10(max(up, 1e-6)), 10 * np.log10(max(dn, 1e-6))
+    return up, dn
 
 
 def run_design(
@@ -127,17 +134,23 @@ def run_design(
     wls = em.octave_wls(CENTER, spec_npts)
     up, dn = [], []
     for wl in wls:
-        u, d = split_powers_db(component, float(wl), num_cells=num_cells,
-                               num_modes=num_modes, fine_res=fine_res)
+        u, d = split_powers(component, float(wl), num_cells=num_cells,
+                            num_modes=num_modes, fine_res=fine_res)
         up.append(u)
         dn.append(d)
-    series = {r"$|S_{up,1}|^2$ (bar)": np.array(up),
-              r"$|S_{down,1}|^2$ (cross)": np.array(dn)}
+    up, dn = np.array(up), np.array(dn)
+    tot = up + dn
+    # the splitting ratio (normalized) is the paper's quantity and is robust to
+    # the uniform EME truncation loss; the absolute insertion loss (10log10 tot)
+    # is under-resolved for this tightly-guided SOI device (see module docstring).
+    sr_up, sr_dn = 100 * up / tot, 100 * dn / tot
+    series = {"upper port (bar) [%]": sr_up, "lower port (cross) [%]": sr_dn}
     em.plot_spectrum(wls, series, out / f"{label}_spectrum.png",
-                     title=f"Output splitting spectrum - {label}",
-                     center_nm=CENTER * 1000)
+                     title=f"Output splitting ratio - {label}",
+                     center_nm=CENTER * 1000, ylabel="splitting ratio [%]")
     mw.save_table(out / f"{label}_spectrum",
-                  {"wl_nm": wls * 1000, "upper_db": up, "lower_db": dn})
+                  {"wl_nm": wls * 1000, "sr_upper_pct": sr_up, "sr_lower_pct": sr_dn,
+                   "total_transmission": tot})
     # propagation: TE port-1 input at the design wavelength
     cells = device_cells(component, num_cells=num_cells, fine_res=fine_res)
     modes = _solve(cells, CENTER, num_modes)
@@ -148,8 +161,10 @@ def run_design(
                         float(component.xmax), out / f"{label}_propagation_TE.png",
                         title=f"|E| propagation, TE port-1 input @ 1310 nm - {label}",
                         ylim=(-2.5, 2.5))
-    return {"label": label, "upper_db_1310": float(np.interp(CENTER, wls, up)),
-            "lower_db_1310": float(np.interp(CENTER, wls, dn))}
+    return {"label": label,
+            "sr_upper_pct_1310": float(np.interp(CENTER, wls, sr_up)),
+            "sr_lower_pct_1310": float(np.interp(CENTER, wls, sr_dn)),
+            "total_transmission_1310": float(np.interp(CENTER, wls, tot))}
 
 
 def _dividers(stack: m.SOIStack, dw_out: float) -> tuple[list[tuple[float, str]], str]:
@@ -176,10 +191,10 @@ def main() -> dict[str, Any]:
     out.mkdir(parents=True, exist_ok=True)
     stack = m.SOIStack()
     kw = {
-        "num_cells": res.num_cells(low=14, medium=28, high=56),
-        "num_modes": res.num_modes(low=4, medium=6, high=10),
-        "fine_res": res.pick(low=0.04, medium=0.025, high=0.018),
-        "spec_npts": res.pick(low=5, medium=9, high=17),
+        "num_cells": res.num_cells(low=40, medium=120, high=240),
+        "num_modes": res.num_modes(low=4, medium=6, high=8),
+        "fine_res": res.pick(low=0.04, medium=0.03, high=0.02),
+        "spec_npts": res.pick(low=5, medium=7, high=13),
     }
     device_res = res.pick(low=0.03, medium=0.02, high=0.015)
     summaries = {}
