@@ -1,0 +1,7 @@
+{
+  "platform": "TFLN-500nm",
+  "wl_nm": 1550.0,
+  "hybridization_width_um": 1.014,
+  "taper_w_start_um": 0.714,
+  "taper_w_end_um": 1.314
+}
