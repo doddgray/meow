@@ -73,8 +73,9 @@ def test_ri_data_url_query_form() -> None:
     cands = mw.ri_data_url(
         "https://refractiveindex.info/?shelf=main&book=SiO2&page=Malitson"
     )
-    assert cands[0].endswith("data-nk/main/SiO2/Malitson.yml")
-    assert cands[1].endswith("data/main/SiO2/Malitson.yml")
+    assert cands[0].endswith("data/main/SiO2/nk/Malitson.yml")
+    assert cands[1].endswith("data/main/SiO2/n2/Malitson.yml")
+    assert all("/main/database/data/" in c for c in cands)
 
 
 def test_ri_data_url_direct_yml_and_bare_path() -> None:
@@ -82,7 +83,7 @@ def test_ri_data_url_direct_yml_and_bare_path() -> None:
     direct = "https://example.com/foo/bar/Baz.yml"
     assert mw.ri_data_url(direct) == [direct]
     cands = mw.ri_data_url("main/LiNbO3/Zelmon-o")
-    assert cands[0].endswith("data-nk/main/LiNbO3/Zelmon-o.yml")
+    assert cands[0].endswith("data/main/LiNbO3/nk/Zelmon-o.yml")
 
 
 def test_ri_data_url_bad_reference_raises() -> None:

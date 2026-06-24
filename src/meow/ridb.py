@@ -43,10 +43,11 @@ import numpy as np
 if TYPE_CHECKING:
     from meow.materials import SampledAnisotropicMaterial, SampledMaterial
 
-# the stable GitHub mirror of the RefractiveIndex.INFO database
+# the GitHub mirror of the RefractiveIndex.INFO database (the canonical source
+# of the YAML entries); entries live under data/<shelf>/<book>/<nk|n2>/<page>.yml
 _GH_RAW = (
     "https://raw.githubusercontent.com/polyanskiy/"
-    "refractiveindex.info-database/master/database"
+    "refractiveindex.info-database/main/database"
 )
 
 
@@ -265,20 +266,20 @@ def ri_data_url(url: str) -> list[str]:
     qs = parse_qs(parsed.query)
     if {"shelf", "book", "page"} <= qs.keys():
         shelf, book, page = qs["shelf"][0], qs["book"][0], qs["page"][0]
-        return [
-            f"{_GH_RAW}/data-nk/{shelf}/{book}/{page}.yml",
-            f"{_GH_RAW}/data/{shelf}/{book}/{page}.yml",
-        ]
-    # a bare "shelf/book/page" path
-    m = re.search(r"([^/]+)/([^/]+)/([^/?#]+?)(?:\.yml)?$", parsed.path or url)
-    if m:
+    else:
+        # a bare "shelf/book/page" (or ".../<nk|n2>/page") database path
+        m = re.search(r"([^/]+)/([^/]+)/([^/?#]+?)(?:\.yml)?$", parsed.path or url)
+        if not m:
+            msg = f"Could not parse a RefractiveIndex.INFO reference from {url!r}."
+            raise ValueError(msg)
         shelf, book, page = m.groups()
-        return [
-            f"{_GH_RAW}/data-nk/{shelf}/{book}/{page}.yml",
-            f"{_GH_RAW}/data/{shelf}/{book}/{page}.yml",
-        ]
-    msg = f"Could not parse a RefractiveIndex.INFO reference from {url!r}."
-    raise ValueError(msg)
+    # the entry sits in the book's "nk" (real+imag) or "n2" (n^2) subtree; try
+    # both, then the legacy flat layout as a fallback
+    return [
+        f"{_GH_RAW}/data/{shelf}/{book}/nk/{page}.yml",
+        f"{_GH_RAW}/data/{shelf}/{book}/n2/{page}.yml",
+        f"{_GH_RAW}/data/{shelf}/{book}/{page}.yml",
+    ]
 
 
 def _cache_path(cache_dir: str | Path, url: str) -> Path:
