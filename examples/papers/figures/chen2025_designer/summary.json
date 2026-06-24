@@ -1,0 +1,7 @@
+{
+  "platform": "TFLN-400nm",
+  "amew_length_um": 200.0,
+  "hybridization_w1_um": 0.257,
+  "w1_start_um": 0.1,
+  "w1_end_um": 0.65
+}

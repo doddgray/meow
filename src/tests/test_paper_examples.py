@@ -958,3 +958,47 @@ def test_kwolek_slurm_submit_runs_then_gather(
     assert summary["saved_fields"] is False
     assert 0.0 <= summary["fh_cross"] <= 1.0
     assert 0.0 <= summary["sh_bar"] <= 1.0
+
+
+# --- Ramadan 1998: adiabatic-coupler design rules (analytic) ---
+
+
+def test_ramadan1998_analytic_design_rules() -> None:
+    """The transcribed eqs reproduce the paper's key relations and scalings."""
+    from examples.papers import ramadan1998 as ram
+
+    # eq (10) -> its eq (9) asymptote at large asynchronicity
+    x_io, eta = 119.0, 420.0
+    assert ram.q_region1(x_io, 8.0, eta) == pytest.approx(
+        ram.q_region1_asymptote(x_io, 8.0, eta), rel=0.05
+    )
+    # eq (15): nulls at kappa_II L_II = n*pi, envelope bounds the oscillation
+    kappa = 0.005
+    null = np.pi / kappa  # first null length
+    assert ram.q_region2(null, kappa_ii=kappa, x_iio=0.66) < 1e-9
+    peak_len = 1500.0
+    assert ram.q_region2(peak_len, kappa_ii=kappa, x_iio=0.66) <= ram.q_region2_envelope(
+        peak_len, kappa_ii=kappa, x_iio=0.66
+    )
+    # eq (28)/(29): 3 dB scales as 1/eps, full as 1/sqrt(eps); 3 dB is longer
+    l_3db = ram.length_3db_optimum(0.01, kappa)
+    l_full = ram.length_full_optimum(0.01, kappa)
+    assert l_3db > l_full
+    assert ram.length_3db_optimum(0.005, kappa) == pytest.approx(2 * l_3db, rel=1e-9)
+    assert ram.length_full_optimum(0.0025, kappa) == pytest.approx(
+        2 * l_full, rel=1e-9
+    )
+    assert ram.coupling_length(kappa) == pytest.approx(np.pi / (2 * kappa))
+
+
+def test_ramadan1998_designer_coupling_and_lengths() -> None:
+    """The designer derives kappa_II from FDE and sizes a longer 3 dB coupler."""
+    from examples.papers import ramadan1998_designer as rd
+
+    stack = rd.soi_stack(wl=1.31)
+    kappa = rd.coupling_coefficient(stack, res=0.05)
+    assert kappa > 0
+    spec_3db = rd.design(stack, kind="3dB", epsilon=0.02, res=0.05)
+    spec_full = rd.design(stack, kind="full", epsilon=0.02, res=0.05)
+    assert spec_3db.length_um > spec_full.length_um
+    assert spec_3db.coupling_length_um == pytest.approx(np.pi / (2 * kappa), rel=1e-6)

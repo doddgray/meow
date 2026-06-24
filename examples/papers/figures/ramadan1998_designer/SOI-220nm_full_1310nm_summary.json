@@ -1,0 +1,10 @@
+{
+  "kind": "full",
+  "stack": "SOI-220nm",
+  "wl_nm": 1310.0,
+  "epsilon": 0.02,
+  "kappa_ii_per_um": 0.016428598960348175,
+  "coupling_length_um": 95.61352922340775,
+  "length_um": 645.6181530389871,
+  "stem": "SOI-220nm_full_1310nm"
+}
