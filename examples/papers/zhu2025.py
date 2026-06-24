@@ -222,14 +222,14 @@ def plot_facet_modes(facet: TridentFacet, wl: float, path: Path) -> dict[str, fl
 
 
 def overlap_vs_wavelength(
-    facet: TridentFacet, wls: np.ndarray
+    facet: TridentFacet, wls: np.ndarray, *, mfd: float = SMF_MFD
 ) -> tuple[np.ndarray, np.ndarray]:
-    """eta(TE), eta(TM) vs wavelength (paper Fig. 3)."""
+    """eta(TE), eta(TM) vs wavelength for a fiber of mode-field diameter ``mfd``."""
     te, tm = [], []
     for wl in wls:
         modes = facet_modes(facet, float(wl), num_modes=6)
-        te.append(fiber_overlap(_pick_polarization(modes, "te"), "te"))
-        tm.append(fiber_overlap(_pick_polarization(modes, "tm"), "tm"))
+        te.append(fiber_overlap(_pick_polarization(modes, "te"), "te", mfd=mfd))
+        tm.append(fiber_overlap(_pick_polarization(modes, "tm"), "tm", mfd=mfd))
     return np.asarray(te), np.asarray(tm)
 
 

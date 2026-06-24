@@ -52,7 +52,7 @@ def optimize_facet(
     """
     base = base or z.TridentFacet()
     if pitches is None:
-        pitches = np.linspace(1.4, 3.0, 5)
+        pitches = np.linspace(1.0, 3.0, 6)
     etas = []
     for g1 in pitches:
         facet = replace(base, g1=float(g1), h1=float(g1) + 0.1)
@@ -130,12 +130,12 @@ def main() -> dict[str, Any]:
     gf.gpdk.PDK.activate()
     out = FIGDIR / "zhu2025_designer"
     out.mkdir(parents=True, exist_ok=True)
-    target_mfd, wl = 6.0, 1.31  # smaller-MFD lensed fiber, O-band
+    target_mfd, wl = 8.0, 1.31  # reduced-MFD (e.g. PM/UHNA) fiber, O-band
     best, eta, pitches, etas = optimize_facet(target_mfd=target_mfd, wl=wl)
     plot_pitch_scan(pitches, etas, best.g1, out / "pitch_scan.png")
     z.plot_facet_modes(best, wl, out / "facet_modes.png")
     wls = np.linspace(1.26, 1.36, 5)
-    te, tm = z.overlap_vs_wavelength(best, wls)
+    te, tm = z.overlap_vs_wavelength(best, wls, mfd=target_mfd)
     z.plot_overlap_vs_wavelength(wls, te, tm, out / "overlap_vs_wavelength.png")
     comp = trident_gds(best)
     comp.write_gds(str(out / "trident_edge_coupler.gds"))
