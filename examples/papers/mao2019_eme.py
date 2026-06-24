@@ -10,12 +10,17 @@ coupler and a designer 75/25 coupler, and saves for each:
 - the **propagating |E| field** for the TE port-1 input at 1.31 um;
 - a **section-annotated layout** (Regions I-V) with the design parameters.
 
-Note: this tightly-guided SOI ADC has strong S-bends, so the *absolute* EME
-insertion loss is under-resolved at feasible cell counts (it converges only with
-several hundred cells). The plotted **splitting ratio is normalized**
-(``upper/(upper+lower)``) and is robust to that uniform truncation loss - it is
-the paper's reported quantity - while the saved ``total_transmission`` column
-records the (under-resolved) absolute throughput.
+Note: this tightly-guided SOI ADC has strong S-bends (the two waveguides move
+laterally as the gap closes from 1.5 to 0.15 um). meow's straight-cell EME
+represents a laterally-moving guide as discrete lateral jumps, so it needs
+several **hundred** cells to converge here; at feasible cell counts both the
+absolute insertion loss *and* the normalized splitting ratio are unreliable
+(the SR spectrum oscillates spuriously instead of staying near the design
+ratio). **The reliable Mao deliverable is the analytic SR designer**
+(:mod:`examples.papers.mao2019` / ``mao2019_designer``); this EME module is kept
+as a (clearly under-resolved) qualitative cross-check and a template for the
+slurm distribution - it is not a converged reproduction. Width-only tapers
+without lateral motion (Song, Chen, Zhu) EME-converge far better.
 
 Run with ``python -m examples.papers.mao2019_eme``.
 """
