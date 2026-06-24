@@ -227,10 +227,12 @@ def propagate(
     cells = device_cells(component, facet, num_cells=num_cells, fine_res=fine_res)
     modes = _solve_modes(cells, wl, num_modes)
     idx = _input_mode_indices(modes[0])[pol]
-    field, zs = mw.propagate_modes(
+    # propagate_modes returns (field[z, x], x_transverse); propagation is axis 0
+    field, x_trans = mw.propagate_modes(
         modes, cells, excite_mode_l=idx, y=mid_y(facet), num_z=num_z
     )
-    return np.abs(np.asarray(field)), np.asarray(zs)
+    length = float(component.xmax)
+    return np.abs(np.asarray(field)), np.asarray(x_trans), length
 
 
 # ==========================================================================
@@ -256,15 +258,19 @@ def plot_spectrum(
 
 
 def plot_propagation(
-    field: np.ndarray, zs: np.ndarray, path: Path, *, title: str, lat_span: float = 9.0
+    field: np.ndarray,
+    x_trans: np.ndarray,
+    length: float,
+    path: Path,
+    *,
+    title: str,
 ) -> None:
-    """|E| along the device (propagation z vs lateral x) for one input mode."""
+    """|E| along the device: propagation z (axis 0) vs transverse x (axis 1)."""
     plt = z._use_agg()
-    f = field if field.shape[0] == zs.size else field.T
-    norm = f / (f.max() or 1.0)
-    x = np.linspace(-lat_span, lat_span, f.shape[1])
+    norm = field / (field.max() or 1.0)
+    zprop = np.linspace(0.0, length, field.shape[0])
     fig, ax = plt.subplots(figsize=(9, 3.2))
-    im = ax.pcolormesh(zs, x, norm.T, shading="auto", cmap="magma")
+    im = ax.pcolormesh(zprop, x_trans, norm.T, shading="auto", cmap="magma")
     ax.set_xlabel("propagation z [um]")
     ax.set_ylabel("lateral x [um]")
     ax.set_ylim(-6, 6)
@@ -353,9 +359,10 @@ def run_design(
     mw.save_table(out / f"{label}_spectrum",
                   {"wl_nm": wls * 1000, "te_db": db["TE"], "tm_db": db["TM"]})
     for pol in ("TE", "TM"):
-        field, zs = propagate(comp, facet, 1.55, pol, num_cells=num_cells,
-                              num_modes=num_modes, fine_res=fine_res)
-        plot_propagation(field, zs, out / f"{label}_propagation_{pol}.png",
+        field, x_trans, length = propagate(comp, facet, 1.55, pol, num_cells=num_cells,
+                                           num_modes=num_modes, fine_res=fine_res)
+        plot_propagation(field, x_trans, length,
+                         out / f"{label}_propagation_{pol}.png",
                          title=f"|E| propagation, {pol} input @ 1550 nm - {label}")
     return {"label": label, "te_db_1550": float(np.interp(1.55, wls, db["TE"])),
             "tm_db_1550": float(np.interp(1.55, wls, db["TM"]))}

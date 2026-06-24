@@ -132,8 +132,9 @@ def gather_spectrum(handle: dict[str, Any], out: Path) -> dict[str, Any]:
                   {"wl_nm": wls * 1000, "te_db": db["TE"], "tm_db": db["TM"]})
     kw = _eme_kwargs()
     for pol in ("TE", "TM"):
-        field, zs = ze.propagate(comp, facet, 1.55, pol, **kw)
-        ze.plot_propagation(field, zs, out / f"{label}_propagation_{pol}.png",
+        field, x_trans, length = ze.propagate(comp, facet, 1.55, pol, **kw)
+        ze.plot_propagation(field, x_trans, length,
+                            out / f"{label}_propagation_{pol}.png",
                             title=f"|E| {pol} input @ 1550 nm - {label} (slurm)")
     return {"label": label,
             "te_db_1550": float(np.interp(1.55, wls, db["TE"])),
