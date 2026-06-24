@@ -134,12 +134,14 @@ assembles the results and writes into a fresh **timestamped subfolder** of the
 MEOW jobs folder:
 
 - a dense **short-/long-pass transmission spectrum** (`*_spectrum.png` + the raw
-  arrays in `*_results.npz`);
+  arrays saved redundantly as `*_spectrum.csv` / `*_spectrum.json`);
 - **intensity-propagation plots** `|Ex|^2(z, x)` at a few wavelengths on either
-  side of and at the cutoff (`*_propagation.png`, when fields were saved);
+  side of and at the cutoff (`*_propagation.png`, when fields were saved), with
+  the per-cell mode fields in a single compressed HDF5 dataset (`*_fields.h5`);
 - a layout + WGA/WGB index-crossing **design figure** (`*_design.png`,
   analogous to `dichroic_designer.py`); and
-- the device **GDS** (`*.gds`) and a JSON summary.
+- the device **GDS** (`*.gds`) and a scalar summary written redundantly as
+  `*_summary.csv` / `*_summary.json`.
 
 Because submitit persists each job in its `folder`, submit and gather can happen
 in *different* python sessions (see "Reloading / gathering results in a later
@@ -185,9 +187,11 @@ adiabaticity. `main()` writes `figures/kwolek_designer.png` (optimized widths,
 the FH-vs-SH coupling contrast, and a designed layout) and then, for *every*
 design, an analysis into `figures/kwolek_designer/<design>/`: a **dense,
 broad-band bar/cross transmission spectrum** spanning more than an octave (from
-0.8*SH to 1.2*FH; `*_spectrum.png` + `*_results.npz`), the device **GDS**, and
-**propagating-field plots at the FH and SH** (`*_propagation.png`). The EME is
-distributed across local worker threads (`analyze_design`).
+0.8*SH to 1.2*FH; `*_spectrum.png` + the redundant `*_spectrum.csv` /
+`*_spectrum.json`), the device **GDS**, and **propagating-field plots at the FH
+and SH** (`*_propagation.png`, with the per-cell mode fields in a compressed
+HDF5 `*_fields.h5`). The EME is distributed across local worker threads
+(`analyze_design`).
 
 `kwolek_designer_slurm.py` is the **slurm-cluster version**: it produces the
 same per-design output (broad-band spectrum + GDS + FH/SH field plots) but
@@ -244,8 +248,8 @@ timestamped subfolder of the MEOW jobs folder (`MEOW_SLURM_FOLDER`, default
   cells, increased to the point where the simulated quantities are expected to
   be converged (slow).
 
-`pick(low=..., medium=..., high=...)` from `_resolution.py` chooses each per-knob
-value for the active level. The two main EME knobs have a fixed converged
+`pick(low=..., medium=..., high=...)` (now `meow.settings.pick`, re-exported by
+the thin `_resolution.py` shim) chooses each per-knob value for the active level. The two main EME knobs have a fixed converged
 standard at `high` - **128 EME cells and 8 modes** per cross-section - which is
 also the default `num_cells` / `num_modes` of every example function. Two env
 vars override them directly (at any level, including `high`):
@@ -264,7 +268,8 @@ MEOW_NUM_CELLS=256 MEOW_NUM_MODES=12 uv run python -m examples.papers.dichroic_c
 ### Backends and parallel resources
 
 Every example resolves its FDE mode-solver backend and its parallel/slurm
-resource settings from environment variables (see `_backends.py`):
+resource settings from environment variables. These now live in the library, in
+`meow.settings` (the `_backends.py` shim just re-exports them):
 
 | env var | meaning | default |
 | --- | --- | --- |
@@ -390,6 +395,14 @@ jobs and returns a *picklable* handle *without blocking*; save it with
 later session to reattach to the still-running jobs (it pickles the submitit
 jobs, which reload their results from `folder`). Poll without blocking with
 `handle.done()` and inspect `handle.job_ids` / `handle.folder`:
+
+> Pickle is used **only** for these in-flight job handles (their live submitit
+> job objects cannot be represented otherwise). All *computed result data* is
+> saved with the library's xarray helpers instead: the dense per-cell mode
+> fields go into a single compressed HDF5 dataset via `meow.save_fields` /
+> `meow.ParallelFieldModeJobs.save_fields`, and the less dense tabular data
+> (spectra, summaries) is written redundantly as CSV **and** JSON via
+> `meow.save_table` / `meow.save_summary` (see `meow.eme.io`).
 
 - `meow.submit_s_matrix_parallel(cells, env, executor=...)` →
   `meow.ParallelEMEJobs`: the slice-group jobs of a single-wavelength EME;

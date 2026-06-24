@@ -19,11 +19,12 @@ The :func:`gather` step computes and saves, into a fresh **timestamped
 subfolder** of ``MEOW_SLURM_FOLDER``:
 
 - a dense short-/long-pass **transmission spectrum** (``*_spectrum.png`` + the
-  raw arrays in ``*_results.npz``);
+  raw arrays saved redundantly as ``*_spectrum.csv`` / ``*_spectrum.json``);
 - **propagation plots** of the intensity ``|Ex|^2`` along the device at a few
-  wavelengths on either side of and at the cutoff (``*_propagation.png``);
+  wavelengths on either side of and at the cutoff (``*_propagation.png``), with
+  the per-cell mode fields in a compressed HDF5 dataset (``*_fields.h5``);
 - a layout + index-crossing **design figure** (``*_design.png``); and
-- the device **GDS** (``*.gds``) and a JSON summary.
+- the device **GDS** (``*.gds``) and a ``*_summary.csv`` / ``*_summary.json``.
 
 Because step 2 only *submits*, steps 2 and 3 can run in **different python
 sessions**: submit from a short-lived session, then reload the run and gather

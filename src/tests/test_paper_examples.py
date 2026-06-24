@@ -602,7 +602,11 @@ def test_dichroic_designer_submit_runs_then_gather(
     for suffix in ("_spectrum.png", "_propagation.png", "_design.png"):
         assert any(name.endswith(suffix) for name in produced)
     assert "1000nm.gds" in produced
-    assert "1000nm_results.npz" in produced
+    # tabular spectrum saved redundantly as CSV + JSON; mode fields as one HDF5
+    assert "1000nm_spectrum.csv" in produced
+    assert "1000nm_spectrum.json" in produced
+    assert "1000nm_fields.h5" in produced
+    assert "1000nm_summary.csv" in produced
     assert 0.0 <= summary["short_pass_at_cutoff"] <= 1.0
     assert 0.0 <= summary["long_pass_at_cutoff"] <= 1.0
 

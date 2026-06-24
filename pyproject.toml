@@ -45,18 +45,21 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Physics"
 ]
 dependencies = [
+  "h5netcdf>=1.1.0",
   "jax>=0.6.0",
   "klujax>=0.4.1",
   "matplotlib>=3.0.0",
   "numpy>=2.2.0",
   "orjson>=3.0.0",
+  "pandas>=2.0.0",
   "pydantic>=2.10.0",
   "pyyaml>=6.0.2",
   "sax>=0.16.12",
   "shapely>=2.1.0",
   "tidy3d>=2.8.0",
   "tqdm>=4.67.0",
-  "trimesh[easy]>=4.6.0"
+  "trimesh[easy]>=4.6.0",
+  "xarray>=2024.1.0"
 ]
 description = "Modeling of Eigenmodes and Overlaps in Waveguides"
 keywords = [
