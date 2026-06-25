@@ -34,7 +34,7 @@ confidence number.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from scipy.constants import c
@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from meow.arrays import FloatArray2D
+    from meow.cross_section import CrossSection
     from meow.mode import Mode
 
 # c * eps0 is the SI constant that converts the (unit-power-normalized, micron-
@@ -198,3 +199,138 @@ def finite_difference_gradient(
         ``(neff(+h) - neff(-h)) / (2h)``.
     """
     return (complex(neff_of_t(step)) - complex(neff_of_t(-step))) / (2.0 * step)
+
+
+def _eps_components(cs: CrossSection) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The diagonal permittivity arrays ``(eps_xx, eps_yy, eps_zz)`` of a CS."""
+    return (
+        np.asarray(cs.nx) ** 2,
+        np.asarray(cs.ny) ** 2,
+        np.asarray(cs.nz) ** 2,
+    )
+
+
+def make_differentiable_neffs(
+    solve: Callable[[np.ndarray], list[list[Mode]]],
+    *,
+    shape: tuple[int, int],
+    cross_sections: Callable[[np.ndarray], list[CrossSection]] | None = None,
+    eps_jacobian: Callable[
+        [np.ndarray, int], list[tuple[np.ndarray, np.ndarray, np.ndarray]]
+    ]
+    | None = None,
+    eps_step: float = 1e-6,
+) -> Callable[[Any], Any]:
+    """Build a ``jax``-differentiable ``neffs(params)`` via the modal adjoint.
+
+    Returns a :func:`jax.custom_vjp` function mapping a real parameter vector to
+    a ``(num_cross_sections, num_modes)`` array of effective indices. The forward
+    pass runs your (non-differentiable) mode ``solve`` through
+    :func:`jax.pure_callback`; the backward pass contracts the upstream cotangent
+    with the exact perturbation-theory sensitivity ``d(neff)/d(eps)`` (the modal
+    adjoint of :func:`neff_gradient`), using a *cheap* permittivity Jacobian that
+    needs **no extra eigensolve**. Solves are memoized between the forward and
+    backward passes, so a value-and-gradient costs a single eigensolve regardless
+    of the number of parameters.
+
+    The returned array composes with the (already ``jax``-native) SAX EME
+    cascade: build the per-cell propagation matrices from these effective indices
+    and cascade them, and ``jax.grad`` of any objective flows automatically back
+    to ``params``. The gradient captures the dependence carried by the
+    propagation constants (effective indices); mode-overlap/interface matrices
+    are treated as constant w.r.t. ``params`` (exact when the objective's
+    parameter dependence is through the propagation constants, e.g. phase-matched
+    / adiabatic devices, and a controlled approximation otherwise).
+
+    Args:
+        solve: maps a parameter vector to the solved modes, grouped per
+            cross-section: ``solve(params)[i][k]`` is mode ``k`` of cross-section
+            ``i``. The mode count must match ``shape``.
+        shape: ``(num_cross_sections, num_modes)`` of the returned array.
+        cross_sections: maps a parameter vector to the cross-sections (the
+            *permittivity* build only, no eigensolve); used to central-difference
+            ``d(eps)/d(params)`` cheaply. Provide this **or** ``eps_jacobian``.
+        eps_jacobian: ``eps_jacobian(params, j)`` returns, per cross-section, the
+            analytic ``(deps_xx, deps_yy, deps_zz)`` of ``d(eps)/d(params[j])``.
+        eps_step: central-difference step for the permittivity Jacobian (only
+            used with ``cross_sections``).
+
+    Returns:
+        A ``jax.custom_vjp`` callable ``f(params) -> neffs`` of shape ``shape``.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    if (cross_sections is None) == (eps_jacobian is None):
+        msg = "Provide exactly one of cross_sections or eps_jacobian."
+        raise ValueError(msg)
+
+    cache: dict[bytes, list[list[Mode]]] = {}
+
+    def _solve(params: np.ndarray) -> list[list[Mode]]:
+        key = np.asarray(params, dtype=float).tobytes()
+        if key not in cache:
+            if len(cache) > 8:
+                cache.clear()
+            cache[key] = solve(np.asarray(params, dtype=float))
+        return cache[key]
+
+    def _neffs_np(params: np.ndarray) -> np.ndarray:
+        modes = _solve(np.asarray(params))
+        return np.array(
+            [[complex(m.neff) for m in row] for row in modes], dtype=np.complex128
+        )
+
+    def _eps_jac_j(params: np.ndarray, j: int, modes: list[list[Mode]]) -> list[tuple]:
+        if eps_jacobian is not None:
+            return eps_jacobian(params, j)
+        cs_fn = cast("Callable[[np.ndarray], list[CrossSection]]", cross_sections)
+        ep, em = np.array(params, dtype=float), np.array(params, dtype=float)
+        ep[j] += eps_step
+        em[j] -= eps_step
+        csp = cs_fn(ep)
+        csm = cs_fn(em)
+        out = []
+        for i in range(len(modes)):
+            xp, yp, zp = _eps_components(csp[i])
+            xm, ym, zm = _eps_components(csm[i])
+            twoh = 2.0 * eps_step
+            out.append(((xp - xm) / twoh, (yp - ym) / twoh, (zp - zm) / twoh))
+        return out
+
+    def _grad_np(params: np.ndarray, g: np.ndarray) -> np.ndarray:
+        params = np.asarray(params, dtype=float)
+        modes = _solve(params)
+        g = np.asarray(g, dtype=np.complex128)
+        grad = np.zeros(params.shape, dtype=float)
+        for j in range(params.size):
+            deps = _eps_jac_j(params, j, modes)
+            for i, row in enumerate(modes):
+                dxx, dyy, dzz = deps[i]
+                for k, mode in enumerate(row):
+                    dz = neff_gradient(mode, dxx, dyy, dzz)
+                    # jax convention for f: R->C into a real objective is
+                    # grad = Re(cotangent * d(out)/d(param))
+                    grad[j] += float(np.real(g[i, k] * dz))
+        return grad
+
+    result = jax.ShapeDtypeStruct(shape, jnp.complex128)
+
+    @jax.custom_vjp
+    def differentiable_neffs(params: Any) -> Any:
+        return jax.pure_callback(_neffs_np, result, params)
+
+    def _fwd(params: Any) -> tuple[Any, Any]:
+        return differentiable_neffs(params), params
+
+    def _bwd(params: Any, cotangent: Any) -> tuple[Any]:
+        grad = jax.pure_callback(
+            _grad_np,
+            jax.ShapeDtypeStruct(jnp.shape(params), jnp.result_type(params)),
+            params,
+            cotangent,
+        )
+        return (grad,)
+
+    differentiable_neffs.defvjp(_fwd, _bwd)
+    return differentiable_neffs

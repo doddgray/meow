@@ -210,6 +210,7 @@ from meow.ridb import (
 )
 from meow.sensitivity import (
     finite_difference_gradient,
+    make_differentiable_neffs,
     modal_power,
     neff_gradient,
     neff_sensitivity,
@@ -366,6 +367,7 @@ __all__ = [
     "load_table",
     "magnetic_energy",
     "magnetic_energy_density",
+    "make_differentiable_neffs",
     "make_run_dir",
     "material_from_ri",
     "materials",
