@@ -16,6 +16,7 @@ from tidy3d.components.mode.solver import compute_modes as _compute_modes
 from meow.cross_section import CrossSection
 from meow.fde.post_process import post_process_modes
 from meow.mode import Mode, Modes
+from meow.settings import limit_threads, solver_threads
 
 HAS_TIDY3D_EXTRAS = importlib.util.find_spec("tidy3d_extras") is not None
 """Whether the optional ``tidy3d-extras`` package is importable. It provides
@@ -124,7 +125,7 @@ def compute_modes_tidy3d(
         group_index_step=False,
     )
 
-    with warnings.catch_warnings():
+    with warnings.catch_warnings(), limit_threads(solver_threads()):
         warnings.filterwarnings("ignore", message=".*Input has data type int64.*")
         warnings.filterwarnings("ignore", message=".*divide by zero.*")
         warnings.filterwarnings("ignore", message=".*overflow encountered.*")

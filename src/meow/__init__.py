@@ -215,6 +215,10 @@ from meow.sensitivity import (
     neff_sensitivity,
     neff_value_and_grad,
 )
+from meow.settings import (
+    limit_threads,
+    solver_threads,
+)
 from meow.structures import (
     DEFAULT_MESH_ORDER,
     Structure,
@@ -353,6 +357,7 @@ __all__ = [
     "label_mode",
     "label_mode_candidates",
     "label_modes",
+    "limit_threads",
     "load_fields",
     "load_record",
     "load_records",
@@ -401,6 +406,7 @@ __all__ = [
     "silicon_oxide",
     "slurm_executor",
     "solve_mode",
+    "solver_threads",
     "sort_structures",
     "split_square_matrix",
     "start_run",

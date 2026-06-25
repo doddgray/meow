@@ -41,10 +41,21 @@ Resolution presets (:func:`level` / :func:`pick` / :func:`num_cells` /
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any, TypeVar
 
 T = TypeVar("T")
+
+# BLAS / OpenMP thread-count environment variables honoured by the numerical
+# backends meow's solvers sit on (numpy, scipy, tidy3d, MPB).
+_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
 
 # ==========================================================================
 # mode-solver backend selection
@@ -143,6 +154,74 @@ def max_workers() -> int | None:
         return int(explicit)
     cpus = os.environ.get("MEOW_CPUS_PER_TASK")
     return int(cpus) if cpus else None
+
+
+# ==========================================================================
+# solver thread control (prevent BLAS oversubscription on shared nodes)
+# ==========================================================================
+def solver_threads(default: int | None = None) -> int | None:
+    """BLAS/OpenMP threads each mode solve may use (env ``MEOW_SOLVER_THREADS``).
+
+    On a cluster node that runs several EME jobs at once (local worker processes
+    or co-scheduled slurm tasks), each job's mode solver otherwise spawns a full
+    BLAS thread pool, so ``threads x jobs`` oversubscribes the cores and the
+    runs slow down from contention. Set this so that
+    ``solver_threads() * (concurrent jobs per node) <= cores per node``.
+
+    Args:
+        default: value to use when ``MEOW_SOLVER_THREADS`` is unset (``None``
+            leaves the backend's own threading untouched).
+
+    Returns:
+        The thread limit, or ``None`` to leave threading unconstrained.
+    """
+    val = os.environ.get("MEOW_SOLVER_THREADS")
+    if val:
+        return int(val)
+    return default
+
+
+@contextmanager
+def limit_threads(n: int | None) -> Iterator[None]:
+    """Limit BLAS/OpenMP threads for the duration of the block.
+
+    Uses :mod:`threadpoolctl` to re-limit the already-initialized native thread
+    pools at runtime (robust even after numpy/BLAS have been imported); if that
+    is unavailable it falls back to setting the ``*_NUM_THREADS`` environment
+    variables (which only bind pools that have not yet started, e.g. in a
+    freshly spawned worker). ``n=None`` (or ``<= 0``) is a no-op.
+
+    Args:
+        n: the maximum number of threads, or ``None`` to leave threading as-is.
+
+    Yields:
+        ``None`` - use as ``with limit_threads(n): ...``.
+    """
+    if n is None or n <= 0:
+        yield
+        return
+    limiter: Any = None
+    try:
+        from threadpoolctl import threadpool_limits  # fmt: skip
+
+        limiter = threadpool_limits
+    except ImportError:
+        limiter = None
+    if limiter is not None:
+        with limiter(limits=int(n)):
+            yield
+        return
+    previous = {k: os.environ.get(k) for k in _THREAD_ENV_VARS}
+    for k in _THREAD_ENV_VARS:
+        os.environ[k] = str(int(n))
+    try:
+        yield
+    finally:
+        for k, v in previous.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def device_s_matrix(
