@@ -18,9 +18,11 @@ nav = [
     {"different modes" = "nbs/03_unequal_number_of_modes.md"},
     {"rib interface" = "nbs/04_rib_interface.md"},
     {"mode propagation" = "nbs/05_propagate_modes.md"},
-    {"material models" = "nbs/06_material_models.md"}
+    {"material models" = "nbs/06_material_models.md"},
+    {"modal gradients" = "nbs/07_modal_gradients.md"}
   ]},
   {"algorithm" = "algorithm.md"},
+  {"HPC & gradients" = "hpc.md"},
   {"api" = "api.md"},
   {"changelog" = "changelog.md"}
 ]

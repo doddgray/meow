@@ -15,6 +15,7 @@ from meow import (
     fde,
     gds_structures,
     geometries,
+    levelset,
     materials,
     mesh,
     mode,
@@ -210,6 +211,7 @@ from meow.ridb import (
 )
 from meow.sensitivity import (
     finite_difference_gradient,
+    make_differentiable_neffs,
     modal_power,
     neff_gradient,
     neff_sensitivity,
@@ -357,6 +359,7 @@ __all__ = [
     "label_mode",
     "label_mode_candidates",
     "label_modes",
+    "levelset",
     "limit_threads",
     "load_fields",
     "load_record",
@@ -366,6 +369,7 @@ __all__ = [
     "load_table",
     "magnetic_energy",
     "magnetic_energy_density",
+    "make_differentiable_neffs",
     "make_run_dir",
     "material_from_ri",
     "materials",

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Literal, Self
 
 import numpy as np
 import shapely
-from pydantic import Field
-from pydantic.v1 import PrivateAttr
+from pydantic import Field, PrivateAttr
 from shapely.ops import unary_union
 
 from meow.arrays import ComplexArray2D, IntArray2D
@@ -52,13 +52,55 @@ class CrossSection(BaseModel):
         subpixel_smoothing: bool = True,
     ) -> Self:
         """Create a CrossSection from a Cell and Environment."""
-        return cls(
+        obj = cls(
             structures=cell.structures_2d,
             mesh=cell.mesh,
             env=env,
             subpixel_smoothing=subpixel_smoothing,
-            _cell=cell,
         )
+        # keep a handle on the originating cell so the (geometry-only) subpixel
+        # smoothing plan can be cached there and reused across a wavelength sweep
+        obj._cell = cell
+        return obj
+
+    @classmethod
+    def from_index_arrays(
+        cls,
+        *,
+        mesh: Mesh2D,
+        env: Environment,
+        nx: ComplexArray2D,
+        ny: ComplexArray2D | None = None,
+        nz: ComplexArray2D | None = None,
+    ) -> Self:
+        """Build a CrossSection directly from per-component index arrays.
+
+        Bypasses polygon rasterization/smoothing: the (complex) refractive index
+        on the ``Ex``/``Ey``/``Ez`` Yee positions is supplied directly. This is
+        the entry point for *continuous* permittivity distributions - e.g. a
+        differentiable level-set / density field for inverse design (see
+        :mod:`meow.levelset`) - which have no polygonal structures.
+
+        Args:
+            mesh: the mesh the arrays are defined on. ``nx`` must have the shape
+                of ``mesh.Xx`` (``ny`` of ``mesh.Xy``, ``nz`` of ``mesh.Xz``).
+            env: the simulation environment.
+            nx: refractive index on the ``Ex`` positions.
+            ny: index on the ``Ey`` positions (defaults to ``nx``).
+            nz: index on the ``Ez`` positions (defaults to ``nx``).
+
+        Returns:
+            A CrossSection whose ``nx``/``ny``/``nz`` return the given arrays
+            (off-diagonal permittivity components are zero / isotropic).
+        """
+        obj = cls(structures=[], mesh=mesh, env=env, subpixel_smoothing=False)
+        nxa = np.asarray(nx, dtype=np.complex128)
+        nya = nxa if ny is None else np.asarray(ny, dtype=np.complex128)
+        nza = nxa if nz is None else np.asarray(nz, dtype=np.complex128)
+        obj._cache["nx"] = nxa
+        obj._cache["ny"] = nya
+        obj._cache["nz"] = nza
+        return obj
 
     @cached_property
     def materials(self) -> dict[Material, int]:
@@ -82,12 +124,30 @@ class CrossSection(BaseModel):
             n_full = np.where(self._m_full == idx, material(self.env), n_full)
         return n_full
 
+    def _smoothing_plan_for(self, component: Literal["x", "y", "z"]) -> _SmoothingPlan:
+        """The (cached) wavelength-independent subpixel-smoothing plan.
+
+        The plan depends only on the geometry, so when this cross-section was
+        built from a cell it is cached on that cell and reused across a whole
+        wavelength/temperature sweep (the expensive shapely work runs once).
+        """
+        cell = self._cell
+        key = f"_smoothing_plan_{component}"
+        if cell is not None and key in cell._cache:
+            return cell._cache[key]
+        plan = _smoothing_plan(
+            self.mesh, self._m_full, self.materials, self.structures, component
+        )
+        if cell is not None:
+            cell._cache[key] = plan
+        return plan
+
     @cached_property
     def nx(self) -> ComplexArray2D:
         """Return the smoothed refractive index on the Ex positions."""
         if self.subpixel_smoothing:
-            return _compute_smoothed_n(
-                self.mesh, self._m_full, self.materials, self.env, self.structures, "x"
+            return _assemble_smoothed_n(
+                self._smoothing_plan_for("x"), self.materials, self.env, "x"
             )
         return _compute_winner_takes_all_n(
             self.mesh, self._m_full, self.materials, self.env, self.structures, "x"
@@ -97,8 +157,8 @@ class CrossSection(BaseModel):
     def ny(self) -> ComplexArray2D:
         """Return the smoothed refractive index on the Ey positions."""
         if self.subpixel_smoothing:
-            return _compute_smoothed_n(
-                self.mesh, self._m_full, self.materials, self.env, self.structures, "y"
+            return _assemble_smoothed_n(
+                self._smoothing_plan_for("y"), self.materials, self.env, "y"
             )
         return _compute_winner_takes_all_n(
             self.mesh, self._m_full, self.materials, self.env, self.structures, "y"
@@ -108,8 +168,8 @@ class CrossSection(BaseModel):
     def nz(self) -> ComplexArray2D:
         """Return the smoothed refractive index on the Ez positions."""
         if self.subpixel_smoothing:
-            return _compute_smoothed_n(
-                self.mesh, self._m_full, self.materials, self.env, self.structures, "z"
+            return _assemble_smoothed_n(
+                self._smoothing_plan_for("z"), self.materials, self.env, "z"
             )
         return _compute_winner_takes_all_n(
             self.mesh, self._m_full, self.materials, self.env, self.structures, "z"
@@ -421,32 +481,46 @@ def _dual_cell_bounds(
     return x_lo, x_hi, y_lo, y_hi
 
 
-def _compute_smoothed_n(  # noqa: PLR0915
+@dataclass
+class _SmoothingPlan:
+    """The wavelength-independent part of subpixel smoothing for one component.
+
+    Everything here depends only on the geometry (mesh + structures), not on the
+    environment, so it can be computed once (the expensive shapely interface /
+    area-fraction work) and reused at every wavelength/temperature. Only the
+    cheap material-permittivity assembly in :func:`_assemble_smoothed_n` is
+    wavelength-dependent.
+    """
+
+    m_comp: IntArray2D
+    """Material-index array on this component's Yee positions."""
+    has_interface: bool
+    """Whether any interface pixels need smoothing."""
+    ii: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
+    """Row indices of the interface pixels."""
+    jj: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
+    """Column indices of the interface pixels."""
+    fractions: dict[int, np.ndarray] = field(default_factory=dict)
+    """Per-material area fraction at each interface pixel (key 0 is background)."""
+    use_harmonic: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=bool))
+    """Whether each interface pixel uses harmonic (vs arithmetic) averaging."""
+
+
+def _smoothing_plan(
     mesh: Mesh2D,
     m_full: IntArray2D,
     materials: dict[Material, int],
-    env: Environment,
     structures: list[Structure2D],
     component: Literal["x", "y", "z"],
-) -> ComplexArray2D:
-    """Compute subpixel-smoothed refractive index for a field component.
+) -> _SmoothingPlan:
+    """Compute the wavelength-independent subpixel-smoothing plan for a component.
 
-    At interface pixels, the effective permittivity is computed using
-    area-fraction-weighted averaging:
-      - E parallel to interface:      arithmetic avg  eps_eff = sum(f_i * eps_i)
-      - E perpendicular to interface: harmonic avg    1/eps_eff = sum(f_i / eps_i)
+    This does the geometry-only work - interface detection, dual-cell area
+    fractions (the expensive shapely intersections) and the harmonic/arithmetic
+    orientation masks - so it can be cached and reused across a wavelength sweep.
     """
     si, sj = _COMPONENT_SLICES[component]
     m_comp = m_full[si, sj]
-
-    # Build eps array from material indices
-    env_eps = np.complex128(1.0) ** 2  # background: air (n=1)
-    eps = np.full_like(m_comp, env_eps, dtype=np.complex128)
-    mat_eps: dict[int, complex] = {0: env_eps}
-    for material, idx in materials.items():
-        e = _material_eps_component(material, env, component, component)
-        eps[m_comp == idx] = e
-        mat_eps[idx] = e
 
     # Identify interface pixels (where material differs from any 4-neighbor)
     padded = np.pad(m_comp, 1, mode="edge")
@@ -458,7 +532,7 @@ def _compute_smoothed_n(  # noqa: PLR0915
     )
 
     if not np.any(is_interface):
-        return np.sqrt(eps)
+        return _SmoothingPlan(m_comp=m_comp, has_interface=False)
 
     # Compute dual cell bounds for this component
     x_lo, x_hi, y_lo, y_hi = _dual_cell_bounds(mesh, component)
@@ -511,21 +585,55 @@ def _compute_smoothed_n(  # noqa: PLR0915
     # Ez is always parallel to interface -> always arithmetic
     # Corners -> arithmetic (use_harmonic stays False)
 
-    # Compute effective eps for each interface pixel
+    return _SmoothingPlan(
+        m_comp=m_comp,
+        has_interface=True,
+        ii=ii,
+        jj=jj,
+        fractions=fractions,
+        use_harmonic=use_harmonic,
+    )
+
+
+def _assemble_smoothed_n(
+    plan: _SmoothingPlan,
+    materials: dict[Material, int],
+    env: Environment,
+    component: Literal["x", "y", "z"],
+) -> ComplexArray2D:
+    """Assemble the smoothed index from a (cached) plan and the per-env eps.
+
+    Only this step depends on the environment (wavelength/temperature): it looks
+    up each material's permittivity and applies the precomputed area-fraction
+    averaging.
+    """
+    env_eps = np.complex128(1.0) ** 2  # background: air (n=1)
+    eps = np.full_like(plan.m_comp, env_eps, dtype=np.complex128)
+    mat_eps: dict[int, complex] = {0: env_eps}
+    for material, idx in materials.items():
+        e = _material_eps_component(material, env, component, component)
+        eps[plan.m_comp == idx] = e
+        mat_eps[idx] = e
+
+    if not plan.has_interface:
+        return np.sqrt(eps)
+
+    ii, jj = plan.ii, plan.jj
+    use_harmonic = plan.use_harmonic
     eps_eff = np.zeros(len(ii), dtype=np.complex128)
 
     # Arithmetic average: eps_eff = sum(f_i * eps_i)
     arith_mask = ~use_harmonic
     if np.any(arith_mask):
-        eps_arith = np.zeros(arith_mask.sum(), dtype=np.complex128)
-        for idx, frac in fractions.items():
+        eps_arith = np.zeros(int(arith_mask.sum()), dtype=np.complex128)
+        for idx, frac in plan.fractions.items():
             eps_arith += frac[arith_mask] * mat_eps[idx]
         eps_eff[arith_mask] = eps_arith
 
     # Harmonic average: 1/eps_eff = sum(f_i / eps_i)
     if np.any(use_harmonic):
-        inv_eps_harm = np.zeros(use_harmonic.sum(), dtype=np.complex128)
-        for idx, frac in fractions.items():
+        inv_eps_harm = np.zeros(int(use_harmonic.sum()), dtype=np.complex128)
+        for idx, frac in plan.fractions.items():
             e = mat_eps[idx]
             if abs(e) > 0:
                 inv_eps_harm += frac[use_harmonic] / e
@@ -540,6 +648,31 @@ def _compute_smoothed_n(  # noqa: PLR0915
     eps[ii, jj] = eps_eff
 
     return np.sqrt(eps)
+
+
+def _compute_smoothed_n(
+    mesh: Mesh2D,
+    m_full: IntArray2D,
+    materials: dict[Material, int],
+    env: Environment,
+    structures: list[Structure2D],
+    component: Literal["x", "y", "z"],
+    plan: _SmoothingPlan | None = None,
+) -> ComplexArray2D:
+    """Compute subpixel-smoothed refractive index for a field component.
+
+    At interface pixels, the effective permittivity is computed using
+    area-fraction-weighted averaging:
+      - E parallel to interface:      arithmetic avg  eps_eff = sum(f_i * eps_i)
+      - E perpendicular to interface: harmonic avg    1/eps_eff = sum(f_i / eps_i)
+
+    The wavelength-independent geometry work is factored into
+    :func:`_smoothing_plan`; pass a precomputed ``plan`` to reuse it across a
+    wavelength sweep.
+    """
+    if plan is None:
+        plan = _smoothing_plan(mesh, m_full, materials, structures, component)
+    return _assemble_smoothed_n(plan, materials, env, component)
 
 
 def _compute_winner_takes_all_n(

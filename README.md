@@ -10,6 +10,24 @@
 
 A simple electromagnetic [EigenMode Expansion (EME)](https://en.wikipedia.org/wiki/Eigenmode_expansion) tool for Python.
 
+## Highlights
+
+- **EME** with parallel / slurm-distributed S-matrix and spectrum solves
+  (`compute_s_matrix_parallel`, `compute_s_matrix_spectrum` with frequency
+  distribution via `wls_per_job` and a parallel cascade via `cascade_workers`).
+- **Material models** from [RefractiveIndex.INFO](https://refractiveindex.info)
+  coupled to Sellmeier fitting (`meow.ridb`), including anisotropic and
+  temperature-dependent dispersion.
+- **Modal gradients & autodiff**: an exact effective-index adjoint
+  (`meow.neff_gradient`, `neff_value_and_grad`), `jax.custom_vjp` plumbing
+  (`make_differentiable_neffs`) so `jax.grad` flows through the solve into the
+  JAX/SAX cascade, and a differentiable level-set/density path for inverse design
+  (`meow.levelset`).
+- **HPC knobs**: solver thread-pinning (`meow.limit_threads`,
+  `MEOW_SOLVER_THREADS`), cached wavelength-independent subpixel smoothing, and a
+  sparse shift-invert solver for very large grids (`meow.fde.sparse`). See the
+  [HPC & gradients guide](https://gdsfactory.github.io/meow/hpc/).
+
 ## Installation
 
 ### Minimal installation
