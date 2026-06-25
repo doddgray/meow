@@ -19,7 +19,8 @@ nav = [
     {"rib interface" = "nbs/04_rib_interface.md"},
     {"mode propagation" = "nbs/05_propagate_modes.md"},
     {"material models" = "nbs/06_material_models.md"},
-    {"modal gradients" = "nbs/07_modal_gradients.md"}
+    {"modal gradients" = "nbs/07_modal_gradients.md"},
+    {"tensor smoothing & full gradients" = "nbs/08_kottke_and_full_gradients.md"}
   ]},
   {"algorithm" = "algorithm.md"},
   {"HPC & gradients" = "hpc.md"},
