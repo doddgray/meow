@@ -63,6 +63,45 @@ class CrossSection(BaseModel):
         obj._cell = cell
         return obj
 
+    @classmethod
+    def from_index_arrays(
+        cls,
+        *,
+        mesh: Mesh2D,
+        env: Environment,
+        nx: ComplexArray2D,
+        ny: ComplexArray2D | None = None,
+        nz: ComplexArray2D | None = None,
+    ) -> Self:
+        """Build a CrossSection directly from per-component index arrays.
+
+        Bypasses polygon rasterization/smoothing: the (complex) refractive index
+        on the ``Ex``/``Ey``/``Ez`` Yee positions is supplied directly. This is
+        the entry point for *continuous* permittivity distributions - e.g. a
+        differentiable level-set / density field for inverse design (see
+        :mod:`meow.levelset`) - which have no polygonal structures.
+
+        Args:
+            mesh: the mesh the arrays are defined on. ``nx`` must have the shape
+                of ``mesh.Xx`` (``ny`` of ``mesh.Xy``, ``nz`` of ``mesh.Xz``).
+            env: the simulation environment.
+            nx: refractive index on the ``Ex`` positions.
+            ny: index on the ``Ey`` positions (defaults to ``nx``).
+            nz: index on the ``Ez`` positions (defaults to ``nx``).
+
+        Returns:
+            A CrossSection whose ``nx``/``ny``/``nz`` return the given arrays
+            (off-diagonal permittivity components are zero / isotropic).
+        """
+        obj = cls(structures=[], mesh=mesh, env=env, subpixel_smoothing=False)
+        nxa = np.asarray(nx, dtype=np.complex128)
+        nya = nxa if ny is None else np.asarray(ny, dtype=np.complex128)
+        nza = nxa if nz is None else np.asarray(nz, dtype=np.complex128)
+        obj._cache["nx"] = nxa
+        obj._cache["ny"] = nya
+        obj._cache["nz"] = nza
+        return obj
+
     @cached_property
     def materials(self) -> dict[Material, int]:
         """Return a dictionary mapping materials to their indices."""
