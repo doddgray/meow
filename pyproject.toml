@@ -56,6 +56,7 @@ dependencies = [
   "pyyaml>=6.0.2",
   "sax>=0.16.12",
   "shapely>=2.1.0",
+  "threadpoolctl>=3.0.0",
   "tidy3d>=2.8.0",
   "tqdm>=4.67.0",
   "trimesh[easy]>=4.6.0",

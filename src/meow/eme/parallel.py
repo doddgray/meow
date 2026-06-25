@@ -41,7 +41,7 @@ import multiprocessing as mp
 import pickle
 import warnings
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
@@ -257,10 +257,12 @@ def compute_s_matrix_spectrum(
     freqs: Any | None = None,
     num_modes: int = 10,
     max_interfaces_per_job: int = 2,
+    wls_per_job: int | None = None,
     executor: JobExecutor | None = None,
     max_workers: int | None = None,
     sax_backend: sax.Backend = "klu",
     neff_atol: float = 1e-6,
+    cascade_workers: int | None = None,
     compute_modes_kwargs: dict[str, Any] | None = None,
     interface_kwargs: dict[str, Any] | None = None,
     compute_modes: Callable | None = None,
@@ -270,9 +272,17 @@ def compute_s_matrix_spectrum(
     The sweep can be given either as wavelengths (``wls``, in um) or as
     optical frequencies (``freqs``, in Hz). Each concurrent job (local
     subprocess or slurm task) solves the frequency-dependent modes of its
-    slice group at every sweep point and returns only the per-frequency
-    effective indices and interface S-matrices; the full S-matrix at each
-    sweep point is then cascaded in the calling process.
+    slice group and returns only the per-frequency effective indices and
+    interface S-matrices; the full S-matrix at each sweep point is then
+    cascaded in the calling process.
+
+    By default each slice-group job sweeps the whole spectrum sequentially. On a
+    cluster with many nodes and a dense spectrum, set ``wls_per_job`` to also
+    distribute the **frequency** axis: the sweep is split into wavelength batches
+    and one job is submitted per (slice group x batch), so all nodes share the
+    frequency work instead of a few long jobs. Set ``cascade_workers > 1`` to
+    cascade the (independent) per-wavelength S-matrices concurrently in the
+    gathering process.
 
     Args:
         cells: the cells of the EME chain.
@@ -281,11 +291,15 @@ def compute_s_matrix_spectrum(
         freqs: the optical frequencies to sweep [Hz] (alternative to wls).
         num_modes: number of modes to compute per cell.
         max_interfaces_per_job: how many interfaces each job computes.
+        wls_per_job: wavelengths per job - splits the sweep across jobs to
+            distribute the frequency axis (default: the whole sweep per job).
         executor: where to run the jobs (see :func:`compute_s_matrix_parallel`).
         max_workers: max number of local subprocesses (only used when no
             executor is given).
         sax_backend: SAX backend used to cascade the S-matrices.
         neff_atol: tolerance of the shared-cell consistency check.
+        cascade_workers: threads used to cascade the per-wavelength S-matrices
+            (default: serial).
         compute_modes_kwargs: extra kwargs for ``compute_modes``.
         interface_kwargs: extra kwargs for ``compute_interface_s_matrix``.
         compute_modes: the (picklable, deterministic) FDE backend to run in
@@ -301,33 +315,26 @@ def compute_s_matrix_spectrum(
         with ProcessPoolExecutor(
             max_workers=max_workers, mp_context=mp.get_context("spawn")
         ) as own_executor:
-            jobs = _submit_spectrum_jobs(
-                own_executor,
-                cells,
-                env,
-                groups,
-                wls_arr,
-                num_modes,
-                compute_modes_kwargs,
-                interface_kwargs,
-                compute_modes,
+            jobs, tags = _submit_spectrum_jobs(
+                own_executor, cells, env, groups, wls_arr, num_modes,
+                compute_modes_kwargs, interface_kwargs, compute_modes, wls_per_job,
             )
-            results = [job.result() for job in jobs]
+            fragments = [
+                (s, o, job.result())
+                for (s, o), job in zip(tags, jobs, strict=True)
+            ]
     else:
-        jobs = _submit_spectrum_jobs(
-            executor,
-            cells,
-            env,
-            groups,
-            wls_arr,
-            num_modes,
-            compute_modes_kwargs,
-            interface_kwargs,
-            compute_modes,
+        jobs, tags = _submit_spectrum_jobs(
+            executor, cells, env, groups, wls_arr, num_modes,
+            compute_modes_kwargs, interface_kwargs, compute_modes, wls_per_job,
         )
-        results = [job.result() for job in jobs]
+        fragments = [
+            (s, o, job.result()) for (s, o), job in zip(tags, jobs, strict=True)
+        ]
+    results = _merge_spectrum_fragments(fragments, wls_arr)
     return _assemble_spectrum(
-        results, cells, env, wls_arr, sax_backend=sax_backend, neff_atol=neff_atol
+        results, cells, env, wls_arr, sax_backend=sax_backend,
+        neff_atol=neff_atol, cascade_workers=cascade_workers,
     )
 
 
@@ -339,10 +346,12 @@ async def acompute_s_matrix_spectrum(
     freqs: Any | None = None,
     num_modes: int = 10,
     max_interfaces_per_job: int = 2,
+    wls_per_job: int | None = None,
     executor: JobExecutor | None = None,
     max_workers: int | None = None,
     sax_backend: sax.Backend = "klu",
     neff_atol: float = 1e-6,
+    cascade_workers: int | None = None,
     compute_modes_kwargs: dict[str, Any] | None = None,
     interface_kwargs: dict[str, Any] | None = None,
     compute_modes: Callable | None = None,
@@ -356,26 +365,29 @@ async def acompute_s_matrix_spectrum(
             max_workers=max_workers, mp_context=mp.get_context("spawn")
         )
     try:
-        jobs = _submit_spectrum_jobs(
-            executor,
-            cells,
-            env,
-            groups,
-            wls_arr,
-            num_modes,
-            compute_modes_kwargs,
-            interface_kwargs,
-            compute_modes,
+        jobs, tags = _submit_spectrum_jobs(
+            executor, cells, env, groups, wls_arr, num_modes,
+            compute_modes_kwargs, interface_kwargs, compute_modes, wls_per_job,
         )
-        results = list(
+        raw = list(
             await asyncio.gather(*(asyncio.to_thread(job.result) for job in jobs))
         )
+        fragments = [(s, o, r) for (s, o), r in zip(tags, raw, strict=True)]
     finally:
         if own_executor is not None:
             own_executor.shutdown()
+    results = _merge_spectrum_fragments(fragments, wls_arr)
     return _assemble_spectrum(
-        results, cells, env, wls_arr, sax_backend=sax_backend, neff_atol=neff_atol
+        results, cells, env, wls_arr, sax_backend=sax_backend,
+        neff_atol=neff_atol, cascade_workers=cascade_workers,
     )
+
+
+def _chunk_indices(n: int, size: int | None) -> list[tuple[int, int]]:
+    """Split ``range(n)`` into contiguous ``(start, stop)`` batches of ``size``."""
+    if not size or size <= 0 or size >= n:
+        return [(0, n)]
+    return [(i, min(i + size, n)) for i in range(0, n, size)]
 
 
 def _submit_spectrum_jobs(
@@ -388,22 +400,51 @@ def _submit_spectrum_jobs(
     compute_modes_kwargs: dict[str, Any] | None,
     interface_kwargs: dict[str, Any] | None,
     compute_modes: Callable | None = None,
-) -> list[Any]:
+    wls_per_job: int | None = None,
+) -> tuple[list[Any], list[tuple[int, int]]]:
+    """Submit one spectrum job per (slice group x wavelength batch).
+
+    With ``wls_per_job`` set, the sweep is split into wavelength batches so the
+    *frequency* axis is distributed across jobs/nodes (instead of every job
+    sweeping the whole spectrum sequentially). Returns the flat job list and a
+    parallel list of ``(group_start, wl_offset)`` tags used to stitch the
+    per-group spectra back together.
+    """
     cells_data = [cell.model_dump() for cell in cells]
     env_data = env.model_dump()
+    batches = _chunk_indices(len(wls), wls_per_job)
+    jobs: list[Any] = []
+    tags: list[tuple[int, int]] = []
+    for start, stop in groups:
+        for a, b in batches:
+            jobs.append(
+                executor.submit(
+                    compute_group_spectrum,
+                    cells_data[start : stop + 1],
+                    env_data,
+                    start,
+                    wls[a:b],
+                    num_modes,
+                    compute_modes_kwargs,
+                    interface_kwargs,
+                    compute_modes,
+                )
+            )
+            tags.append((start, a))
+    return jobs, tags
+
+
+def _merge_spectrum_fragments(
+    fragments: list[tuple[int, int, GroupSpectrumResult]],
+    wls: np.ndarray,
+) -> list[GroupSpectrumResult]:
+    """Concatenate per-group wavelength batches back into one spectrum per group."""
+    by_start: dict[int, list[GroupResult]] = {}
+    for start, _offset, frag in sorted(fragments, key=lambda t: (t[0], t[1])):
+        by_start.setdefault(start, []).extend(frag.per_wl)
     return [
-        executor.submit(
-            compute_group_spectrum,
-            cells_data[start : stop + 1],
-            env_data,
-            start,
-            wls,
-            num_modes,
-            compute_modes_kwargs,
-            interface_kwargs,
-            compute_modes,
-        )
-        for start, stop in groups
+        GroupSpectrumResult(start=start, wls=np.asarray(wls), per_wl=per_wl)
+        for start, per_wl in by_start.items()
     ]
 
 
@@ -415,22 +456,31 @@ def _assemble_spectrum(
     *,
     sax_backend: sax.Backend = "klu",
     neff_atol: float = 1e-6,
+    cascade_workers: int | None = None,
 ) -> list[sax.SDenseMM]:
-    """Assemble the per-wavelength S-matrices from the group spectra."""
+    """Assemble the per-wavelength S-matrices from the group spectra.
+
+    The cascade at each wavelength is independent, so for a dense spectrum it can
+    be evaluated concurrently with a thread pool (``cascade_workers > 1``) to
+    keep the serial cascade from becoming the bottleneck in the gathering
+    process.
+    """
     env_dict = env.model_dump()
-    spectra = []
-    for i, wl in enumerate(wls):
+
+    def assemble_one(i: int, wl: float) -> sax.SDenseMM:
         env_wl = Environment.model_validate({**env_dict, "wl": float(wl)})
-        spectra.append(
-            _assemble_s_matrix(
-                [r.per_wl[i] for r in results],
-                cells,
-                env_wl,
-                sax_backend=sax_backend,
-                neff_atol=neff_atol,
-            )
+        return _assemble_s_matrix(
+            [r.per_wl[i] for r in results],
+            cells,
+            env_wl,
+            sax_backend=sax_backend,
+            neff_atol=neff_atol,
         )
-    return spectra
+
+    if cascade_workers and cascade_workers > 1 and len(wls) > 1:
+        with ThreadPoolExecutor(max_workers=cascade_workers) as pool:
+            return list(pool.map(lambda iw: assemble_one(*iw), enumerate(wls)))
+    return [assemble_one(i, wl) for i, wl in enumerate(wls)]
 
 
 def compute_s_matrix_parallel(
@@ -794,33 +844,42 @@ class ParallelEMESpectrumJobs(_SubmittedJobs):
     cells: list[Cell]
     env: Environment
     wls: np.ndarray
+    tags: list[tuple[int, int]] = field(default_factory=list)
     sax_backend: sax.Backend = "klu"
     neff_atol: float = 1e-6
+    cascade_workers: int | None = None
+
+    def _tags(self) -> list[tuple[int, int]]:
+        # back-compat: handles submitted without frequency batching tagged each
+        # job with its group start and wl offset 0
+        if self.tags:
+            return self.tags
+        return [(0, 0) for _ in self.jobs]
 
     def result(self) -> list[sax.SDenseMM]:
         """Block until all jobs finish; return one ``(S, port_map)`` per wl."""
-        results = [job.result() for job in self.jobs]
+        fragments = [
+            (s, o, job.result())
+            for (s, o), job in zip(self._tags(), self.jobs, strict=True)
+        ]
+        results = _merge_spectrum_fragments(fragments, self.wls)
         return _assemble_spectrum(
-            results,
-            self.cells,
-            self.env,
-            self.wls,
-            sax_backend=self.sax_backend,
-            neff_atol=self.neff_atol,
+            results, self.cells, self.env, self.wls, sax_backend=self.sax_backend,
+            neff_atol=self.neff_atol, cascade_workers=self.cascade_workers,
         )
 
     async def aresult(self) -> list[sax.SDenseMM]:
         """Async :meth:`result` (awaits the jobs without blocking the loop)."""
-        results = list(
+        raw = list(
             await asyncio.gather(*(asyncio.to_thread(job.result) for job in self.jobs))
         )
+        fragments = [
+            (s, o, r) for (s, o), r in zip(self._tags(), raw, strict=True)
+        ]
+        results = _merge_spectrum_fragments(fragments, self.wls)
         return _assemble_spectrum(
-            results,
-            self.cells,
-            self.env,
-            self.wls,
-            sax_backend=self.sax_backend,
-            neff_atol=self.neff_atol,
+            results, self.cells, self.env, self.wls, sax_backend=self.sax_backend,
+            neff_atol=self.neff_atol, cascade_workers=self.cascade_workers,
         )
 
 
@@ -833,8 +892,10 @@ def submit_s_matrix_spectrum(
     freqs: Any | None = None,
     num_modes: int = 10,
     max_interfaces_per_job: int = 2,
+    wls_per_job: int | None = None,
     sax_backend: sax.Backend = "klu",
     neff_atol: float = 1e-6,
+    cascade_workers: int | None = None,
     compute_modes_kwargs: dict[str, Any] | None = None,
     interface_kwargs: dict[str, Any] | None = None,
     compute_modes: Callable | None = None,
@@ -842,11 +903,13 @@ def submit_s_matrix_spectrum(
     """Submit the slice-group jobs of an EME *spectrum* without awaiting them.
 
     The non-blocking, multi-session half of :func:`compute_s_matrix_spectrum`:
-    it chunks the cells, submits one spectrum job per slice group (each solving
-    its cells at *every* sweep wavelength) and returns a
+    it chunks the cells, submits the spectrum jobs and returns a
     :class:`ParallelEMESpectrumJobs` handle immediately. Use it - like
     :func:`submit_s_matrix_parallel` - to distribute a dense spectrum as
     concurrent slurm jobs and collect it later (possibly in another session).
+    Pass ``wls_per_job`` to also distribute the frequency axis (one job per
+    slice group x wavelength batch) so many nodes share a dense sweep instead of
+    a few jobs each sweeping the whole spectrum.
     """
     if executor is None:
         msg = (
@@ -857,24 +920,19 @@ def submit_s_matrix_spectrum(
         raise ValueError(msg)
     wls_arr = _resolve_wls(wls, freqs)
     groups = chunk_cell_indices(len(cells), max_interfaces_per_job)
-    jobs = _submit_spectrum_jobs(
-        executor,
-        cells,
-        env,
-        groups,
-        wls_arr,
-        num_modes,
-        compute_modes_kwargs,
-        interface_kwargs,
-        compute_modes,
+    jobs, tags = _submit_spectrum_jobs(
+        executor, cells, env, groups, wls_arr, num_modes,
+        compute_modes_kwargs, interface_kwargs, compute_modes, wls_per_job,
     )
     return ParallelEMESpectrumJobs(
         jobs=jobs,
         cells=cells,
         env=env,
         wls=wls_arr,
+        tags=tags,
         sax_backend=sax_backend,
         neff_atol=neff_atol,
+        cascade_workers=cascade_workers,
     )
 
 
