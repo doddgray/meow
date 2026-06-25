@@ -325,6 +325,81 @@ def test_submit_spectrum_handle_accepts_backend(
     np.testing.assert_allclose(np.asarray(S), np.asarray(S_ref), atol=1e-9)
 
 
+def test_chunk_indices_batches_the_sweep() -> None:
+    """The wavelength-batch helper splits the sweep into contiguous batches."""
+    from meow.eme.parallel import _chunk_indices
+
+    assert _chunk_indices(5, None) == [(0, 5)]  # default: whole sweep
+    assert _chunk_indices(5, 0) == [(0, 5)]
+    assert _chunk_indices(5, 10) == [(0, 5)]  # batch >= n -> one batch
+    assert _chunk_indices(5, 2) == [(0, 2), (2, 4), (4, 5)]
+    assert _chunk_indices(6, 3) == [(0, 3), (3, 6)]
+
+
+def test_spectrum_frequency_batching_matches_default(
+    taper: tuple[list[mw.Cell], mw.Environment],
+) -> None:
+    """Distributing the frequency axis (wls_per_job) gives the same spectrum."""
+    cells, env = taper
+    wls = np.array([1.5, 1.55, 1.6, 1.65, 1.7])
+    kw = {"num_modes": NUM_MODES, "executor": ThreadPoolExecutor(max_workers=3)}
+    default = mw.compute_s_matrix_spectrum(cells, env, wls=wls, **kw)
+    # one job per (slice group x single wavelength) - the most distributed case
+    batched = mw.compute_s_matrix_spectrum(
+        cells, env, wls=wls, wls_per_job=1,
+        num_modes=NUM_MODES, executor=ThreadPoolExecutor(max_workers=3),
+    )
+    assert len(batched) == len(wls)
+    for (S_a, _), (S_b, _) in zip(default, batched, strict=True):
+        np.testing.assert_allclose(np.asarray(S_a), np.asarray(S_b), atol=1e-9)
+
+
+def test_spectrum_parallel_cascade_matches_serial(
+    taper: tuple[list[mw.Cell], mw.Environment],
+) -> None:
+    """Cascading the per-wavelength S-matrices in threads matches the serial path."""
+    cells, env = taper
+    wls = np.array([1.5, 1.55, 1.6, 1.65])
+    serial = mw.compute_s_matrix_spectrum(
+        cells, env, wls=wls, num_modes=NUM_MODES,
+        executor=ThreadPoolExecutor(max_workers=2),
+    )
+    parallel = mw.compute_s_matrix_spectrum(
+        cells, env, wls=wls, num_modes=NUM_MODES, cascade_workers=4,
+        executor=ThreadPoolExecutor(max_workers=2),
+    )
+    for (S_a, _), (S_b, _) in zip(serial, parallel, strict=True):
+        np.testing.assert_allclose(np.asarray(S_a), np.asarray(S_b), atol=1e-12)
+
+
+def test_spectrum_batching_and_cascade_via_slurm_handle(
+    taper: tuple[list[mw.Cell], mw.Environment],
+    tmp_path,  # noqa: ANN001
+) -> None:
+    """The persisted handle batches frequencies, reloads, and matches the spectrum."""
+    pytest.importorskip("submitit")
+    cells, env = taper
+    wls = np.array([1.5, 1.6, 1.7])
+    executor = mw.slurm_executor(
+        folder=str(tmp_path / "fb"), cluster="local", timeout_min=10
+    )
+    handle = mw.submit_s_matrix_spectrum(
+        cells, env, executor=executor, wls=wls, num_modes=NUM_MODES,
+        wls_per_job=1, cascade_workers=2,
+    )
+    # more jobs than slice groups now (one per group x wavelength)
+    assert len(handle.jobs) == len(mw.chunk_cell_indices(len(cells))) * len(wls)
+    reloaded = mw.ParallelEMESpectrumJobs.load(handle.save(tmp_path / "fb.pkl"))
+    got = reloaded.result()
+    ref = mw.compute_s_matrix_spectrum(
+        cells, env, wls=wls, num_modes=NUM_MODES,
+        executor=ThreadPoolExecutor(max_workers=2),
+    )
+    assert len(got) == len(wls)
+    for (S, _), (S_ref, _) in zip(got, ref, strict=True):
+        np.testing.assert_allclose(np.asarray(S), np.asarray(S_ref), atol=1e-9)
+
+
 def test_submit_cell_modes_keeps_fields_and_matches_serial(
     taper: tuple[list[mw.Cell], mw.Environment],
     serial_s_matrix: tuple,
