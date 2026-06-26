@@ -334,3 +334,91 @@ def make_differentiable_neffs(
 
     differentiable_neffs.defvjp(_fwd, _bwd)
     return differentiable_neffs
+
+
+def make_differentiable_objective(
+    objective: Callable[[np.ndarray], np.ndarray],
+    *,
+    shape: tuple[int, ...] = (),
+    step: float = 1e-3,
+) -> Callable[[Any], Any]:
+    """Wrap a real EME figure-of-merit as a ``jax``-differentiable function.
+
+    Returns a :func:`jax.custom_vjp` mapping a real parameter vector to a
+    **real** figure of merit (a scalar or array - e.g. transmission ``|S_ij|^2``,
+    a splitting ratio, an insertion loss). The forward runs your
+    (non-differentiable) ``objective`` via :func:`jax.pure_callback`; the backward
+    computes the **exact** ``d(objective)/dparams`` by central finite differences
+    of the *whole* solve. Because it differences the full solve, the gradient
+    captures **every** effect - propagation constants *and* mode-overlap /
+    interface sensitivities (the complete ``dS/dp`` contribution) - so
+    ``jax.grad`` of any composed objective just works.
+
+    Why a *real* figure of merit (not the complex S-matrix): each mode solve
+    returns modes with an arbitrary global phase, so the **complex** EME S-matrix
+    is gauge-inconsistent from one parameter value to the next and is *not* a
+    smooth function of the parameters - only gauge-invariant real quantities
+    (mode powers ``|S_ij|^2``, ratios, losses) are. Differencing those is well
+    posed; differencing the raw complex S is not.
+
+    Why finite differences (not an analytic overlap adjoint): an analytic
+    mode-overlap sensitivity via truncated guided-mode perturbation theory is
+    *not* accurate for high-index-contrast waveguides - the overlap change is
+    dominated by coupling to radiation/continuum modes outside any finite computed
+    basis (empirically ``~100%`` error, not converging with basis size). An exact
+    cheap overlap adjoint needs the discretized eigensolver's operator, which the
+    external FDE backends do not expose; differencing the full solve is therefore
+    the robust exact route. The tradeoff is cost: the backward re-solves
+    ``2 * n_params`` times, so this is the *exact* gradient for a modest number of
+    design parameters, while :func:`make_differentiable_neffs` is the *cheap*
+    (single-solve) gradient that is exact for propagation-constant-mediated
+    objectives.
+
+    Args:
+        objective: maps a parameter vector to a real, gauge-invariant figure of
+            merit of shape ``shape`` (computed from the EME solve, e.g. from
+            ``abs(S[...]) ** 2``).
+        shape: the shape of the returned figure of merit (``()`` for a scalar).
+        step: central-difference step for each parameter.
+
+    Returns:
+        A ``jax.custom_vjp`` callable ``f(params) -> fom`` of shape ``shape``.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    def _obj_np(params: np.ndarray) -> np.ndarray:
+        return np.asarray(objective(np.asarray(params, dtype=float)), dtype=float)
+
+    def _grad_np(params: np.ndarray, g: np.ndarray) -> np.ndarray:
+        params = np.asarray(params, dtype=float)
+        g = np.asarray(g, dtype=float)
+        grad = np.zeros(params.shape, dtype=float)
+        for k in range(params.size):
+            ep, em = np.array(params, dtype=float), np.array(params, dtype=float)
+            ep[k] += step
+            em[k] -= step
+            dobj = (_obj_np(ep) - _obj_np(em)) / (2.0 * step)
+            grad[k] = float(np.sum(g * dobj))
+        return grad
+
+    result = jax.ShapeDtypeStruct(shape, jnp.float64)
+
+    @jax.custom_vjp
+    def differentiable_objective(params: Any) -> Any:
+        return jax.pure_callback(_obj_np, result, params)
+
+    def _fwd(params: Any) -> tuple[Any, Any]:
+        return differentiable_objective(params), params
+
+    def _bwd(params: Any, cotangent: Any) -> tuple[Any]:
+        grad = jax.pure_callback(
+            _grad_np,
+            jax.ShapeDtypeStruct(jnp.shape(params), jnp.result_type(params)),
+            params,
+            cotangent,
+        )
+        return (grad,)
+
+    differentiable_objective.defvjp(_fwd, _bwd)
+    return differentiable_objective

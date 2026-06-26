@@ -125,3 +125,54 @@ def test_analytic_eps_jacobian_matches_fd() -> None:
     fd = (_neff_real(n0 + h) ** 2 - _neff_real(n0 - h) ** 2) / (2 * h)
     # hard-mask analytic eps Jacobian carries boundary-smoothing error (~10%)
     assert grad == pytest.approx(fd, rel=0.1)
+
+
+def _step_transmission(params: np.ndarray) -> float:
+    """|S(right@0, left@0)|^2 of a 2-cell butt-coupled step (input width=params[0]).
+
+    A strong width step (params[0] -> 0.9 um) gives significant mode mismatch, so
+    the transmission varies strongly with the parameter - a robust, gauge-
+    invariant figure of merit for the gradient comparison.
+    """
+    w0 = float(params[0])
+    widths = (w0, 0.9)
+    mesh = mw.Mesh2D(x=np.linspace(-1.2, 1.2, 81), y=np.linspace(-0.5, 0.72, 41))
+    structs = [
+        mw.Structure(
+            material=mw.IndexMaterial(name="si", n=3.45),
+            geometry=mw.Box(
+                x_min=-w / 2, x_max=w / 2, y_min=0.0, y_max=0.22,
+                z_min=2.0 * i, z_max=2.0 * (i + 1),
+            ),
+        )
+        for i, w in enumerate(widths)
+    ]
+    cells = [
+        mw.Cell(structures=structs, mesh=mesh, z_min=2.0 * i, z_max=2.0 * (i + 1))
+        for i in range(len(widths))
+    ]
+    env = mw.Environment(wl=1.55)
+    css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
+    modes = [mw.compute_modes(cs, num_modes=1) for cs in css]
+    s_mat, _pm = mw.compute_s_matrix(modes, cells=cells)
+    return float(np.abs(np.asarray(s_mat)[1, 0]) ** 2)
+
+
+def test_differentiable_objective_grad_matches_fd() -> None:
+    """jax.grad of a (gauge-invariant) EME transmission FoM matches direct FD.
+
+    make_differentiable_objective differences the whole solve, so the gradient
+    includes the mode-overlap/interface sensitivities (the full dS/dp), not just
+    the neffs - and it composes with jax.
+    """
+    step = 5e-3
+    f = mw.make_differentiable_objective(_step_transmission, shape=(), step=step)
+    w0 = 0.30
+    grad = float(jax.grad(f)(jnp.array([w0]))[0])
+
+    fd = (
+        _step_transmission(np.array([w0 + step]))
+        - _step_transmission(np.array([w0 - step]))
+    ) / (2 * step)
+    assert grad == pytest.approx(fd, rel=1e-6, abs=1e-9)  # the backward IS this FD
+    assert abs(grad) > 0.1  # the strong step gives an O(1), non-flat gradient

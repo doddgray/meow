@@ -41,6 +41,15 @@ class CrossSection(BaseModel):
         default=True,
         description="use subpixel smoothing at interfaces; if False: winner-takes-all",
     )
+    smoothing_method: Literal["axis", "kottke"] = Field(
+        default="axis",
+        description=(
+            "subpixel-smoothing scheme: 'axis' (per-component arithmetic/harmonic, "
+            "the default) or 'kottke' (Farjadpour/Kottke tensor smoothing using the "
+            "interface normal - second-order accurate for tilted interfaces; "
+            "isotropic/diagonal materials only)"
+        ),
+    )
     _cell: Cell | None = PrivateAttr(default=None)
 
     @classmethod
@@ -50,6 +59,7 @@ class CrossSection(BaseModel):
         cell: Cell,
         env: Environment,
         subpixel_smoothing: bool = True,
+        smoothing_method: Literal["axis", "kottke"] = "axis",
     ) -> Self:
         """Create a CrossSection from a Cell and Environment."""
         obj = cls(
@@ -57,6 +67,7 @@ class CrossSection(BaseModel):
             mesh=cell.mesh,
             env=env,
             subpixel_smoothing=subpixel_smoothing,
+            smoothing_method=smoothing_method,
         )
         # keep a handle on the originating cell so the (geometry-only) subpixel
         # smoothing plan can be cached there and reused across a wavelength sweep
@@ -142,38 +153,48 @@ class CrossSection(BaseModel):
             cell._cache[key] = plan
         return plan
 
+    def _kottke_plan_for(self, component: Literal["x", "y", "z"]) -> _KottkePlan:
+        """The (cell-cached) wavelength-independent Kottke smoothing plan."""
+        cell = self._cell
+        key = f"_kottke_plan_{component}"
+        if cell is not None and key in cell._cache:
+            return cell._cache[key]
+        plan = _kottke_plan(
+            self.mesh, self._m_full, self.materials, self.structures, component
+        )
+        if cell is not None:
+            cell._cache[key] = plan
+        return plan
+
+    def _smoothed_n(self, component: Literal["x", "y", "z"]) -> ComplexArray2D:
+        """Smoothed index on a component's Yee positions (dispatch on method)."""
+        if not self.subpixel_smoothing:
+            return _compute_winner_takes_all_n(
+                self.mesh, self._m_full, self.materials, self.env, self.structures,
+                component,
+            )
+        if self.smoothing_method == "kottke":
+            return _assemble_kottke(
+                self._kottke_plan_for(component), self.materials, self.env, component
+            )
+        return _assemble_smoothed_n(
+            self._smoothing_plan_for(component), self.materials, self.env, component
+        )
+
     @cached_property
     def nx(self) -> ComplexArray2D:
         """Return the smoothed refractive index on the Ex positions."""
-        if self.subpixel_smoothing:
-            return _assemble_smoothed_n(
-                self._smoothing_plan_for("x"), self.materials, self.env, "x"
-            )
-        return _compute_winner_takes_all_n(
-            self.mesh, self._m_full, self.materials, self.env, self.structures, "x"
-        )
+        return self._smoothed_n("x")
 
     @cached_property
     def ny(self) -> ComplexArray2D:
         """Return the smoothed refractive index on the Ey positions."""
-        if self.subpixel_smoothing:
-            return _assemble_smoothed_n(
-                self._smoothing_plan_for("y"), self.materials, self.env, "y"
-            )
-        return _compute_winner_takes_all_n(
-            self.mesh, self._m_full, self.materials, self.env, self.structures, "y"
-        )
+        return self._smoothed_n("y")
 
     @cached_property
     def nz(self) -> ComplexArray2D:
         """Return the smoothed refractive index on the Ez positions."""
-        if self.subpixel_smoothing:
-            return _assemble_smoothed_n(
-                self._smoothing_plan_for("z"), self.materials, self.env, "z"
-            )
-        return _compute_winner_takes_all_n(
-            self.mesh, self._m_full, self.materials, self.env, self.structures, "z"
-        )
+        return self._smoothed_n("z")
 
     @cached_property
     def eps_xy(self) -> ComplexArray2D:
@@ -673,6 +694,138 @@ def _compute_smoothed_n(
     if plan is None:
         plan = _smoothing_plan(mesh, m_full, materials, structures, component)
     return _assemble_smoothed_n(plan, materials, env, component)
+
+
+# ==========================================================================
+# Kottke / Farjadpour tensor subpixel smoothing (opt-in, 2nd-order accurate)
+# ==========================================================================
+@dataclass
+class _KottkePlan:
+    """Wavelength-independent plan for Kottke tensor subpixel smoothing.
+
+    Extends :class:`_SmoothingPlan` with the interface *normal* at each interface
+    pixel, computed from the gradient of a material fill-fraction field. The
+    Kottke (Farjadpour 2006 / Kottke 2008) effective-permittivity tensor averages
+    harmonically along the interface normal and arithmetically tangentially, as a
+    full tensor - second-order accurate even for tilted interfaces, unlike the
+    axis-aligned arithmetic/harmonic choice.
+    """
+
+    base: _SmoothingPlan
+    n_x: np.ndarray = field(default_factory=lambda: np.empty(0))
+    n_y: np.ndarray = field(default_factory=lambda: np.empty(0))
+    eligible: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=bool))
+
+
+def _fraction_fields(
+    mesh: Mesh2D,
+    structures: list[Structure2D],
+    materials: dict[Material, int],
+    component: Literal["x", "y", "z"],
+) -> tuple[dict[int, np.ndarray], np.ndarray, np.ndarray]:
+    """Per-material area-fraction field on the full component grid (+ its coords)."""
+    x_lo, x_hi, y_lo, y_hi = _dual_cell_bounds(mesh, component)
+    xc = 0.5 * (x_lo + x_hi)
+    yc = 0.5 * (y_lo + y_hi)
+    xlo, ylo = np.meshgrid(x_lo, y_lo, indexing="ij")
+    xhi, yhi = np.meshgrid(x_hi, y_hi, indexing="ij")
+    boxes = shapely.box(xlo.ravel(), ylo.ravel(), xhi.ravel(), yhi.ravel())
+    areas = shapely.area(boxes)
+    polys = _effective_material_polygons(structures, materials)
+    fields = {}
+    for idx, poly in polys.items():
+        frac = shapely.area(shapely.intersection(poly, boxes)) / areas
+        fields[idx] = frac.reshape(xlo.shape)
+    return fields, xc, yc
+
+
+def _kottke_plan(
+    mesh: Mesh2D,
+    m_full: IntArray2D,
+    materials: dict[Material, int],
+    structures: list[Structure2D],
+    component: Literal["x", "y", "z"],
+) -> _KottkePlan:
+    """Compute the (wavelength-independent) Kottke plan: base plan + normals."""
+    base = _smoothing_plan(mesh, m_full, materials, structures, component)
+    if not base.has_interface:
+        return _KottkePlan(base=base)
+    fields, xc, yc = _fraction_fields(mesh, structures, materials, component)
+    ii, jj = base.ii, base.jj
+    # the interface normal is the gradient of the fill-fraction field of whichever
+    # material has the steepest boundary at the pixel (sign is irrelevant: the
+    # tensor uses n_i n_j); pick that material per pixel
+    best_mag = np.zeros(len(ii))
+    n_x = np.zeros(len(ii))
+    n_y = np.zeros(len(ii))
+    for fld in fields.values():
+        gx, gy = np.gradient(fld, xc, yc)
+        gmag = np.hypot(gx[ii, jj], gy[ii, jj])
+        take = gmag > best_mag
+        best_mag[take] = gmag[take]
+        n_x[take] = gx[ii, jj][take]
+        n_y[take] = gy[ii, jj][take]
+    norm = np.hypot(n_x, n_y)
+    eligible = norm > 1e-9
+    safe_norm = np.where(eligible, norm, 1.0)
+    return _KottkePlan(
+        base=base, n_x=n_x / safe_norm, n_y=n_y / safe_norm, eligible=eligible
+    )
+
+
+def _assemble_kottke(
+    plan: _KottkePlan,
+    materials: dict[Material, int],
+    env: Environment,
+    component: Literal["x", "y", "z"],
+) -> ComplexArray2D:
+    """Assemble the (diagonal) Kottke-smoothed index for a component.
+
+    Each interface pixel uses the **normal-projected** effective permittivity
+    ``eps_ii = eps_p + (eps_n - eps_p) n_i^2``, where ``eps_p`` is the arithmetic
+    (tangential) and ``eps_n`` the harmonic (normal) average and ``n`` is the
+    interface normal. This is the diagonal of the Kottke/Farjadpour tensor; it
+    is continuous in the interface orientation (unlike the axis-aligned
+    harmonic/arithmetic switch), giving second-order accuracy for tilted
+    interfaces while staying diagonal-anisotropic so the default (base tidy3d)
+    solver can use it.
+
+    The full Kottke tensor additionally carries an off-diagonal
+    ``eps_xy = (eps_n - eps_p) n_x n_y``; that makes the medium fully anisotropic
+    and needs the tensorial solver (``tidy3d-extras``), so it is omitted here.
+    """
+    base = plan.base
+    env_eps = np.complex128(1.0) ** 2
+    eps = np.full_like(base.m_comp, env_eps, dtype=np.complex128)
+    mat_eps: dict[int, complex] = {0: env_eps}
+    for material, idx in materials.items():
+        e = _material_eps_component(material, env, component, component)
+        eps[base.m_comp == idx] = e
+        mat_eps[idx] = e
+    if not base.has_interface:
+        return np.sqrt(eps)
+
+    ii, jj = base.ii, base.jj
+    # arithmetic (tangential) and harmonic (normal) averages at interface pixels
+    eps_p = np.zeros(len(ii), dtype=np.complex128)
+    inv = np.zeros(len(ii), dtype=np.complex128)
+    for idx, frac in base.fractions.items():
+        eps_p += frac * mat_eps[idx]
+        if abs(mat_eps[idx]) > 0:
+            inv += frac / mat_eps[idx]
+    safe = np.abs(inv) > 1e-30
+    eps_n = np.where(safe, 1.0 / np.where(safe, inv, 1.0), eps_p)
+
+    if component == "z":
+        # Ez is parallel to any in-plane interface -> arithmetic (tangential)
+        eps[ii, jj] = eps_p
+        return np.sqrt(eps)
+
+    n_par = plan.n_x if component == "x" else plan.n_y
+    kottke_diag = eps_p + (eps_n - eps_p) * n_par**2
+    axis_diag = np.where(base.use_harmonic, eps_n, eps_p)
+    eps[ii, jj] = np.where(plan.eligible, kottke_diag, axis_diag)
+    return np.sqrt(eps)
 
 
 def _compute_winner_takes_all_n(
