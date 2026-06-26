@@ -178,6 +178,39 @@ def bench_gradient_cost(n_params: int = 4) -> dict[str, float]:
             "speedup": t_fd / t_adj}
 
 
+def bench_eigvec_adjoint() -> dict[str, float]:
+    """Exact eigenvector sensitivity: deflated solve vs finite-difference re-solve.
+
+    Per design parameter, the deflated bordered solve is a single sparse linear
+    solve on the assembled operator, whereas a finite-difference eigenvector
+    needs two sparse *eigensolves* - so the adjoint is markedly cheaper per
+    parameter (and the gap widens with the number of parameters).
+    """
+    from scipy.sparse.linalg import eigsh
+
+    from meow.fde import sparse
+
+    npx = 81 if FAST else 161
+    x = np.linspace(-1.5, 1.5, npx)
+    y = np.linspace(-1.0, 1.0, npx)
+    xx, yy = np.meshgrid(x, y)
+    n = np.where((np.abs(xx) < 0.25) & (yy > 0) & (yy < 0.22), 3.45, 1.444)
+    a_op, k0 = sparse.scalar_operator(n, x, y, 1.55)
+    vals, vecs = eigsh(a_op, k=1, sigma=(k0 * float(n.max())) ** 2, which="LM")
+    deps = (2.0 * 3.45 * ((np.abs(xx) < 0.25) & (yy > 0) & (yy < 0.22))).ravel()
+
+    def adjoint() -> None:
+        sparse.eigenvector_sensitivity(a_op, vals[0], vecs[:, 0], deps, k0)
+
+    def fd_resolve() -> None:  # the FD eigenvector cost: two eigensolves
+        for _ in range(2):
+            eigsh(a_op, k=1, sigma=(k0 * float(n.max())) ** 2, which="LM")
+
+    t_adj = _timed(adjoint, repeat=3)
+    t_fd = _timed(fd_resolve, repeat=3)
+    return {"adjoint_s": t_adj, "fd_resolve_s": t_fd, "speedup": t_fd / t_adj}
+
+
 def main() -> dict[str, Any]:
     """Run all benchmarks, print a summary and save a scaling plot."""
     FIGDIR.mkdir(parents=True, exist_ok=True)
@@ -185,6 +218,7 @@ def main() -> dict[str, Any]:
     sd = bench_sparse_vs_dense()
     kottke = bench_kottke_overhead()
     grad = bench_gradient_cost()
+    adj = bench_eigvec_adjoint()
 
     print("\n=== smoothing cache (wavelength sweep) ===")
     print(f"  rebuilt {cache['rebuilt_s']:.3f}s  cached {cache['cached_s']:.3f}s  "
@@ -195,6 +229,9 @@ def main() -> dict[str, Any]:
     print(f"=== gradient cost ({int(grad['n_params'])} params) ===")
     print(f"  adjoint {grad['adjoint_s']:.3f}s  finite-diff {grad['fd_s']:.3f}s  "
           f"-> {grad['speedup']:.1f}x faster")
+    print("=== eigenvector adjoint (per parameter) ===")
+    print(f"  deflated solve {adj['adjoint_s']:.4f}s  FD re-solve "
+          f"{adj['fd_resolve_s']:.4f}s  -> {adj['speedup']:.1f}x faster")
     print("=== sparse vs dense solve (runtime [s] by grid points) ===")
     for n, d, s in zip(sd["npts"], sd["dense_s"], sd["sparse_s"], strict=True):
         print(f"  {n:>7d} pts: dense {d:.3f}s  sparse {s:.3f}s")
@@ -211,7 +248,7 @@ def main() -> dict[str, Any]:
     fig.savefig(out, dpi=130)
     plt.close(fig)
     return {"cache": cache, "sparse_dense": sd, "kottke": kottke, "gradient": grad,
-            "figure": str(out)}
+            "eigvec_adjoint": adj, "figure": str(out)}
 
 
 if __name__ == "__main__":
