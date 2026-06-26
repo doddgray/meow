@@ -129,4 +129,25 @@ neff = sparse.scalar_neffs(cs, num_modes=1)[0]
 assembled operator maps directly onto a PETSc matrix for an MPI-distributed
 SLEPc solve on grids that exceed one node — the production extension for the
 fully-vectorial problem.
-"""
+
+### Exact eigenvector adjoint (operator access)
+
+Because `meow.fde.sparse` *owns* the operator, it can also give an **exact,
+cheap eigenvector/overlap sensitivity** — the piece the truncated-modal adjoint
+could not. `scalar_operator` returns the assembled `A`, and
+`eigenvector_sensitivity` solves the deflated/bordered system
+
+```text
+[ A − λI   v ] [ dv ]   [ −(dA/dp − dλ/dp I) v ]
+[ vᵀ       0 ] [ μ  ] = [           0          ]
+```
+
+for `dv/dp` from a single sparse linear solve per parameter (no second
+eigensolve, no truncated basis). On the same gauge-invariant overlap-power
+harness `G_i = Σ_j |⟨A_i|B_j⟩|²` that exposed the truncated-modal failure, this
+matches finite differences to `~1e-5` while the truncated prediction is ~100%
+off — and it is faster than a finite-difference eigenvector (one linear solve vs
+two eigensolves). This is exactly why "operator access" is the enabling
+condition for a cheap exact `dS/dp`; the same construction extends to the
+full-vector operator and to SLEPc (which has built-in eigenpair-derivative
+routines).
