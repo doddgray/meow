@@ -46,6 +46,43 @@ def _laplacian_1d(n: int, h: float) -> sp.csr_matrix:
     return sp.diags([off, main, off], [-1, 0, 1], format="csr") / (h * h)
 
 
+def scalar_operator(
+    n: np.ndarray, x: np.ndarray, y: np.ndarray, wl: float
+) -> tuple[sp.csc_matrix, float]:
+    """Assemble the sparse scalar Helmholtz operator ``A = L + k0^2 diag(n^2)``.
+
+    The eigenproblem ``A psi = beta^2 psi`` (``B = I``) is what
+    :func:`solve_scalar_modes` solves; exposing ``A`` directly is what enables an
+    exact eigenvector adjoint (:func:`eigenvector_sensitivity`) - the sensitivity
+    needs the operator, not the full spectrum.
+
+    Args:
+        n: real refractive-index distribution, shape ``(len(y), len(x))``.
+        x: x grid coordinates [um] (assumed ~uniform).
+        y: y grid coordinates [um] (assumed ~uniform).
+        wl: wavelength [um].
+
+    Returns:
+        ``(A, k0)`` - the operator as a CSC sparse matrix (row-major flattening,
+        ``index = iy * nx + ix``) and the vacuum wavenumber ``k0 = 2 pi / wl``.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n = np.asarray(n, dtype=float)
+    ny, nx = n.shape
+    if (ny, nx) != (y.size, x.size):
+        msg = f"n must have shape (len(y), len(x)) = {(y.size, x.size)}, got {n.shape}."
+        raise ValueError(msg)
+    hx = float(np.mean(np.diff(x)))
+    hy = float(np.mean(np.diff(y)))
+    k0 = 2.0 * np.pi / wl
+    lap = sp.kron(sp.identity(ny), _laplacian_1d(nx, hx)) + sp.kron(
+        _laplacian_1d(ny, hy), sp.identity(nx)
+    )
+    a_op = (lap + sp.diags(k0**2 * n.ravel() ** 2)).tocsc()
+    return a_op, k0
+
+
 def solve_scalar_modes(
     n: np.ndarray,
     x: np.ndarray,
@@ -75,23 +112,9 @@ def solve_scalar_modes(
         ``(neffs, fields)`` with ``neffs`` of shape ``(num_modes,)`` (descending)
         and ``fields`` of shape ``(num_modes, len(y), len(x))``.
     """
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
     n = np.asarray(n, dtype=float)
     ny, nx = n.shape
-    if (ny, nx) != (y.size, x.size):
-        msg = f"n must have shape (len(y), len(x)) = {(y.size, x.size)}, got {n.shape}."
-        raise ValueError(msg)
-    hx = float(np.mean(np.diff(x)))
-    hy = float(np.mean(np.diff(y)))
-    k0 = 2.0 * np.pi / wl
-
-    # 2D scalar Helmholtz operator: Laplacian + k0^2 n^2 (Dirichlet boundaries)
-    lap = sp.kron(sp.identity(ny), _laplacian_1d(nx, hx)) + sp.kron(
-        _laplacian_1d(ny, hy), sp.identity(nx)
-    )
-    a_op = (lap + sp.diags(k0**2 * n.ravel() ** 2)).tocsc()
-
+    a_op, k0 = scalar_operator(n, x, y, wl)
     target = float(np.max(n)) if target_neff is None else float(target_neff)
     sigma = (k0 * target) ** 2  # shift-invert around the target propagation const
     k = min(num_modes, a_op.shape[0] - 2)
@@ -102,6 +125,63 @@ def solve_scalar_modes(
     neffs = np.sqrt(np.clip(vals, 0.0, None)) / k0
     fields = vecs.T.reshape(k, ny, nx)
     return neffs, fields
+
+
+def eigenvector_sensitivity(
+    operator: sp.spmatrix,
+    eigenvalue: float,
+    eigenvector: np.ndarray,
+    deps: np.ndarray,
+    k0: float,
+) -> tuple[np.ndarray, float]:
+    r"""Exact eigenvector sensitivity ``dv/dp`` via a deflated linear solve.
+
+    For the real-symmetric eigenproblem ``A v = lambda v`` (``lambda = beta^2``,
+    ``A = L + k0^2 diag(eps)``, ``v`` unit-norm), a permittivity perturbation has
+    ``dA/dp = k0^2 diag(deps)`` and the eigenpair sensitivities are
+
+    - eigenvalue (Hellmann-Feynman): ``dlambda/dp = v^T (dA/dp) v``;
+    - eigenvector: solve ``(A - lambda I) dv = -(dA/dp - dlambda/dp I) v`` under
+      the normalization gauge ``v^T dv = 0``.
+
+    ``A - lambda I`` is singular (null vector ``v``), so this is done with the
+    nonsingular **bordered/deflated** system
+
+    .. code-block:: text
+
+        [ A - lambda I    v ] [ dv ]   [ -(dA/dp - dlambda/dp I) v ]
+        [ v^T             0 ] [ mu ] = [             0             ]
+
+    which needs only the operator, the single eigenpair and ``deps`` - no second
+    eigensolve and no truncated modal basis. Exact to machine precision (the
+    radiation/continuum content missed by a truncated guided-mode expansion is
+    captured because the full operator is inverted on the deflated subspace).
+
+    Args:
+        operator: the sparse operator ``A`` (e.g. from :func:`scalar_operator`).
+        eigenvalue: ``lambda = (k0 neff)^2`` of the mode.
+        eigenvector: the unit-norm mode field ``v`` (flattened like the operator).
+        deps: ``d(eps)/dp`` per grid point (same flattening as the operator).
+        k0: the vacuum wavenumber (so ``dA/dp = k0^2 diag(deps)``).
+
+    Returns:
+        ``(dv, dlambda)`` - the eigenvector sensitivity (gauge ``v^T dv = 0``) and
+        the eigenvalue sensitivity ``dlambda/dp``.
+    """
+    import scipy.sparse.linalg as spl
+
+    v = np.asarray(eigenvector, dtype=float).reshape(-1)
+    deps = np.asarray(deps, dtype=float).reshape(-1)
+    n_dof = v.size
+    da_v = (k0**2) * deps * v  # (dA/dp) v
+    dlambda = float(v @ da_v)  # Hellmann-Feynman v^T (dA/dp) v  (v^T v = 1)
+    rhs = -(da_v - dlambda * v)  # -(dA/dp - dlambda I) v
+
+    a_shift = sp.csc_matrix(operator) - eigenvalue * sp.identity(n_dof, format="csc")
+    v_col = sp.csc_matrix(v.reshape(n_dof, 1))
+    bordered = sp.bmat([[a_shift, v_col], [v_col.T, None]], format="csc")
+    sol = spl.spsolve(bordered, np.concatenate([rhs, [0.0]]))
+    return sol[:n_dof], dlambda
 
 
 def scalar_neffs(
