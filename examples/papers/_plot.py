@@ -2,11 +2,30 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import matplotlib.colors as mcolors
 import numpy as np
 from matplotlib.collections import PolyCollection
+
+
+def _poly_area(p: np.ndarray) -> float:
+    """Absolute polygon area (shoelace)."""
+    x, y = p[:, 0], p[:, 1]
+    return 0.5 * abs(float(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))))
+
+
+def _strip_thickness(p: np.ndarray) -> float:
+    """Approximate transverse thickness of a (long) waveguide strip.
+
+    For a strip running mostly along the propagation (x) axis, ``area / length``
+    recovers the local width even when the strip meanders (so its bounding box
+    is much taller than the waveguide is wide).
+    """
+    x = p[:, 0]
+    length = float(x.max() - x.min()) or 1.0
+    return _poly_area(p) / length
 
 
 def _component_polygons(component: Any) -> list[np.ndarray]:
@@ -37,54 +56,57 @@ def _shade(color: Any, factor: float) -> tuple[float, float, float]:
 def plot_component(
     component: Any,
     ax: Any,
-    color: str = "C3",
+    color: str | Sequence[str] = "C3",
     *,
+    sidewall_frac: float = 0.3,
+    skew: float = 0.25,
     depth: float | None = None,
-    skew: float = 0.35,
 ) -> None:
     """Draw a component's polygons as a 2.5D extruded layout (Magden-style).
 
-    Each waveguide footprint is rendered as a shallow prism: a muted-red (``C3``
-    by default) top face lifted by a *not-to-scale* height with shaded sidewalls
-    showing beneath it, evoking the angled-sidewall rib cross-section in an
-    oblique view (cf. Magden et al. 2018, Fig. 1). The vertical lift dominates
-    (the propagation axis is usually plotted far longer than the transverse one,
-    so an in-plane skew would be invisible); ``skew`` adds a small lateral shear
-    for a hint of perspective.
+    Each waveguide footprint is the muted top face (``C3`` muted red by default);
+    a darker, *thinner* sidewall band sits flush beneath it (a downward
+    drop-shadow), evoking the angled-sidewall rib seen in an oblique view (cf.
+    Magden et al. 2018, Fig. 1). The band is sized to a fraction of the
+    waveguide's own transverse thickness so it never gaps away from -- nor
+    overwhelms -- the top face, on both narrow and wide waveguides.
 
     Args:
         component: the gdsfactory component to draw.
         ax: the matplotlib axes to draw on.
-        color: top-face color (default matplotlib ``"C3"``, a muted red).
-        depth: extruded visual height in data (y) units; defaults to ~12% of the
-            drawn transverse extent (purely cosmetic, not to scale).
-        skew: lateral (x) shear of the lift, as a fraction of ``depth``.
+        color: top-face color(s). A single color (default ``"C3"``) applies to
+            every waveguide; pass a sequence to give each waveguide layer (in
+            polygon order, cycled) its own base color.
+        sidewall_frac: sidewall-band thickness as a fraction of the waveguide
+            thickness (~1/3 by default); the band is drawn flush below the top.
+        skew: small lateral (x) shear of the band, as a fraction of its depth,
+            for a hint of perspective.
+        depth: explicit band depth in data units (overrides ``sidewall_frac``).
     """
     polys = _component_polygons(component)
     if not polys:
         return
-    all_pts = np.vstack(polys)
-    y_span = float(all_pts[:, 1].max() - all_pts[:, 1].min()) or 1.0
-    if depth is None:
-        depth = 0.12 * y_span
-    lift = np.array([skew * depth, depth])  # screen offset from base to top face
+    colors = [color] * len(polys) if isinstance(color, str) else list(color)
+    colors = [colors[i % len(colors)] for i in range(len(polys))]
 
-    top_color = mcolors.to_rgb(color)
-    wall_color = _shade(color, 0.55)  # darker red sidewalls
+    if depth is None:
+        thick = float(np.median([_strip_thickness(p) for p in polys])) or 1.0
+        depth = sidewall_frac * thick
+    off = np.array([skew * depth, -depth])  # drop-shadow: flush below + slight side
 
     bases = [np.asarray(p, dtype=float) for p in polys]
-    tops = [b + lift for b in bases]
-
-    # draw the (darker) base body first; the lifted top face is drawn on top and
-    # offset, so the base peeks out below/aside it as a shaded sidewall band --
-    # a clean 2.5D extruded look without per-facet tiling seams.
+    # darker sidewall band first (footprint shifted down so it stays flush under
+    # the top face -- no gap), then the top face on top.
     ax.add_collection(
-        PolyCollection(bases, facecolors=[wall_color], edgecolors="none")
+        PolyCollection(
+            [b + off for b in bases],
+            facecolors=[_shade(c, 0.55) for c in colors], edgecolors="none",
+        )
     )
     ax.add_collection(
         PolyCollection(
-            tops, facecolors=[top_color], edgecolors=_shade(color, 0.4),
-            linewidths=0.3,
+            bases, facecolors=[mcolors.to_rgb(c) for c in colors],
+            edgecolors=[_shade(c, 0.4) for c in colors], linewidths=0.3,
         )
     )
     ax.autoscale_view()
