@@ -70,16 +70,30 @@ bar port).
   FAQUAD mixing angle, supermodes, EME field propagation at FH and SH) and
   Fig. 2 (extinction-ratio and loss spectra at FH and SH).
 
-Validation anchors (full-quality run): chi(0) = pi/2 and the Euler-S-bend
-gap/dTW vary smoothly with dTW returning to zero at the device ends; the FH
-input transfers adiabatically to the cross port (cross/bar = 0.89/0.07) while
-the SH stays in the bar port with 22-25 dB extinction across 755-795 nm
-(above the paper's > 19 dB); the FH loss is flat (~0.18 dB) across
-1500-1600 nm. The remaining gap to the paper's dB-level FH figures
-(> 25 dB FH extinction) is set by the example's EME discretization and by
-the difference between our FDE-calibrated coupling and the paper's; both
-improve with finer meshes,
-more cells and more modes.
+Bar/cross transmission is measured by projecting the EME output onto the
+*rib-guided* modes only (the shallow etch leaves the guided index just ~0.02-0.1
+above the slab, so the finite lateral window discretizes the slab continuum into
+a dense ladder of spurious box modes just below it). Summing those into the
+transmission -- as a naive "classify every output mode by the sign of its
+centroid" does -- conflates slab radiation with transmission and swings wildly
+with `num_modes`; counting only the modes above the slab index, summed per side,
+is stable and gives an honest `loss = 1 - bar - cross`.
+
+Validation anchors (converged run): chi(0) = pi/2 and the Euler-S-bend gap/dTW
+vary smoothly with dTW returning to zero at the device ends; the FH input
+transfers to the cross port with **cross ~ 0.92** and a few-percent (~0.4 dB)
+loss, while the SH stays in the bar port. Two device choices follow directly
+from the converged EME: the Euler S-bend angle is kept gentle (`theta_max =
+1 deg`, not 3 deg) because the weakly-guided rib radiates into the slab on
+steeper bends -- this cuts the FH radiation loss from ~50% to a few percent --
+and the constant-gap length is shortened (`l_m = 120 um`) because, while the FH
+cross transfer peaks near `l_m ~ 150 um`, the SH extinction *degrades* with
+length (the weakly-coupled SH mode leaks more into the cross port the longer the
+device). The SH cross-port leakage is itself resolution-dependent, so the
+converged SH extinction (a few-x / ~7 dB) is more modest than a coarse run
+suggests. Reaching the paper's dB-level FH/SH figures is a genuine
+multi-objective device optimization (bend angle, length, minimum gap, and a
+finer SH mesh), beyond the scope of this reproduction.
 
 ## Generalized dichroic beam-splitter designer
 

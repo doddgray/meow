@@ -64,16 +64,30 @@ G_C = 1.20
 G_F = 3.0
 """Final gap between the output ports."""
 
-L_M = 264.0
-"""Constant-gap (Region I) length [um] (paper Sec. 2, final design)."""
+L_M = 120.0
+"""Constant-gap (Region I) length [um].
 
-THETA_MAX_DEG = 3.0
+Set from a converged-EME dichroic sweep. The device is multi-objective: the
+FH cross transfer is coupler-like in ``l_m`` (it peaks near ``l_m ~ 150 um``
+where the accumulated FH coupling completes the supermode swap), while the SH
+extinction *degrades* with length (a longer device gives the weakly-coupled SH
+mode more length to leak into the cross port). ``120 um`` trades a little FH
+cross (~0.92 vs a ~0.96 peak) for the best SH bar/cross contrast. (The paper's
+nominal value is longer; this reproduction optimizes the modeled stack, whose
+FDE-calibrated coupling differs from the paper's.)
+"""
+
+THETA_MAX_DEG = 1.0
 """Maximum waveguide-axis angle of the Euler S-bend separation [deg].
 
 The lateral separation that opens the gap from ``g_m`` to ``g_f`` is realized
 with Euler (clothoid) S-bends whose tangent angle rises smoothly from zero to
 this maximum (relative to the propagation/horizontal axis) at the inflection
-and back to zero, giving curvature-continuous, low-loss routing.
+and back to zero, giving curvature-continuous routing. It is kept small
+(``1 deg``): the shallow-etched rib mode sits only ~0.02 in index above the
+slab, so a steeper bend angle (the original ``3 deg``) radiates the guided mode
+into the slab continuum -- converged EME shows that dropping 3 deg -> 1 deg cuts
+the slab radiation loss from ~50% to a few percent.
 """
 
 T_BOX = 1.2
@@ -564,6 +578,68 @@ def device_cells(
     return mw.create_cells(structs, device_mesh(res), Ls, z_min=0.0)
 
 
+def _mode_centroid(mode: mw.Mode) -> float:
+    """Lateral (x) energy centroid of a mode's dominant field component."""
+    density = np.abs(mode.Ex) ** 2
+    return float(np.sum(mode.cs.mesh.Xx * density) / np.sum(density))
+
+
+_NEFF_MARGIN = 0.005
+"""Index margin above the slab continuum for a mode to count as rib-guided."""
+
+
+def slab_neff(
+    wl: float, cell: mw.Cell, *, compute_modes: Callable | None = None
+) -> float:
+    """Effective index of the bare TFLN-slab continuum on a cell's mesh.
+
+    Solves the background-only cross-section (SiO2 box + 200 nm LN slab, no
+    ribs) on the *same* mesh as ``cell``, so the returned ``neff`` is the top
+    of the slab/box-mode ladder. Rib-guided modes are exactly those above it --
+    this is the threshold that separates real bar/cross transmission from the
+    spurious slab modes the hard-wall lateral window discretizes the slab
+    continuum into (the shallow etch leaves the guided index only ~0.02-0.1
+    above the slab).
+    """
+    solver = compute_modes or mw.compute_modes
+    x = np.asarray(cell.mesh.x)
+    structs = _background(wl, cell.z_max, x_span=(float(x.min()), float(x.max())))
+    scell = mw.create_cells(
+        structs, cell.mesh, np.array([cell.z_max - cell.z_min]), z_min=cell.z_min
+    )[0]
+    cs = mw.CrossSection.from_cell(cell=scell, env=mw.Environment(wl=wl, T=25.0))
+    return max(float(np.real(m.neff)) for m in solver(cs, num_modes=2))
+
+
+def rib_guided_indices(modes: list[mw.Mode], slab_index: float) -> list[int]:
+    """Indices of the rib-guided modes (``neff`` above the slab continuum).
+
+    Every other solved mode is a slab/box mode of the finite simulation window
+    and carries radiation, not bar/cross power. The ribs are single-mode at the
+    fundamental (FH) but multimode at the second harmonic (SH), so this returns
+    *all* guided modes -- the transmission sums over them per side, which is
+    what makes the metric stable in ``num_modes`` and correct at both bands.
+    """
+    return [
+        i
+        for i, m in enumerate(modes)
+        if float(np.real(m.neff)) > slab_index + _NEFF_MARGIN
+    ]
+
+
+def input_launch_index(modes: list[mw.Mode], slab_index: float) -> int:
+    """Index of the guided fundamental of waveguide B (the device input port).
+
+    Waveguide B is drawn at negative x, so the launch mode is the highest-index
+    rib-guided mode whose energy centroid is negative (falling back to the
+    global fundamental if none qualifies).
+    """
+    guided = rib_guided_indices(modes, slab_index)
+    left = [i for i in guided if _mode_centroid(modes[i]) < 0]
+    pool = left or guided or list(range(len(modes)))
+    return max(pool, key=lambda i: float(np.real(modes[i].neff)))
+
+
 def bar_cross_transmission(
     cells: list[mw.Cell],
     wl: float,
@@ -572,11 +648,21 @@ def bar_cross_transmission(
     parallel: bool | None = None,
     compute_modes: Callable | None = None,
 ) -> tuple[float, float]:
-    """(bar, cross) power for the fundamental TE mode injected in port B.
+    """(bar, cross) power for the guided TE mode injected in port B.
 
-    The input fundamental mode of the asymmetric input cross-section is the
-    one localized in waveguide B (negative x); transmission is classified by
-    the lateral energy centroid of the output modes.
+    The input is the guided fundamental localized in waveguide B (negative x).
+    Transmission is the EME power coupled from it into the *rib-guided* output
+    modes (:func:`rib_guided_indices`), summed per side: the bar port collects
+    the negative-x modes (waveguide B), the cross port the positive-x modes
+    (waveguide A). Summing every guided mode -- not just the fundamental --
+    matters at the second harmonic, where the ribs are multimode. Power that
+    ends up in the spurious slab/box modes of the finite window is radiation
+    **loss**, so ``1 - bar - cross`` is the physical loss.
+
+    Counting only the rib-guided modes (by an explicit slab-index threshold) is
+    what makes the metric stable: summing *every* output mode by the sign of its
+    centroid instead conflates slab radiation with transmission and swings
+    wildly as more slab modes are resolved with ``num_modes``.
 
     The EME S-matrix is cascaded serially or, if ``parallel`` (or the
     ``MEOW_PAPER_PARALLEL`` environment variable) is set, with the parallel
@@ -601,18 +687,17 @@ def bar_cross_transmission(
     modes_in = solver(cs_in, num_modes=num_modes)
     modes_out = solver(cs_out, num_modes=num_modes)
 
-    def centroid(mode: mw.Mode) -> float:
-        density = np.abs(mode.Ex) ** 2
-        return float(np.sum(mode.cs.mesh.Xx * density) / np.sum(density))
+    slab_in = slab_neff(wl, cells[0], compute_modes=solver)
+    slab_out = slab_neff(wl, cells[-1], compute_modes=solver)
+    in_idx = input_launch_index(modes_in, slab_in)
 
-    in_idx = min(
-        range(min(2, len(modes_in))), key=lambda i: centroid(modes_in[i])
-    )  # input mode in waveguide B (bottom, drawn at negative x)
+    def power(i: int) -> float:
+        return float(np.abs(S[pm[f"right@{i}"], pm[f"left@{in_idx}"]]) ** 2)
+
     t_bar = t_cross = 0.0
-    for i, mode in enumerate(modes_out):
-        power = float(np.abs(S[pm[f"right@{i}"], pm[f"left@{in_idx}"]]) ** 2)
-        if centroid(mode) < 0:
-            t_bar += power
+    for i in rib_guided_indices(modes_out, slab_out):
+        if _mode_centroid(modes_out[i]) < 0:
+            t_bar += power(i)
         else:
-            t_cross += power
+            t_cross += power(i)
     return t_bar, t_cross

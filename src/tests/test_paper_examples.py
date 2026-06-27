@@ -766,10 +766,12 @@ def test_sh_stays_in_bar_port(calibration: tuple[float, float, float]) -> None:
     """
     c = kw.faquad_combiner(*calibration)
     cells = kw.device_cells(c, 0.775, num_cells=10, res=0.06)
-    t_bar, t_cross = kw.bar_cross_transmission(cells, 0.775, num_modes=3)
-    # at this very coarse test resolution most of the SH power is lost to
-    # discretization, but the bar/cross contrast remains well over an order
-    # of magnitude (the full-resolution figures show > 30 dB extinction)
+    t_bar, t_cross = kw.bar_cross_transmission(cells, 0.775, num_modes=6)
+    # bar/cross is measured by projecting onto the *rib-guided* modes (the slab
+    # continuum is excluded), summed per side. At this very coarse resolution
+    # the SH bar/cross contrast is strong; note that the converged SH extinction
+    # is more modest (a few-x / ~7 dB), as the SH cross-port leakage is itself
+    # resolution-dependent and only fully resolves on a finer mesh.
     assert t_bar > 20 * t_cross
 
 
@@ -977,9 +979,9 @@ def test_ramadan1998_analytic_design_rules() -> None:
     null = np.pi / kappa  # first null length
     assert ram.q_region2(null, kappa_ii=kappa, x_iio=0.66) < 1e-9
     peak_len = 1500.0
-    assert ram.q_region2(peak_len, kappa_ii=kappa, x_iio=0.66) <= ram.q_region2_envelope(
+    assert ram.q_region2(
         peak_len, kappa_ii=kappa, x_iio=0.66
-    )
+    ) <= ram.q_region2_envelope(peak_len, kappa_ii=kappa, x_iio=0.66)
     # eq (28)/(29): 3 dB scales as 1/eps, full as 1/sqrt(eps); 3 dB is longer
     l_3db = ram.length_3db_optimum(0.01, kappa)
     l_full = ram.length_full_optimum(0.01, kappa)

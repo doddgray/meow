@@ -39,7 +39,9 @@ from examples.papers.kwolek2026_faquad import (
     calibrate,
     device_cells,
     faquad_combiner,
+    input_launch_index,
     rib_structures,
+    slab_neff,
 )
 
 gf.gpdk.PDK.activate()
@@ -53,9 +55,17 @@ WL_SH = 0.775
 # already give a converged reproduction; high pushes the mode-solver grid
 # (RES), the number of EME cells (NUM_CELLS) and the modes per cross-section
 # (NUM_MODES) further still.
-RES = pick(low=0.06, medium=0.02, high=0.015)
-NUM_CELLS = _resolution.num_cells(low=12, medium=120)  # high -> 128
-NUM_MODES = _resolution.num_modes(low=3, medium=6)  # high -> 8
+# The combiner is a weakly-guided shallow-etched rib whose mode sits only
+# ~0.02-0.1 in index above the slab continuum, so the EME needs a fairly fine
+# transverse mesh and -- crucially -- enough modes per cross-section to both
+# resolve the guided fundamental(s) and carry the slab radiation in the cascade
+# (too few modes makes the cascade non-unitary and the transmission spurious).
+# The laterally-separating waveguides also need many cells to avoid staircase
+# misalignment loss. The medium values give a converged, power-consistent
+# reproduction; low is a coarse-but-quick look.
+RES = pick(low=0.05, medium=0.025, high=0.018)
+NUM_CELLS = _resolution.num_cells(low=64, medium=150, high=200)
+NUM_MODES = _resolution.num_modes(low=8, medium=12, high=16)
 
 
 def _show(fig: plt.Figure) -> None:
@@ -141,11 +151,9 @@ def figure1() -> dict[str, float]:
         css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
         modes = [BACKEND(cs, num_modes=NUM_MODES) for cs in css]
 
-        def centroid(mode: mw.Mode) -> float:
-            d = np.abs(mode.Ex) ** 2
-            return float(np.sum(mode.cs.mesh.Xx * d) / np.sum(d))
-
-        in_idx = min(range(2), key=lambda k: centroid(modes[0][k]))
+        in_idx = input_launch_index(  # launch the guided B (bar) mode
+            modes[0], slab_neff(wl, cells[0], compute_modes=BACKEND)
+        )
         ex_l = np.zeros(len(modes[0]))
         ex_l[in_idx] = 1.0
         ex_r = np.zeros(len(modes[-1]))
@@ -181,7 +189,8 @@ def figure1() -> dict[str, float]:
 
     fig.suptitle(
         "Kwolek 2026, Fig. 1: FAQUAD-optimized TFLN wavelength combiner "
-        f"(FH cross = {results['cross_FH']:.3f}, SH bar = {results['bar_SH']:.3f})"
+        f"(FH cross = {results['cross_FH']:.3f}, SH bar = {results['bar_SH']:.3f}; "
+        f"{_resolution.level()}-res)"
     )
     fig.tight_layout()
     fig.savefig(FIGDIR / "kwolek2026_fig1.png", dpi=150)
@@ -242,7 +251,10 @@ def figure2() -> dict[str, float]:
     axes[2].set_title("Fig. 2c: total loss")
     axes[2].grid(visible=True)
 
-    fig.suptitle("Kwolek 2026, Fig. 2: simulated combiner performance (EME)")
+    fig.suptitle(
+        "Kwolek 2026, Fig. 2: simulated combiner performance (EME); "
+        f"{_resolution.level()}-res (SH extinction is optimistic until converged)"
+    )
     fig.tight_layout()
     fig.savefig(FIGDIR / "kwolek2026_fig2.png", dpi=150)
     _show(fig)
