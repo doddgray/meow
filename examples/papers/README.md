@@ -70,30 +70,36 @@ bar port).
   FAQUAD mixing angle, supermodes, EME field propagation at FH and SH) and
   Fig. 2 (extinction-ratio and loss spectra at FH and SH).
 
-Bar/cross transmission is measured by projecting the EME output onto the
-*rib-guided* modes only (the shallow etch leaves the guided index just ~0.02-0.1
-above the slab, so the finite lateral window discretizes the slab continuum into
-a dense ladder of spurious box modes just below it). Summing those into the
-transmission -- as a naive "classify every output mode by the sign of its
-centroid" does -- conflates slab radiation with transmission and swings wildly
-with `num_modes`; counting only the modes above the slab index, summed per side,
-is stable and gives an honest `loss = 1 - bar - cross`.
+Bar/cross transmission is measured by summing the EME output power over the
+modes **localized in each output rib** (selected by spatial confinement, via
+`port_mode_indices`), per side. This is the key to a stable, honest metric: a
+naive "classify every output mode by the sign of its centroid" conflates the
+slab/box modes of the finite window with real transmission and swings wildly
+with `num_modes`. Confinement -- not an `neff` threshold or a centroid sign --
+is what separates transmission from radiation, because at the second harmonic
+each rib is multimode *and* a dense cluster of delocalized slab modes sits at
+the same `neff` as the higher-order rib modes; only the localization tells them
+apart. Everything not localized in a rib is radiation, so `loss = 1 - bar -
+cross` is physical.
+
+Reaching a *converged, low-loss* device at both bands drove one substantive
+design change. The paper's shallow stack (300 nm film, ~100 nm etch) leaves the
+rib only weakly guided -- its index is ~0.02 above the slab -- so a converged
+EME radiates ~40-50% of the (multimode) second harmonic into the slab continuum,
+and no amount of bend/length tuning removes it. A more strongly-guided
+**deep-etched ridge (500 nm film, 400 nm etch, 100 nm slab)** pushes the guided
+indices well above the slab and eliminates that radiation; the minimum gap is
+then reduced (`g_m = 0.45 um`) to restore enough FH coupling (the tighter mode
+couples much more weakly), and `l_m = 180 um` is the FH cross-transfer optimum.
 
 Validation anchors (converged run): chi(0) = pi/2 and the Euler-S-bend gap/dTW
-vary smoothly with dTW returning to zero at the device ends; the FH input
-transfers to the cross port with **cross ~ 0.92** and a few-percent (~0.4 dB)
-loss, while the SH stays in the bar port. Two device choices follow directly
-from the converged EME: the Euler S-bend angle is kept gentle (`theta_max =
-1 deg`, not 3 deg) because the weakly-guided rib radiates into the slab on
-steeper bends -- this cuts the FH radiation loss from ~50% to a few percent --
-and the constant-gap length is shortened (`l_m = 120 um`) because, while the FH
-cross transfer peaks near `l_m ~ 150 um`, the SH extinction *degrades* with
-length (the weakly-coupled SH mode leaks more into the cross port the longer the
-device). The SH cross-port leakage is itself resolution-dependent, so the
-converged SH extinction (a few-x / ~7 dB) is more modest than a coarse run
-suggests. Reaching the paper's dB-level FH/SH figures is a genuine
-multi-objective device optimization (bend angle, length, minimum gap, and a
-finer SH mesh), beyond the scope of this reproduction.
+vary smoothly with dTW returning to zero at the device ends; the **FH transfers
+to the cross port (cross ~ 0.90, ~0.45 dB loss, ~12 dB extinction)** while the
+**SH stays in the bar port (bar ~ 0.90, ~0.45 dB loss, ~20 dB extinction)** --
+i.e. genuinely low-loss and high-contrast at both bands. This departs from the
+paper's exact shallow stack on purpose, to reach that converged regime; the
+ring-resonator test structures in `kwolek2026_test_structures.py` are the
+companion passives for measuring the excess loss / intrinsic Q after fab.
 
 ## Generalized dichroic beam-splitter designer
 

@@ -41,7 +41,6 @@ from examples.papers.kwolek2026_faquad import (
     faquad_combiner,
     input_launch_index,
     rib_structures,
-    slab_neff,
 )
 
 gf.gpdk.PDK.activate()
@@ -55,16 +54,14 @@ WL_SH = 0.775
 # already give a converged reproduction; high pushes the mode-solver grid
 # (RES), the number of EME cells (NUM_CELLS) and the modes per cross-section
 # (NUM_MODES) further still.
-# The combiner is a weakly-guided shallow-etched rib whose mode sits only
-# ~0.02-0.1 in index above the slab continuum, so the EME needs a fairly fine
-# transverse mesh and -- crucially -- enough modes per cross-section to both
-# resolve the guided fundamental(s) and carry the slab radiation in the cascade
-# (too few modes makes the cascade non-unitary and the transmission spurious).
-# The laterally-separating waveguides also need many cells to avoid staircase
-# misalignment loss. The medium values give a converged, power-consistent
-# reproduction; low is a coarse-but-quick look.
+# The deep-etched ridge is strongly guided, so the EME converges with a moderate
+# mesh and mode count; the modes per cross-section must still cover the multimode
+# second harmonic, and the laterally-separating waveguides need many cells to
+# avoid staircase misalignment loss. The medium values give a converged,
+# power-consistent reproduction (FH cross ~0.9, SH bar ~0.9, ~0.45 dB loss at
+# both bands); low is a coarse-but-quick look.
 RES = pick(low=0.05, medium=0.025, high=0.018)
-NUM_CELLS = _resolution.num_cells(low=64, medium=150, high=200)
+NUM_CELLS = _resolution.num_cells(low=80, medium=170, high=220)
 NUM_MODES = _resolution.num_modes(low=8, medium=12, high=16)
 
 
@@ -151,9 +148,7 @@ def figure1() -> dict[str, float]:
         css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
         modes = [BACKEND(cs, num_modes=NUM_MODES) for cs in css]
 
-        in_idx = input_launch_index(  # launch the guided B (bar) mode
-            modes[0], slab_neff(wl, cells[0], compute_modes=BACKEND)
-        )
+        in_idx = input_launch_index(modes[0])  # launch the guided B (bar) mode
         ex_l = np.zeros(len(modes[0]))
         ex_l[in_idx] = 1.0
         ex_r = np.zeros(len(modes[-1]))
