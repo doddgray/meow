@@ -399,8 +399,8 @@ def rib_structures(
 
 def calib_mesh(res: float = 0.04) -> mw.Mesh2D:
     return mw.Mesh2D(
-        x=np.arange(-3.8, 3.8 + res / 2, res),
-        y=np.arange(-1.1, 1.1 + res / 2, res),
+        x=np.arange(-3.6, 3.6 + res / 2, res),
+        y=np.arange(-1.0, 1.0 + res / 2, res),
     )
 
 
@@ -552,11 +552,13 @@ def device_structures(component: gf.Component, wl: float) -> list[mw.Structure3D
 
 def device_mesh(res: float = 0.04) -> mw.Mesh2D:
     # window kept well clear of the guided modes (waveguides at x ~ +-2.1): a
-    # wide lateral span and a deep oxide / tall air margin so the hard-wall
-    # boundaries do not perturb the (deep-etched, well-confined) modes.
+    # deep oxide / tall air margin so the hard-wall boundaries do not perturb the
+    # (deep-etched, well-confined) modes. The lateral span is kept moderate -- the
+    # strongly-guided ridge needs no more, and a larger dense vectorial solve
+    # would exhaust memory at the converged mesh.
     return mw.Mesh2D(
-        x=np.arange(-4.2, 4.2 + res / 2, res),
-        y=np.arange(-1.1, 1.1 + res / 2, res),
+        x=np.arange(-3.6, 3.6 + res / 2, res),
+        y=np.arange(-1.0, 1.0 + res / 2, res),
     )
 
 
