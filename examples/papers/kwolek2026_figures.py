@@ -39,6 +39,7 @@ from examples.papers.kwolek2026_faquad import (
     calibrate,
     device_cells,
     faquad_combiner,
+    input_launch_index,
     rib_structures,
 )
 
@@ -49,13 +50,21 @@ FIGDIR = Path(__file__).parent / "figures"
 
 WL_FH = 1.55
 WL_SH = 0.775
-# Accuracy knobs (low / medium / high via MEOW_EXAMPLE_RES). The medium values
-# already give a converged reproduction; high pushes the mode-solver grid
-# (RES), the number of EME cells (NUM_CELLS) and the modes per cross-section
-# (NUM_MODES) further still.
-RES = pick(low=0.06, medium=0.02, high=0.015)
-NUM_CELLS = _resolution.num_cells(low=12, medium=120)  # high -> 128
-NUM_MODES = _resolution.num_modes(low=3, medium=6)  # high -> 8
+# Accuracy knobs (low / medium / high via MEOW_EXAMPLE_RES). FH converges well
+# at the medium values (cross ~0.9). The second harmonic is intrinsically
+# under-converged: the rib is strongly multimode at 775 nm so the serial EME
+# cascade (which holds every cell's modes at once) needs far more modes than fit
+# in memory to fully conserve power -- so cells * modes is deliberately capped at
+# ~2000 here and the SH numbers are a lower bound (see the module docstring /
+# README). low is a coarse-but-quick look.
+RES = pick(low=0.05, medium=0.025, high=0.020)
+NUM_CELLS = _resolution.num_cells(low=80, medium=150, high=170)
+NUM_MODES = _resolution.num_modes(low=8, medium=12, high=12)
+# The Fig 1e field reconstruction holds every cell's modes in memory at once, so
+# it gets a lighter cell/mode budget than the (cell-by-cell, memory-light)
+# transmission; this keeps the converged medium/high runs within memory.
+FIELD_CELLS = min(NUM_CELLS, pick(low=80, medium=110, high=130))
+FIELD_MODES = min(NUM_MODES, 8)
 
 
 def _show(fig: plt.Figure) -> None:
@@ -136,24 +145,32 @@ def figure1() -> dict[str, float]:
     # (e) EME field propagation at FH and SH
     results: dict[str, float] = {}
     for i, (wl, label) in enumerate([(WL_FH, "FH 1550 nm"), (WL_SH, "SH 775 nm")]):
-        cells = device_cells(component, wl, num_cells=NUM_CELLS, res=RES, design=design)
         env = mw.Environment(wl=wl, T=25.0)
-        css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
-        modes = [BACKEND(cs, num_modes=NUM_MODES) for cs in css]
+        # transmission: full resolution, solved cell-by-cell (memory-light)
+        cells = device_cells(component, wl, num_cells=NUM_CELLS, res=RES, design=design)
+        t_bar, t_cross = bar_cross_transmission(
+            cells, wl, num_modes=NUM_MODES, parallel=PARALLEL, compute_modes=BACKEND
+        )
+        results[f"bar_{label.split()[0]}"] = t_bar
+        results[f"cross_{label.split()[0]}"] = t_cross
 
-        def centroid(mode: mw.Mode) -> float:
-            d = np.abs(mode.Ex) ** 2
-            return float(np.sum(mode.cs.mesh.Xx * d) / np.sum(d))
+        # field plot: a lighter cell/mode budget (all cells' modes are held at
+        # once for the reconstruction)
+        cells_f = device_cells(
+            component, wl, num_cells=FIELD_CELLS, res=RES, design=design
+        )
+        css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells_f]
+        modes = [BACKEND(cs, num_modes=FIELD_MODES) for cs in css]
 
-        in_idx = min(range(2), key=lambda k: centroid(modes[0][k]))
+        in_idx = input_launch_index(modes[0])  # launch the guided B (bar) mode
         ex_l = np.zeros(len(modes[0]))
         ex_l[in_idx] = 1.0
         ex_r = np.zeros(len(modes[-1]))
         z_pts = np.linspace(
-            0.0, sum(c.length for c in cells), pick(low=400, medium=800, high=1200)
+            0.0, sum(c.length for c in cells_f), pick(low=400, medium=800, high=1200)
         )
         Ex, x_pts = prop.propagate_modes(
-            modes, cells, excitation_l=ex_l, excitation_r=ex_r, y=0.25, z=z_pts
+            modes, cells_f, excitation_l=ex_l, excitation_r=ex_r, y=0.25, z=z_pts
         )
         ax = fig.add_subplot(grid[3, 2 * i : 2 * i + 2])
         ax.imshow(
@@ -173,15 +190,10 @@ def figure1() -> dict[str, float]:
         ax.set_ylim(-3, 3)
         ax.set_title(f"Fig. 1e: |Ex|$^2$ propagation at {label}")
 
-        t_bar, t_cross = bar_cross_transmission(
-            cells, wl, num_modes=NUM_MODES, parallel=PARALLEL, compute_modes=BACKEND
-        )
-        results[f"bar_{label.split()[0]}"] = t_bar
-        results[f"cross_{label.split()[0]}"] = t_cross
-
     fig.suptitle(
         "Kwolek 2026, Fig. 1: FAQUAD-optimized TFLN wavelength combiner "
-        f"(FH cross = {results['cross_FH']:.3f}, SH bar = {results['bar_SH']:.3f})"
+        f"(FH cross = {results['cross_FH']:.3f}, SH bar = {results['bar_SH']:.3f}; "
+        f"{_resolution.level()}-res)"
     )
     fig.tight_layout()
     fig.savefig(FIGDIR / "kwolek2026_fig1.png", dpi=150)
@@ -242,7 +254,10 @@ def figure2() -> dict[str, float]:
     axes[2].set_title("Fig. 2c: total loss")
     axes[2].grid(visible=True)
 
-    fig.suptitle("Kwolek 2026, Fig. 2: simulated combiner performance (EME)")
+    fig.suptitle(
+        "Kwolek 2026, Fig. 2: simulated combiner performance (EME); "
+        f"{_resolution.level()}-res (SH extinction is optimistic until converged)"
+    )
     fig.tight_layout()
     fig.savefig(FIGDIR / "kwolek2026_fig2.png", dpi=150)
     _show(fig)

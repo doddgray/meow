@@ -20,6 +20,9 @@ from examples.papers import (  # noqa: E402
     kwolek2026_faquad as kw,
 )
 from examples.papers import (  # noqa: E402
+    kwolek2026_test_structures as kts,
+)
+from examples.papers import (  # noqa: E402
     kwolek_designer as kd,
 )
 from examples.papers import (  # noqa: E402
@@ -28,6 +31,55 @@ from examples.papers import (  # noqa: E402
 from examples.papers import (  # noqa: E402
     magden2018_dichroic as md,
 )
+from examples.papers import (  # noqa: E402
+    zhu2025_designer as zd,
+)
+
+# --- Kwolek 2026: ring-resonator test structures ---
+
+
+def test_kwolek_test_structures_gds(tmp_path: Path) -> None:
+    """All-pass + add-drop rings build with ports and write GDS."""
+    ap = kts.all_pass_ring(radius=40.0, gap=0.5)
+    assert {"o1", "o2"} <= {p.name for p in ap.ports}
+    ad = kts.add_drop_ring(radius=40.0, gap=0.5)
+    assert len(ad.ports) >= 4  # two bus waveguides
+    written = kts.write_gds(tmp_path)
+    assert written
+    assert all(p.suffix == ".gds" and p.exists() for p in written)
+
+
+# --- Zhu 2025: user-defined multi-layer stack designer ---
+
+
+def test_zhu_stack_designer_geometry() -> None:
+    """The default Si3N4 triple stack has the requested cores/widths/taper."""
+    stack = zd.default_si3n4_stack()
+    assert [round(L.thickness * 1e3) for L in stack.layers] == [100, 200, 40]
+    assert [L.facet_width for L in stack.layers] == [5.0, 2.0, 6.0]
+    # three distinct vertical levels, centred about zero
+    ycs = stack.y_centers()
+    assert len(ycs) == 3
+    assert np.isclose(sum(ycs), 0.0)
+    # the main (central) layer spans the whole device; assists start at the trident
+    main = stack.layers[stack.main_index]
+    _z_main, w_main, z0_main = zd._layer_profile(stack, main, npts=64)
+    assert z0_main == 0.0
+    assert np.isclose(w_main[0], stack.standard_width)  # single-layer input width
+    assert np.isclose(w_main[-1], main.facet_width)  # central width at facet
+    assist = stack.layers[0]
+    _, _, z0_assist = zd._layer_profile(stack, assist, npts=64)
+    assert z0_assist == pytest.approx(stack.l_input + stack.l_intaper)
+
+
+def test_zhu_stack_designer_writes_gds_and_plots(tmp_path: Path) -> None:
+    """design_stack writes a GDS, a 2.5D/3D render and a summary."""
+    stack = zd.default_si3n4_stack()
+    res = zd.design_stack(stack, "smoke", tmp_path)
+    assert Path(res["gds"]).exists()
+    assert Path(res["render"]).exists()
+    assert res["summary"]["core_thicknesses_nm"] == [100.0, 200.0, 40.0]
+
 
 # --- Magden 2018: silicon dichroic filter ---
 
@@ -766,10 +818,12 @@ def test_sh_stays_in_bar_port(calibration: tuple[float, float, float]) -> None:
     """
     c = kw.faquad_combiner(*calibration)
     cells = kw.device_cells(c, 0.775, num_cells=10, res=0.06)
-    t_bar, t_cross = kw.bar_cross_transmission(cells, 0.775, num_modes=3)
-    # at this very coarse test resolution most of the SH power is lost to
-    # discretization, but the bar/cross contrast remains well over an order
-    # of magnitude (the full-resolution figures show > 30 dB extinction)
+    t_bar, t_cross = kw.bar_cross_transmission(cells, 0.775, num_modes=6)
+    # bar/cross is measured by projecting onto the *rib-guided* modes (the slab
+    # continuum is excluded), summed per side. At this very coarse resolution
+    # the SH bar/cross contrast is strong; note that the converged SH extinction
+    # is more modest (a few-x / ~7 dB), as the SH cross-port leakage is itself
+    # resolution-dependent and only fully resolves on a finer mesh.
     assert t_bar > 20 * t_cross
 
 
@@ -977,9 +1031,9 @@ def test_ramadan1998_analytic_design_rules() -> None:
     null = np.pi / kappa  # first null length
     assert ram.q_region2(null, kappa_ii=kappa, x_iio=0.66) < 1e-9
     peak_len = 1500.0
-    assert ram.q_region2(peak_len, kappa_ii=kappa, x_iio=0.66) <= ram.q_region2_envelope(
+    assert ram.q_region2(
         peak_len, kappa_ii=kappa, x_iio=0.66
-    )
+    ) <= ram.q_region2_envelope(peak_len, kappa_ii=kappa, x_iio=0.66)
     # eq (28)/(29): 3 dB scales as 1/eps, full as 1/sqrt(eps); 3 dB is longer
     l_3db = ram.length_3db_optimum(0.01, kappa)
     l_full = ram.length_full_optimum(0.01, kappa)

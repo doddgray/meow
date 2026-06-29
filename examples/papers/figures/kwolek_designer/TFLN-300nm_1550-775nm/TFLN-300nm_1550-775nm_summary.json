@@ -1,0 +1,29 @@
+{
+  "label": "TFLN-300nm/1550-775nm",
+  "kind": "faquad",
+  "platform": "TFLN-300nm",
+  "fh_nm": 1550.0,
+  "sh_nm": 775.0,
+  "length_um": 1810.0,
+  "band_nm": [
+    620.0,
+    1860.0
+  ],
+  "fh_cross": 0.0129,
+  "fh_bar": 0.1461,
+  "sh_bar": 0.0145,
+  "sh_cross": 0.0101,
+  "fh_er_db": -10.55,
+  "sh_er_db": 1.61,
+  "saved_fields": true,
+  "out_dir": "/home/user/meow/examples/papers/figures/kwolek_designer/TFLN-300nm_1550-775nm",
+  "files": [
+    "TFLN-300nm_1550-775nm.gds",
+    "TFLN-300nm_1550-775nm_design.png",
+    "TFLN-300nm_1550-775nm_fields.h5",
+    "TFLN-300nm_1550-775nm_propagation.png",
+    "TFLN-300nm_1550-775nm_spectrum.csv",
+    "TFLN-300nm_1550-775nm_spectrum.json",
+    "TFLN-300nm_1550-775nm_spectrum.png"
+  ]
+}

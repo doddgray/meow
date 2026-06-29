@@ -1,0 +1,2 @@
+name,n_layers,core_thicknesses_nm,facet_widths_um,min_tip_widths_um,layer_spacings_um,bottom_clad_um,top_clad_um,standard_input_width_um,total_length_um,main_layer
+si3n4_triple_compact,3,"[100.0, 200.0, 40.0]","[5.0, 2.0, 6.0]","[0.15, 0.15, 0.18]","[1.2, 1.2]",0.5,4.5,1.0,250.0,core-200nm

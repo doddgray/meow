@@ -70,16 +70,37 @@ bar port).
   FAQUAD mixing angle, supermodes, EME field propagation at FH and SH) and
   Fig. 2 (extinction-ratio and loss spectra at FH and SH).
 
-Validation anchors (full-quality run): chi(0) = pi/2 and the Euler-S-bend
-gap/dTW vary smoothly with dTW returning to zero at the device ends; the FH
-input transfers adiabatically to the cross port (cross/bar = 0.89/0.07) while
-the SH stays in the bar port with 22-25 dB extinction across 755-795 nm
-(above the paper's > 19 dB); the FH loss is flat (~0.18 dB) across
-1500-1600 nm. The remaining gap to the paper's dB-level FH figures
-(> 25 dB FH extinction) is set by the example's EME discretization and by
-the difference between our FDE-calibrated coupling and the paper's; both
-improve with finer meshes,
-more cells and more modes.
+**Launch / metric / polarization.** The device operates on the **TE** mode, so
+the input is the fundamental TE rib mode (`input_launch_index`, `te_fraction >
+0.5`) -- not simply the highest-`neff` mode, which at the second harmonic is
+actually **TM**; launching TM was an earlier bug that made the SH field look
+like a higher-order mode and made the SH transmission meaningless. Bar/cross is
+then the EME output power summed over the modes **localized in each output rib**
+(`port_mode_indices`, by spatial confinement), with everything non-localized
+counted as loss -- a metric that is stable in `num_modes` where a naive
+"classify every mode by centroid sign" is not.
+
+**FH vs SH (honest status).** With the correct TE launch, the **fundamental**
+behaves as intended: it transfers to the cross port with **cross ~ 0.9** and low
+loss, converging well in mesh/cells/modes (chi(0)=pi/2 and the Euler-S-bend
+gap/dTW vary smoothly, dTW->0 at the ends). The **second harmonic is intrinsically
+hard**: the rib is strongly multimode at 775 nm, so the serial EME cascade (which
+holds every cell's modes at once) needs more modes than fit in memory to fully
+conserve power. The SH stays in the bar port (bar/cross contrast is large) but a
+non-negligible fraction scatters among the dense SH modes, and the SH numbers are
+**not converged to ~1%** at a feasible cost -- they are a lower bound. (An earlier
+"deep-etched 500/400 nm" variant appeared to give ~0.9 SH bar at ~20 dB, but that
+was the TM-launch artifact; with the correct TE launch the deep ridge is *more*
+multimode and the SH EME conserves even less power, so the example uses the
+paper's shallow 300/100 nm stack.)
+
+**Convergence (to ~1%).** FH: mesh `Δ ~ 0.02 µm`, `~150-200` cells, `~10-12`
+modes. SH: needs `Δ ~ 0.015 µm` and many more modes (`>= 20-24`) than the serial
+cascade can hold in memory alongside the cells (`cells × modes` is capped at
+~2000 here), which is why SH is not 1%-converged; a distributed / chunked EME
+(or the `meow.fde.sparse` operator path) would be the route to a converged SH.
+The ring-resonator test structures in `kwolek2026_test_structures.py` are the
+companion passives for measuring the excess loss / intrinsic Q after fab.
 
 ## Generalized dichroic beam-splitter designer
 

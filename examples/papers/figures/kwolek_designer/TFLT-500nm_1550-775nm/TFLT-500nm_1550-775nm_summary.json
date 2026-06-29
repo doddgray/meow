@@ -1,0 +1,29 @@
+{
+  "label": "TFLT-500nm/1550-775nm",
+  "kind": "faquad",
+  "platform": "TFLT-500nm",
+  "fh_nm": 1550.0,
+  "sh_nm": 775.0,
+  "length_um": 2000.0,
+  "band_nm": [
+    620.0,
+    1860.0
+  ],
+  "fh_cross": 0.1306,
+  "fh_bar": 0.1836,
+  "sh_bar": 0.0166,
+  "sh_cross": 0.1056,
+  "fh_er_db": -1.48,
+  "sh_er_db": -8.03,
+  "saved_fields": true,
+  "out_dir": "/home/user/meow/examples/papers/figures/kwolek_designer/TFLT-500nm_1550-775nm",
+  "files": [
+    "TFLT-500nm_1550-775nm.gds",
+    "TFLT-500nm_1550-775nm_design.png",
+    "TFLT-500nm_1550-775nm_fields.h5",
+    "TFLT-500nm_1550-775nm_propagation.png",
+    "TFLT-500nm_1550-775nm_spectrum.csv",
+    "TFLT-500nm_1550-775nm_spectrum.json",
+    "TFLT-500nm_1550-775nm_spectrum.png"
+  ]
+}

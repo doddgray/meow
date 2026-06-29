@@ -84,3 +84,7 @@ venv/
 wheelhouse/
 wheels/
 failed/
+
+# local experiment scratch (not part of the project)
+scratch_sh/
+scratch_rerun/

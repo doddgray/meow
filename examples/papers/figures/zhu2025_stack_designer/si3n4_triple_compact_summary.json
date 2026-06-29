@@ -1,0 +1,28 @@
+{
+  "name": "si3n4_triple_compact",
+  "n_layers": 3,
+  "core_thicknesses_nm": [
+    100.0,
+    200.0,
+    40.0
+  ],
+  "facet_widths_um": [
+    5.0,
+    2.0,
+    6.0
+  ],
+  "min_tip_widths_um": [
+    0.15,
+    0.15,
+    0.18
+  ],
+  "layer_spacings_um": [
+    1.2,
+    1.2
+  ],
+  "bottom_clad_um": 0.5,
+  "top_clad_um": 4.5,
+  "standard_input_width_um": 1.0,
+  "total_length_um": 250.0,
+  "main_layer": "core-200nm"
+}
