@@ -50,19 +50,16 @@ FIGDIR = Path(__file__).parent / "figures"
 
 WL_FH = 1.55
 WL_SH = 0.775
-# Accuracy knobs (low / medium / high via MEOW_EXAMPLE_RES). The medium values
-# already give a converged reproduction; high pushes the mode-solver grid
-# (RES), the number of EME cells (NUM_CELLS) and the modes per cross-section
-# (NUM_MODES) further still.
-# The deep-etched ridge is strongly guided, so the EME converges with a moderate
-# mesh and mode count; the modes per cross-section must still cover the multimode
-# second harmonic, and the laterally-separating waveguides need many cells to
-# avoid staircase misalignment loss. The medium values give a converged,
-# power-consistent reproduction (FH cross ~0.9, SH bar ~0.9, ~0.45 dB loss at
-# both bands); low is a coarse-but-quick look.
-RES = pick(low=0.05, medium=0.025, high=0.018)
-NUM_CELLS = _resolution.num_cells(low=80, medium=170, high=220)
-NUM_MODES = _resolution.num_modes(low=8, medium=12, high=16)
+# Accuracy knobs (low / medium / high via MEOW_EXAMPLE_RES). FH converges well
+# at the medium values (cross ~0.9). The second harmonic is intrinsically
+# under-converged: the rib is strongly multimode at 775 nm so the serial EME
+# cascade (which holds every cell's modes at once) needs far more modes than fit
+# in memory to fully conserve power -- so cells * modes is deliberately capped at
+# ~2000 here and the SH numbers are a lower bound (see the module docstring /
+# README). low is a coarse-but-quick look.
+RES = pick(low=0.05, medium=0.025, high=0.020)
+NUM_CELLS = _resolution.num_cells(low=80, medium=150, high=170)
+NUM_MODES = _resolution.num_modes(low=8, medium=12, high=12)
 # The Fig 1e field reconstruction holds every cell's modes in memory at once, so
 # it gets a lighter cell/mode budget than the (cell-by-cell, memory-light)
 # transmission; this keeps the converged medium/high runs within memory.

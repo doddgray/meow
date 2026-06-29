@@ -6,16 +6,19 @@ This example reproduces the paper's design workflow for fast-quasi-adiabatic
 (FAQUAD) wavelength combiners/filters on thin-film lithium niobate with
 gdsfactory (parametric layout) and meow (FDE + EME):
 
-Platform: x-cut TFLN, 65 degree sidewall angle (from the substrate plane;
-25 degrees from vertical), ~1.2 um top width, SiO2 under-cladding. The anisotropy
-of LN is modeled with meow's ``AnisotropicMaterial`` (uniaxial tensor diagonal,
-extraordinary axis in-plane and perpendicular to propagation), and the sloped
-ribs use the angled-sidewall GDS extrusion. The paper's shallow stack (300 nm
-film, ~100 nm etch) leaves the rib only weakly guided, so a converged EME
-radiates much of the multimode second harmonic into the slab continuum; this
-example therefore uses a more strongly-guided deep-etched ridge (500 nm film,
-400 nm etch, 100 nm slab) so that the modeled device is genuinely low-loss and
-high-extinction at *both* bands (see ``H_FILM`` / ``G_M`` / ``L_M``).
+Platform (paper Sec. 3): 300 nm x-cut TFLN, ~100 nm etch depth (200 nm slab),
+65 degree sidewall angle (from the substrate plane; 25 degrees from vertical),
+~1.2 um top width, SiO2 under-cladding. The anisotropy of LN is modeled with
+meow's ``AnisotropicMaterial`` (uniaxial tensor diagonal, extraordinary axis
+in-plane and perpendicular to propagation), and the sloped ribs use the
+angled-sidewall GDS extrusion.
+
+A note on convergence: the fundamental harmonic transfers cleanly to the cross
+port (FH cross ~0.9, low loss). The *second* harmonic is intrinsically harder --
+the rib is strongly multimode at 775 nm, so the EME cascade needs many modes to
+conserve power and the SH transmission is not converged to ~1% at the resolution
+used here (it is a lower bound; the SH stays in the bar port but with appreciable
+modal scattering). See the README for the convergence study and discussion.
 
 Design workflow (paper Sec. 2, Eqs. 8-12):
 
@@ -54,32 +57,23 @@ import meow as mw
 
 LAYER_RIB = (1, 0)
 
-H_FILM = 0.50
-H_SLAB = 0.10
-"""Film / slab thickness [um] -> a 400 nm-etched strongly-guided ridge.
+H_FILM = 0.30
+H_SLAB = 0.20
+"""Film / slab thickness [um]: the paper's 300 nm film with a ~100 nm etch.
 
-The paper's stack is a 300 nm film with a shallow ~100 nm etch (200 nm slab).
-That shallow rib is only weakly guided -- its index sits ~0.02 above the slab,
-so in a converged EME it radiates ~40-50% of the (multimode) second-harmonic
-into the slab continuum, which no amount of bend/length tuning removes. A
-deeper-etched, more strongly-guided ridge (here a 500 nm film with a 400 nm
-etch, 100 nm slab) pushes the guided indices well above the slab, eliminating
-that radiation: the converged device is then low-loss (~0.4-0.5 dB) at *both*
-the fundamental and the second harmonic. This departs from the paper's exact
-stack on purpose, to reach a converged, high-performance dichroic regime.
+A deeper-etched ridge was tried earlier to suppress the SH "leakage", but that
+was an artifact of a launcher bug (the SH input mode was TM, not the TE
+fundamental -- see :func:`input_launch_index`). With the correct TE launch the
+deep ridge is in fact pathologically multimode at SH (the EME cascade cannot
+conserve power at feasible mode counts), so the paper's shallow stack -- much
+less multimode at SH and far better-conditioned for the cascade -- is used.
 """
 SIDEWALL_DEG = 25.0  # 65 deg from the substrate plane = 25 deg from vertical
 W_TOP = 1.2
 """Nominal waveguide top width."""
 
-G_M = 0.45
-"""Minimum (fabrication-limited) gap in Region I [um].
-
-Smaller than the paper's gap because the strongly-guided deep-etched ridge
-couples much more weakly at a given gap; ``0.45 um`` restores enough coupling
-for the FH supermode swap to complete in a reasonable length while the SH stays
-decoupled (its tighter mode barely reaches across the gap).
-"""
+G_M = 0.80
+"""Minimum (fabrication-limited) gap in Region I [um] (paper value)."""
 
 G_C = 1.20
 """Gap at which residual coupling is negligible (end of FAQUAD evolution)."""
@@ -87,13 +81,12 @@ G_C = 1.20
 G_F = 3.0
 """Final gap between the output ports."""
 
-L_M = 180.0
+L_M = 120.0
 """Constant-gap (Region I) length [um].
 
-Set to the converged-EME FH optimum for the deep-etched stack: the FH cross
-transfer is coupler-like in ``l_m`` and peaks near ``180 um`` (cross ~0.90),
-where the accumulated coupling completes the supermode swap; the strongly-guided
-SH stays in the bar port across this range (>20 dB extinction).
+The FH cross transfer is coupler-like in ``l_m`` and peaks near ``120-150 um``
+where the accumulated coupling completes the supermode swap (FH cross ~0.9);
+shorter lengths also keep the weakly-coupled SH in the bar port.
 """
 
 THETA_MAX_DEG = 1.0
@@ -551,11 +544,9 @@ def device_structures(component: gf.Component, wl: float) -> list[mw.Structure3D
 
 
 def device_mesh(res: float = 0.04) -> mw.Mesh2D:
-    # window kept well clear of the guided modes (waveguides at x ~ +-2.1): a
-    # deep oxide / tall air margin so the hard-wall boundaries do not perturb the
-    # (deep-etched, well-confined) modes. The lateral span is kept moderate -- the
-    # strongly-guided ridge needs no more, and a larger dense vectorial solve
-    # would exhaust memory at the converged mesh.
+    # waveguides sit at x ~ +-2.1; a moderate lateral span keeps the discretized
+    # slab continuum sparse (fewer spurious box modes near the guided index) while
+    # the deep oxide / tall air margins keep the hard walls clear of the mode.
     return mw.Mesh2D(
         x=np.arange(-3.6, 3.6 + res / 2, res),
         y=np.arange(-1.0, 1.0 + res / 2, res),

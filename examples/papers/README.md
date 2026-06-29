@@ -70,35 +70,36 @@ bar port).
   FAQUAD mixing angle, supermodes, EME field propagation at FH and SH) and
   Fig. 2 (extinction-ratio and loss spectra at FH and SH).
 
-Bar/cross transmission is measured by summing the EME output power over the
-modes **localized in each output rib** (selected by spatial confinement, via
-`port_mode_indices`), per side. This is the key to a stable, honest metric: a
-naive "classify every output mode by the sign of its centroid" conflates the
-slab/box modes of the finite window with real transmission and swings wildly
-with `num_modes`. Confinement -- not an `neff` threshold or a centroid sign --
-is what separates transmission from radiation, because at the second harmonic
-each rib is multimode *and* a dense cluster of delocalized slab modes sits at
-the same `neff` as the higher-order rib modes; only the localization tells them
-apart. Everything not localized in a rib is radiation, so `loss = 1 - bar -
-cross` is physical.
+**Launch / metric / polarization.** The device operates on the **TE** mode, so
+the input is the fundamental TE rib mode (`input_launch_index`, `te_fraction >
+0.5`) -- not simply the highest-`neff` mode, which at the second harmonic is
+actually **TM**; launching TM was an earlier bug that made the SH field look
+like a higher-order mode and made the SH transmission meaningless. Bar/cross is
+then the EME output power summed over the modes **localized in each output rib**
+(`port_mode_indices`, by spatial confinement), with everything non-localized
+counted as loss -- a metric that is stable in `num_modes` where a naive
+"classify every mode by centroid sign" is not.
 
-Reaching a *converged, low-loss* device at both bands drove one substantive
-design change. The paper's shallow stack (300 nm film, ~100 nm etch) leaves the
-rib only weakly guided -- its index is ~0.02 above the slab -- so a converged
-EME radiates ~40-50% of the (multimode) second harmonic into the slab continuum,
-and no amount of bend/length tuning removes it. A more strongly-guided
-**deep-etched ridge (500 nm film, 400 nm etch, 100 nm slab)** pushes the guided
-indices well above the slab and eliminates that radiation; the minimum gap is
-then reduced (`g_m = 0.45 um`) to restore enough FH coupling (the tighter mode
-couples much more weakly), and `l_m = 180 um` is the FH cross-transfer optimum.
+**FH vs SH (honest status).** With the correct TE launch, the **fundamental**
+behaves as intended: it transfers to the cross port with **cross ~ 0.9** and low
+loss, converging well in mesh/cells/modes (chi(0)=pi/2 and the Euler-S-bend
+gap/dTW vary smoothly, dTW->0 at the ends). The **second harmonic is intrinsically
+hard**: the rib is strongly multimode at 775 nm, so the serial EME cascade (which
+holds every cell's modes at once) needs more modes than fit in memory to fully
+conserve power. The SH stays in the bar port (bar/cross contrast is large) but a
+non-negligible fraction scatters among the dense SH modes, and the SH numbers are
+**not converged to ~1%** at a feasible cost -- they are a lower bound. (An earlier
+"deep-etched 500/400 nm" variant appeared to give ~0.9 SH bar at ~20 dB, but that
+was the TM-launch artifact; with the correct TE launch the deep ridge is *more*
+multimode and the SH EME conserves even less power, so the example uses the
+paper's shallow 300/100 nm stack.)
 
-Validation anchors (converged run): chi(0) = pi/2 and the Euler-S-bend gap/dTW
-vary smoothly with dTW returning to zero at the device ends; the **FH transfers
-to the cross port (cross ~ 0.90, ~0.45 dB loss, ~12 dB extinction)** while the
-**SH stays in the bar port (bar ~ 0.90, ~0.45 dB loss, ~20 dB extinction)** --
-i.e. genuinely low-loss and high-contrast at both bands. This departs from the
-paper's exact shallow stack on purpose, to reach that converged regime; the
-ring-resonator test structures in `kwolek2026_test_structures.py` are the
+**Convergence (to ~1%).** FH: mesh `Δ ~ 0.02 µm`, `~150-200` cells, `~10-12`
+modes. SH: needs `Δ ~ 0.015 µm` and many more modes (`>= 20-24`) than the serial
+cascade can hold in memory alongside the cells (`cells × modes` is capped at
+~2000 here), which is why SH is not 1%-converged; a distributed / chunked EME
+(or the `meow.fde.sparse` operator path) would be the route to a converged SH.
+The ring-resonator test structures in `kwolek2026_test_structures.py` are the
 companion passives for measuring the excess loss / intrinsic Q after fab.
 
 ## Generalized dichroic beam-splitter designer
