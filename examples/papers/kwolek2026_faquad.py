@@ -665,17 +665,24 @@ def input_launch_index(
     half_width: float = 1.0,
     thresh: float = 0.5,
 ) -> int:
-    """Index of the guided fundamental of waveguide B (the device input port).
+    """Index of the guided fundamental **TE** mode of waveguide B (the input).
 
-    Waveguide B is the bar (negative-x) rib, so the launch mode is the
-    highest-``neff`` mode localized there (falling back to the global
-    fundamental if none qualifies).
+    Waveguide B is the bar (negative-x) rib; the launch mode is the
+    highest-``neff`` *TE-polarized* mode localized there. The TE restriction is
+    essential: the combiner is a TE device (it is calibrated and designed for
+    the TE supermode coupling), but at the second harmonic the strongly-confined
+    ridge's highest-``neff`` mode is actually TM (vertical polarization) -- so
+    ranking by ``neff`` alone would launch the wrong polarization at SH (and
+    plotting its minor ``Ex`` component looks like a higher-order mode). Falls
+    back to the highest-``neff`` localized mode, then the global fundamental, if
+    no confined TE mode is found.
     """
     bar, _ = port_mode_indices(
         modes, x_port=x_port, half_width=half_width, thresh=thresh
     )
     pool = bar or list(range(len(modes)))
-    return max(pool, key=lambda i: float(np.real(modes[i].neff)))
+    te_pool = [i for i in pool if float(modes[i].te_fraction) > 0.5]
+    return max(te_pool or pool, key=lambda i: float(np.real(modes[i].neff)))
 
 
 def bar_cross_transmission(
