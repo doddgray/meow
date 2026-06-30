@@ -226,8 +226,21 @@ def coupler_cutback_array(
         float(coupler.ports[thru_port].center[0])
         - float(coupler.ports[in_port].center[0])
     )
+    # keep every row on the chip: drop coupler counts that do not fit, and use a
+    # single constant total length (the chip width) for the cut-back condition.
+    fit = [n for n in counts if n * span <= chip_width - 20.0]
+    if len(fit) < len(counts):
+        import warnings
+
+        dropped = [n for n in counts if n not in fit]
+        warnings.warn(
+            f"coupler_cutback_array: dropped counts {dropped} (coupler length "
+            f"{span:.0f} um exceeds the {chip_width:.0f} um chip)",
+            stacklevel=2,
+        )
+    counts = tuple(fit)
     if total_length is None:
-        total_length = max(chip_width, max(counts) * span + 50.0)
+        total_length = chip_width
     c = gf.Component()
     for i, n in enumerate(counts):
         row = c << coupler_cutback(
