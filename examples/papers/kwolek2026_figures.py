@@ -285,8 +285,8 @@ def _fab_tolerance_loss(
 
 def figure2(model: str) -> dict[str, float]:
     """Every subfigure of paper Fig. 2 (a-d)."""
-    n_fh = pick(low=5, medium=11, high=21)
-    n_sh = pick(low=4, medium=7, high=13)
+    n_fh = pick(low=3, medium=11, high=21)
+    n_sh = pick(low=3, medium=7, high=13)
     wls_fh = np.linspace(1.50, 1.60, n_fh)
     wls_sh = np.linspace(0.755, 0.795, n_sh)
     d_lam_fh = (wls_fh - WL_FH) * 1e3  # detuning [nm]
@@ -508,7 +508,7 @@ def figure5(model: str) -> dict[str, float]:
 def figure_broadband(model: str) -> dict[str, float]:
     """Bar and cross transmission across more than an octave (~0.8*SH..1.2*FH)."""
     design, component = _design(model)
-    n = pick(low=11, medium=31, high=61)
+    n = pick(low=9, medium=31, high=61)
     wls = np.linspace(0.8 * WL_SH, 1.2 * WL_FH, n)  # 0.62 .. 1.86 um (>1.5 octave)
     bars, crosses = _spectrum(component, wls, model, design)
 
