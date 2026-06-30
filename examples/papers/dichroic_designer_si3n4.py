@@ -30,13 +30,19 @@ from examples.papers.dichroic_designer import (
     WGB,
     DichroicDesign,
     Platform,
+    analyze_dichroic_design,
     design_dichroic,
+    dichroic_spectrum_grid,
+    dichroic_test_structures,
     segmented_neff,
     solid_neff,
 )
 
 FIGDIR = Path(__file__).parent / "figures"
 pick = _resolution.pick
+
+# shared broad-band grid axis covering the 900-1200 nm Si3N4 cutoffs
+SI3N4_BAND = (0.80, 1.35)
 
 
 def si3n4_platform() -> Platform:
@@ -147,7 +153,18 @@ def main() -> dict[str, object]:
     fig.tight_layout()
     fig.savefig(FIGDIR / "dichroic_designer_si3n4.png", dpi=150)
     plt.close(fig)
-    return summary
+
+    # per-design EME broad-band spectra (-> column grid) + cut-back test arrays
+    analyses_root = FIGDIR / "dichroic_designer_si3n4"
+    for d in designs:
+        label = f"{d.cutoff_wl * 1e3:.0f}nm"
+        analyze_dichroic_design(d, analyses_root / label, band=SI3N4_BAND)
+        dichroic_test_structures(d, analyses_root / label)
+    grid = dichroic_spectrum_grid(
+        designs, analyses_root,
+        FIGDIR / "dichroic_designer_si3n4_spectrum_grid.png", band=SI3N4_BAND,
+    )
+    return {"designs": summary, "spectrum_grid": str(grid) if grid else None}
 
 
 if __name__ == "__main__":

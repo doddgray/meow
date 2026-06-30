@@ -61,14 +61,43 @@ bar port).
 
 - `kwolek2026_faquad.py`: LN anisotropy via `AnisotropicMaterial` (uniaxial
   tensor), angled-sidewall rib extrusion, the FDE calibration step
-  (kappa(g) exponential fit + d(beta)/d(width) slope), the FAQUAD geometry
-  of the paper's Eqs. 8-12 (`FaquadDesign`) with Euler (clothoid) S-bend
-  separations -- parameterized by lateral offset and maximum waveguide-axis
-  angle -- giving a smooth gap and a top-width difference that returns to
-  zero at the device ends, and the parametric `faquad_combiner()` PCell.
-- `kwolek2026_figures.py`: reproduces Fig. 1 (layout, gap/width profiles,
-  FAQUAD mixing angle, supermodes, EME field propagation at FH and SH) and
-  Fig. 2 (extinction-ratio and loss spectra at FH and SH).
+  (kappa(g) exponential fit + d(beta)/d(width) slope), and the paper's
+  **three-region** FAQUAD geometry (`FaquadDesign`, Eqs. 8-12):
+
+  - **Region I** -- a constant minimum-gap `g_m` straight interaction section;
+  - **Region II** -- the **cubic separation bend** `g_e(z) = (2/3) a^2 (z -
+    l_m/2)^3 + g_m` (Eq. 9), the paraxial Euler approximation that gives the
+    closed-form coupling envelope `kappa(z) = kappa_m exp(-((|z|-l_m/2)/z_0)^3)`
+    (Eq. 10), continuing the FAQUAD evolution to the decoupling gap `g_c`;
+  - **Region III** -- a genuine **Euler (clothoid) bend matched to the cubic
+    exit angle** that relaxes the curvature to zero into the straight outer
+    waveguide at the final gap `g_f`.
+
+  The whole device is laid out as a **single `gdsfactory` path extruded with
+  two parametric-width sections** (`combiner_from_design` /
+  `faquad_combiner()`): each rib's `width_function`/`offset_function` traces its
+  top width `w(z)` and centerline `g(z)/2 + w/2` along all three regions, and
+  the 65-degree sidewalls are added at extrusion. Three top-width-taper
+  `VARIANTS` (`faquad_bends`, `faquad_taper`, `linear_taper`) share the gap
+  profile but differ in the taper, for the Fig. 2a comparison.
+- `kwolek2026_figures.py`: reproduces, **for each LiNbO3 material model**
+  (`anisotropic` -- the real uniaxial crystal -- and `isotropic` -- a fake LN
+  with the extraordinary index on every axis; see below), Fig. 1 (layout,
+  gap/width profiles, mixing angle, supermodes, FH/SH propagation), **every
+  subfigure of Fig. 2** (a: FH extinction ratio for the three taper variants;
+  b: SH extinction ratio; c: total and radiated loss at FH and SH; d: the FH
+  fabrication-tolerance map over etch depth x top width), **all of supplemental
+  Fig. 5** (a/b: mixing-angle and coupling-magnitude error over the (gap, dTW)
+  plane vs the FDE sweep, with the design trajectory overlaid; c: realized
+  adiabaticity eta(z) for the designed / constant-width / FAQUAD bends), and a
+  **broad-band (> 1 octave, ~0.8*SH .. 1.2*FH) bar/cross transmission** plot.
+  Outputs are written suffixed by model, e.g. `kwolek2026_fig2_anisotropic.png`.
+
+**Two material models.** Everything is run with both `ln_material(wl,
+"anisotropic")` (the real `(ne^2, no^2, no^2)` tensor) and `ln_material(wl,
+"isotropic")` (a deliberately fake `(ne^2, ne^2, ne^2)` LN). The TE/TM mode
+crossings at the SH band are a purely anisotropic effect; running the isotropic
+model alongside isolates their influence on the SH transmission.
 
 **Launch / metric / polarization.** The device operates on the **TE** mode, so
 the input is the fundamental TE rib mode (`input_launch_index`, `te_fraction >
@@ -81,26 +110,42 @@ counted as loss -- a metric that is stable in `num_modes` where a naive
 "classify every mode by centroid sign" is not.
 
 **FH vs SH (honest status).** With the correct TE launch, the **fundamental**
-behaves as intended: it transfers to the cross port with **cross ~ 0.9** and low
-loss, converging well in mesh/cells/modes (chi(0)=pi/2 and the Euler-S-bend
-gap/dTW vary smoothly, dTW->0 at the ends). The **second harmonic is intrinsically
-hard**: the rib is strongly multimode at 775 nm, so the serial EME cascade (which
-holds every cell's modes at once) needs more modes than fit in memory to fully
-conserve power. The SH stays in the bar port (bar/cross contrast is large) but a
-non-negligible fraction scatters among the dense SH modes, and the SH numbers are
-**not converged to ~1%** at a feasible cost -- they are a lower bound. (An earlier
-"deep-etched 500/400 nm" variant appeared to give ~0.9 SH bar at ~20 dB, but that
-was the TM-launch artifact; with the correct TE launch the deep ridge is *more*
-multimode and the SH EME conserves even less power, so the example uses the
-paper's shallow 300/100 nm stack.)
+behaves as intended: it transfers to the cross port with **cross ~ 0.9-0.98**
+and low loss, converging well in mesh/cells/modes (chi(0)=pi/2, the gap/dTW vary
+smoothly through the cubic + Euler bends, dTW->0 at the ends). The **second
+harmonic is intrinsically hard**: the rib is strongly multimode at 775 nm, so the
+serial EME cascade (which holds every cell's modes at once) needs more modes than
+fit in memory to fully conserve power. The SH stays in the bar port (bar/cross
+contrast is large) but a non-negligible fraction scatters among the dense SH
+modes, and the SH numbers are **not converged to ~1%** at a feasible cost. (An
+earlier "deep-etched 500/400 nm" variant appeared to give ~0.9 SH bar at ~20 dB,
+but that was the TM-launch artifact; with the correct TE launch the deep ridge is
+*more* multimode, so the example uses the paper's shallow 300/100 nm stack.)
 
-**Convergence (to ~1%).** FH: mesh `Δ ~ 0.02 µm`, `~150-200` cells, `~10-12`
-modes. SH: needs `Δ ~ 0.015 µm` and many more modes (`>= 20-24`) than the serial
-cascade can hold in memory alongside the cells (`cells × modes` is capped at
-~2000 here), which is why SH is not 1%-converged; a distributed / chunked EME
-(or the `meow.fde.sparse` operator path) would be the route to a converged SH.
-The ring-resonator test structures in `kwolek2026_test_structures.py` are the
-companion passives for measuring the excess loss / intrinsic Q after fab.
+**Interaction length and the modeled coupling.** The paper's final design uses
+`l_m = 264 um` (`kwolek2026_faquad.L_M`) at its *measured* coupling. meow's
+calibrated -- and resolution-converged -- coupling for this stack is about 2x
+weaker (`kappa_m ~ 0.0074/um`), so reaching the same FAQUAD adiabaticity
+(`eta ~ 0.19-0.22`, the regime of a clean, complete FH transfer) takes a
+proportionally longer interaction length: the reproduction figures use
+`FIG_L_M ~ 520 um` (`kwolek2026_figures`), at which the FH cross transfer is a
+clean `~ 0.98`. The FAQUAD methodology (design at constant adiabaticity, the knob
+being `l_m`) is identical; only the absolute length scales with the modeled
+coupling strength.
+
+**Convergence (to ~1%).** FH: mesh `Δ ~ 0.02-0.03 µm`, `~150-200` cells,
+`~10-12` modes. SH: needs `Δ ~ 0.015 µm` and many more modes (`>= 20-24`) than
+the serial cascade can hold in memory alongside the cells, which is why SH is not
+1%-converged; a distributed / chunked EME (or the `meow.fde.sparse` operator
+path) would be the route to a converged SH.
+
+**Test structures (paper Fig. 3).** `kwolek2026_test_structures.py` emits the
+companion passives for measuring excess loss / intrinsic Q after fab: all-pass
+and add-drop micro-rings (radius + gap sweeps), and the **Fig. 3 FH
+characterization layout** -- a `dut_resonator` (a racetrack whose coupler *is*
+the FAQUAD device, closed into a ring with matched Euler bends) above a plain
+`control_resonator` of the same footprint (`fh_measurement_layout`) -- all on
+the same angled-sidewall rib layer, written to GDS.
 
 ## Generalized dichroic beam-splitter designer
 
@@ -213,6 +258,31 @@ broad-band bar/cross transmission spectrum** spanning more than an octave (from
 and SH** (`*_propagation.png`, with the per-cell mode fields in a compressed
 HDF5 `*_fields.h5`). The EME is distributed across local worker threads
 (`analyze_design`).
+
+**Spectrum grid, port tapers and test structures (shared `_designer_extras`).**
+The wavelength-varying designers (`kwolek_designer` and the `dichroic_designer`
+family) share three helpers in `_designer_extras.py`:
+
+- `spectrum_grid` -- a **column of the dense broad-band spectra**, one row per
+  design, all on the **same wavelength axis**, with each design's target
+  wavelength(s) drawn as **dashed vertical lines**. `kwolek_designer` writes it
+  as `figures/kwolek_designer_spectrum_grid.png` (FH/SH marked), the dichroic
+  designer as `figures/dichroic_designer_spectrum_grid.png` (cutoff marked).
+- `tapered_ports` -- optional **linear access tapers** from the device edge
+  width to a target width at each named port, controlled by the
+  `port_widths` / `taper_lengths` keyword arguments of `faquad_combiner`
+  (Kwolek) and `tapered_component` (dichroic); the **default adds no taper** and
+  keeps the designed edge widths.
+- `coupler_cutback_array` -- a **test-structure array** with a varied number of
+  cascaded cross/bar couplings but a **constant total waveguide length** between
+  regularly-spaced ports on either side of a **5 mm-wide chip** (the cut-back
+  layout for the per-coupler excess loss), plus a routed binary `splitter_tree`.
+
+`kwolek_designer.design_test_structures` writes, per design, the cut-back array
+**and all the paper's resonant-loss structures** (all-pass + add-drop rings and
+the Fig. 3 DUT / control racetracks) as GDS and a labelled preview;
+`dichroic_designer.dichroic_test_structures` writes the cut-back array for the
+dichroic coupler.
 
 `kwolek_designer_slurm.py` is the **slurm-cluster version**: it produces the
 same per-design output (broad-band spectrum + GDS + FH/SH field plots) but

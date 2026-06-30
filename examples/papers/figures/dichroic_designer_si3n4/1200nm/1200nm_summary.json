@@ -1,0 +1,19 @@
+{
+  "label": "1200nm",
+  "kind": "dichroic",
+  "cutoff_nm": 1200.0,
+  "w_a_nm": 479.5,
+  "gap_nm": 950.0,
+  "length_um": 2000.0,
+  "short_pass_at_cutoff": 0.0006,
+  "long_pass_at_cutoff": 0.9816,
+  "saved_fields": false,
+  "out_dir": "/home/user/meow/examples/papers/figures/dichroic_designer_si3n4/1200nm",
+  "files": [
+    "1200nm.gds",
+    "1200nm_design.png",
+    "1200nm_spectrum.csv",
+    "1200nm_spectrum.json",
+    "1200nm_spectrum.png"
+  ]
+}

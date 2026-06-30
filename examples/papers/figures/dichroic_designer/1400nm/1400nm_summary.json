@@ -1,0 +1,19 @@
+{
+  "label": "1400nm",
+  "kind": "dichroic",
+  "cutoff_nm": 1400.0,
+  "w_a_nm": 300.3,
+  "gap_nm": 300.0,
+  "length_um": 2000.0,
+  "short_pass_at_cutoff": 0.0,
+  "long_pass_at_cutoff": 0.633,
+  "saved_fields": false,
+  "out_dir": "/home/user/meow/examples/papers/figures/dichroic_designer/1400nm",
+  "files": [
+    "1400nm.gds",
+    "1400nm_design.png",
+    "1400nm_spectrum.csv",
+    "1400nm_spectrum.json",
+    "1400nm_spectrum.png"
+  ]
+}

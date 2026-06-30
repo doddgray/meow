@@ -1,0 +1,2 @@
+label,kind,cutoff_nm,w_a_nm,gap_nm,length_um,short_pass_at_cutoff,long_pass_at_cutoff,saved_fields,out_dir,files
+1150nm,dichroic,1150.0,1693.9,1150.0,2000.0,0.7595,0.1348,False,/home/user/meow/examples/papers/figures/dichroic_designer_si3n4_40nm/1150nm,"[""1150nm.gds"", ""1150nm_design.png"", ""1150nm_spectrum.csv"", ""1150nm_spectrum.json"", ""1150nm_spectrum.png""]"

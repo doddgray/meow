@@ -63,6 +63,7 @@ from examples.papers.kwolek2026_faquad import (
     LAYER_RIB,
     FaquadDesign,
     adaptive_cell_lengths,
+    combiner_from_design,
     ln_material,
     sio2_material,
 )
@@ -144,11 +145,25 @@ class TFPlatform:
         return self.etch_depth * np.tan(np.deg2rad(self.sidewall_deg))
 
 
-def tfln_platform(core_thickness: float, **kwargs: float) -> TFPlatform:
-    """An X-cut thin-film lithium niobate platform of a given thickness."""
+def tfln_platform(
+    core_thickness: float, model: str = "anisotropic", **kwargs: float
+) -> TFPlatform:
+    """An X-cut thin-film lithium niobate platform of a given thickness.
+
+    ``model`` selects the LiNbO3 material model (see
+    :func:`kwolek2026_faquad.ln_material`): ``"anisotropic"`` (the real uniaxial
+    crystal) or ``"isotropic"`` (the extraordinary index on every axis). Running
+    a design on both isolates the influence of the LN anisotropy.
+    """
+    if model == "anisotropic":
+        core: Callable[[float], mw.Material] = ln_material
+        suffix = ""
+    else:
+        core = lambda wl: ln_material(wl, model)  # noqa: E731
+        suffix = f"-{model}"
     return TFPlatform(
-        name=f"TFLN-{core_thickness * 1e3:.0f}nm",
-        core=ln_material,
+        name=f"TFLN-{core_thickness * 1e3:.0f}nm{suffix}",
+        core=core,
         core_thickness=core_thickness,
         **kwargs,
     )
@@ -658,43 +673,30 @@ def filter_from_params(
 # layout + platform-aware extrusion / EME cells
 # --------------------------------------------------------------------------
 def faquad_combiner(
-    design: FaquadDesign, w_top: float, num_points: int = 601
+    design: FaquadDesign,
+    w_top: float,
+    num_points: int = 601,
+    *,
+    port_widths: dict[str, float] | None = None,
+    taper_lengths: dict[str, float] | float = 50.0,
 ) -> gf.Component:
     """Parametric FAQUAD combiner layout for a designed device (paper Fig. 1a).
 
-    Two rib waveguides whose top-width difference follows the FAQUAD taper and
-    whose gap follows the constant-gap + Euler-S-bend separation profile (drawn
-    polygons are the rib *top* widths).
+    Delegates to :func:`kwolek2026_faquad.combiner_from_design`: the device is a
+    single ``gdsfactory`` path extruded with two parametric-width rib sections
+    tracing the constant-gap region, the cubic separation bend and the matched
+    Euler bend into the straight outer waveguides (the angled sidewalls are
+    added at extrusion).
+
+    ``port_widths`` optionally adds linear access tapers from the device edge
+    width to a target width at the named ports (``in_bar``/``in_cross``/
+    ``out_bar``/``out_cross``), over ``taper_lengths`` [um]; the default
+    (``None``) adds *no* taper and keeps the designed edge widths.
     """
-    c = gf.Component()
-    z = np.linspace(-design.half_length, design.half_length, num_points)
-    gap = design.gap(z)
-    dtw = design.dtw(z)
-    w_a = w_top + dtw / 2
-    w_b = w_top - dtw / 2
-    y_a_lo, y_a_hi = gap / 2, gap / 2 + w_a
-    y_b_hi, y_b_lo = -gap / 2, -gap / 2 - w_b
-    zs = z - z[0]
-    for lo, hi in [(y_a_lo, y_a_hi), (y_b_lo, y_b_hi)]:
-        upper = np.stack([zs, hi], axis=1)
-        lower = np.stack([zs, lo], axis=1)[::-1]
-        c.add_polygon(np.concatenate([upper, lower]), layer=LAYER_RIB)
-    c.add_port(
-        "in_bar",
-        center=(0.0, float((y_b_lo[0] + y_b_hi[0]) / 2)),
-        width=0.002 * round(float(w_b[0]) / 0.002),
-        orientation=180,
-        layer=LAYER_RIB,
-    )
-    for name, ys in [("out_bar", (y_b_lo, y_b_hi)), ("out_cross", (y_a_lo, y_a_hi))]:
-        c.add_port(
-            name,
-            center=(float(zs[-1]), float((ys[0][-1] + ys[1][-1]) / 2)),
-            width=0.002 * round(float(ys[1][-1] - ys[0][-1]) / 0.002),
-            orientation=0,
-            layer=LAYER_RIB,
-        )
-    return c
+    from examples.papers._designer_extras import tapered_ports
+
+    c = combiner_from_design(design, w_top, num_points)
+    return tapered_ports(c, port_widths, taper_lengths, layer=LAYER_RIB)
 
 
 def device_structures(
@@ -900,6 +902,111 @@ def analyze_design(
     return run.gather()
 
 
+def design_test_structures(
+    design: FaquadFilterDesign,
+    out_dir: Path | str,
+    *,
+    counts: tuple[int, ...] = (0, 1, 2, 4),
+    chip_width: float = 5000.0,
+) -> dict[str, object]:
+    """Write the per-design test-structure array (cut-back + resonators) + GDS.
+
+    Two families of passives for the designed FAQUAD coupler, on the same rib
+    layer, written to GDS and previewed in ``<label>_test_structures.png``:
+
+    - a **coupler cut-back array** -- rows with a varied number of cascaded
+      FAQUAD couplings but a *constant total waveguide length* between
+      regularly-spaced ports on either side of a ``chip_width``-wide (5 mm) chip,
+      to extract the per-coupler excess loss;
+    - **all the paper's resonant-loss test structures** -- all-pass and add-drop
+      micro-rings (radius + gap sweeps) and the Fig. 3 DUT / control racetrack
+      resonators (the DUT's coupler is the FAQUAD device).
+    """
+    import matplotlib.pyplot as plt
+
+    from examples.papers import _analysis
+    from examples.papers import kwolek2026_test_structures as kts
+    from examples.papers._designer_extras import coupler_cutback_array
+    from examples.papers._plot import plot_component
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    stem = _analysis._file_stem(faquad_label(design))
+    gdsdir = out / "gds"
+    gdsdir.mkdir(exist_ok=True)
+
+    cutback = coupler_cutback_array(
+        design.component, counts=counts, in_port="in_bar", thru_port="out_bar",
+        chip_width=chip_width, pitch=2.0 * design.platform.g_f + 4.0 * design.w_top,
+        width=design.w_top, layer=LAYER_RIB,
+    )
+    resonators = {
+        "allpass": kts.all_pass_ring(),
+        "adddrop": kts.add_drop_ring(),
+        "dut": kts.dut_resonator(),
+        "control": kts.control_resonator(),
+        "ring_array": kts.resonator_test_array(),
+    }
+    written: list[str] = []
+    for name, comp in {"cutback_array": cutback, **resonators}.items():
+        path = gdsdir / f"{stem}_{name}.gds"
+        comp.write_gds(path)
+        written.append(str(path))
+
+    fig, axes = plt.subplots(2, 1, figsize=(11, 7))
+    plot_component(cutback, axes[0])
+    axes[0].set_title(
+        f"coupler cut-back array ({', '.join(str(n) for n in counts)} couplings, "
+        f"constant length, {chip_width / 1e3:.0f} mm chip)"
+    )
+    axes[0].set_aspect("auto")
+    plot_component(kts.resonator_test_array(), axes[1])
+    axes[1].set_title("resonant-loss test structures (rings + DUT/control)")
+    axes[1].set_aspect("equal")
+    fig.suptitle(f"{faquad_label(design)}: test structures")
+    fig.tight_layout()
+    figpath = out / f"{stem}_test_structures.png"
+    fig.savefig(figpath, dpi=150)
+    plt.close(fig)
+    return {"gds": written, "figure": str(figpath)}
+
+
+def spectrum_grid_figure(
+    designs: list[FaquadFilterDesign], analyses_root: Path, out_path: Path
+) -> Path | None:
+    """Grid (column) of every design's dense broad-band bar/cross spectrum.
+
+    Reads the per-design ``*_spectrum.json`` written by :func:`analyze_design`
+    and stacks them in a column sharing one wavelength axis, with each design's
+    FH/SH target wavelengths drawn as dashed vertical lines.
+    """
+    import json
+
+    from examples.papers import _analysis
+    from examples.papers._designer_extras import spectrum_grid
+
+    rows = []
+    for d in designs:
+        stem = _analysis._file_stem(faquad_label(d))
+        jpath = analyses_root / stem / f"{stem}_spectrum.json"
+        if not jpath.exists():
+            continue
+        spec = json.loads(jpath.read_text())
+        rows.append({
+            "label": faquad_label(d),
+            "wls": np.asarray(spec["wavelength_um"]),
+            "bar": np.asarray(spec["bar"]),
+            "cross": np.asarray(spec["cross"]),
+            "design_wls": [d.sh_wl, d.fh_wl],
+        })
+    if not rows:
+        return None
+    return spectrum_grid(
+        rows, out_path, db=True,
+        title="FAQUAD designer: broad-band bar/cross spectra (>1 octave)",
+    )
+
+
 def main() -> dict[str, object]:
     """Design the full matrix (a coarse subset at low resolution) and plot it.
 
@@ -1004,7 +1111,23 @@ def main() -> dict[str, object]:
         )
         for d in designs
     }
-    return {"designs": summary, "analyses": analyses}
+    # per-design test-structure arrays (cut-back + resonant-loss structures)
+    test_structures = {
+        faquad_label(d): design_test_structures(
+            d, analyses_root / _analysis._file_stem(faquad_label(d))
+        )
+        for d in designs
+    }
+    # column grid of every design's broad-band bar/cross spectrum
+    grid = spectrum_grid_figure(
+        designs, analyses_root, FIGDIR / "kwolek_designer_spectrum_grid.png"
+    )
+    return {
+        "designs": summary,
+        "analyses": analyses,
+        "test_structures": test_structures,
+        "spectrum_grid": str(grid) if grid else None,
+    }
 
 
 if __name__ == "__main__":
