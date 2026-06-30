@@ -81,25 +81,33 @@ G_C = 1.20
 G_F = 3.0
 """Final gap between the output ports."""
 
-L_M = 120.0
-"""Constant-gap (Region I) length [um].
+L_M = 264.0
+"""Constant-gap (Region I) length [um] (paper final design value).
 
-The FH cross transfer is coupler-like in ``l_m`` and peaks near ``120-150 um``
-where the accumulated coupling completes the supermode swap (FH cross ~0.9);
-shorter lengths also keep the weakly-coupled SH in the bar port.
+The paper's final design uses ``l_m = 264 um`` together with the cubic-bend
+curvature ``a = 2 mm^-1`` and decoupling gap ``g_c = 1.2 um``, giving an
+adiabaticity parameter ``eta ~ 0.189`` (paper Sec. 2).
 """
 
-THETA_MAX_DEG = 1.0
-"""Maximum waveguide-axis angle of the Euler S-bend separation [deg].
+A_CURV = 0.002
+"""Cubic-bend curvature parameter ``a`` [1/um] (= 2 mm^-1, paper value).
 
-The lateral separation that opens the gap from ``g_m`` to ``g_f`` is realized
-with Euler (clothoid) S-bends whose tangent angle rises smoothly from zero to
-this maximum (relative to the propagation/horizontal axis) at the inflection
-and back to zero, giving curvature-continuous routing. It is kept small
-(``1 deg``): the shallow-etched rib mode sits only ~0.02 in index above the
-slab, so a steeper bend angle (the original ``3 deg``) radiates the guided mode
-into the slab continuum -- converged EME shows that dropping 3 deg -> 1 deg cuts
-the slab radiation loss from ~50% to a few percent.
+Region II opens the gap as the cubic ``g_e(z) = (2/3) a^2 (z - l_m/2)^3 + g_m``
+(paper Eq. 9), the paraxial Euler-bend approximation that keeps the coupling
+envelope ``kappa(z) = kappa_m exp(-((|z|-l_m/2)/z_0)^3)`` (Eq. 10) with
+``z_0 = (3 g_0 / (2 a^2))^(1/3)``. Smaller ``a`` -> gentler, longer bends.
+"""
+
+STRAIGHT_OUT = 10.0
+"""Straight outer-waveguide length [um] appended past the Euler bend (Region III)."""
+
+THETA_MAX_DEG = 1.0
+"""Backward-compatible Euler-angle cap [deg] (largely vestigial).
+
+The separation geometry is now the paper's cubic bend (Region II, set by ``a``)
+joined to a slope-matched Euler bend that flattens to the straight outer
+waveguide (Region III); the bend angles that result are sub-degree, so this cap
+no longer binds. It is retained only so older call sites keep working.
 """
 
 T_BOX = 1.2
@@ -153,23 +161,88 @@ def euler_sbend(
     return build(radius)
 
 
-def ln_material(wl: float) -> mw.AnisotropicMaterial:
-    """Uniaxial lithium niobate for an x-cut film, propagation along crystal y.
+def euler_to_straight(
+    theta_c_deg: float, lateral_rise: float, npoints: int = 400
+) -> tuple[np.ndarray, np.ndarray]:
+    """Euler (clothoid) bend that *starts* at angle ``theta_c`` and flattens.
 
-    Mode-plane axes: x (horizontal, in-plane) is the crystal z (extraordinary)
-    axis, y (vertical) and the propagation axis are ordinary axes, so the
-    permittivity tensor diagonal is ``(ne^2, no^2, no^2)``. Refractive
-    indices follow the congruent-LN Sellmeier equations of Zelmon et al.
-    (1997).
+    Region III of the coupler (paper Fig. 1a): the waveguide leaves the cubic
+    bend (Region II) at tangent angle ``theta_c`` and must rejoin a straight
+    outer waveguide. A genuine ``gdsfactory`` Euler segment ``euler(+theta_c)``
+    turns from 0 to ``theta_c`` with curvature rising linearly along its arc
+    length; traversed in reverse it starts at tangent ``theta_c`` (slope-matched
+    to the cubic) and relaxes to 0 (straight) with the curvature falling
+    smoothly to zero -- the curvature-optimized, low-loss transition the paper
+    uses. The clothoid is scale-invariant, so the radius is chosen to give the
+    required lateral rise ``(g_f - g_c)/2`` without changing the entry angle.
+
+    Returns ``(z, y)`` of the centerline starting at ``(0, 0)`` with ``z``
+    increasing and ``y`` rising by ``lateral_rise``.
     """
+    _ensure_pdk()
+
+    def build(radius: float) -> tuple[np.ndarray, np.ndarray]:
+        p = gp.euler(radius=radius, angle=float(theta_c_deg), p=1.0, npoints=npoints)
+        pts = np.asarray(p.points, dtype=float)
+        z = pts[-1, 0] - pts[::-1, 0]  # reverse + mirror: slope theta_c -> 0
+        y = pts[-1, 1] - pts[::-1, 1]
+        return z - z[0], y - y[0]
+
+    _, y1 = build(1.0)
+    rise = float(y1[-1])
+    radius = lateral_rise / rise if rise > 1e-9 else 1.0
+    return build(radius)
+
+
+def _ln_eps(wl: float) -> tuple[float, float]:
+    """(ne^2, no^2) of congruent LiNbO3 (Zelmon et al. 1997 Sellmeier)."""
     wl2 = wl**2
     no2 = 1 + 2.6734 * wl2 / (wl2 - 0.01764) + 1.2290 * wl2 / (wl2 - 0.05914)
     no2 += 12.614 * wl2 / (wl2 - 474.6)
     ne2 = 1 + 2.9804 * wl2 / (wl2 - 0.02047) + 0.5981 * wl2 / (wl2 - 0.0666)
     ne2 += 8.9543 * wl2 / (wl2 - 416.08)
+    return float(ne2), float(no2)
+
+
+#: Material-model selector for the LiNbO3 core. ``"anisotropic"`` is the real
+#: uniaxial crystal (tensor ``(ne^2, no^2, no^2)``); ``"isotropic"`` is the
+#: deliberately *fake* isotropic LN that puts the extraordinary index ``ne`` on
+#: every axis (tensor ``(ne^2, ne^2, ne^2)``). The two are run side by side to
+#: bracket the influence of the LN anisotropy -- in particular the TE/TM mode
+#: crossings at the SH band, which only the anisotropic model exhibits.
+LN_MODELS = ("anisotropic", "isotropic")
+
+
+def ln_material(wl: float, model: str = "anisotropic") -> mw.AnisotropicMaterial:
+    """Lithium niobate for an x-cut film, propagation along crystal y.
+
+    Mode-plane axes: x (horizontal, in-plane) is the crystal z (extraordinary)
+    axis, y (vertical) and the propagation axis are ordinary axes, so the real
+    (uniaxial) permittivity tensor diagonal is ``(ne^2, no^2, no^2)``.
+    Refractive indices follow the congruent-LN Sellmeier equations of Zelmon
+    et al. (1997).
+
+    Args:
+        wl: wavelength [um].
+        model: ``"anisotropic"`` (the real uniaxial crystal) or ``"isotropic"``
+            (a fake isotropic LN with the extraordinary index ``ne`` on all
+            three axes, ``(ne^2, ne^2, ne^2)``). The isotropic model removes the
+            TE/TM birefringence and so is free of the SH-band mode crossings the
+            real crystal shows; comparing the two isolates that effect.
+    """
+    ne2, no2 = _ln_eps(wl)
+    if model == "isotropic":
+        eps = [ne2, ne2, ne2]
+        name = "LiNbO3_xcut_iso"
+    elif model == "anisotropic":
+        eps = [ne2, no2, no2]
+        name = "LiNbO3_xcut"
+    else:
+        msg = f"unknown LN material model {model!r}; expected one of {LN_MODELS}"
+        raise ValueError(msg)
     return mw.AnisotropicMaterial(
-        name="LiNbO3_xcut",
-        eps=[ne2, no2, no2],
+        name=name,
+        eps=eps,
         meta={"color": (0.6, 0.2, 0.6, 0.9)},
     )
 
@@ -188,29 +261,60 @@ def sio2_material(wl: float) -> mw.IndexMaterial:
 # --- FAQUAD closed-form geometry (paper Eqs. 8-12) ---
 
 
-class FaquadDesign:
-    """FAQUAD coupler geometry from calibrated kappa(g) data, with Euler S-bends.
+VARIANTS = ("faquad_bends", "faquad_taper", "linear_taper")
+"""Taper/bend variants compared in paper Fig. 2a.
 
-    The constant-gap interaction section (Region I, length ``l_m``, gap
-    ``g_m``) is connected on either side to Euler (clothoid) S-bend
-    separations that smoothly open the gap from ``g_m`` to the final gap
-    ``g_f`` (paper Fig. 1a/1b). Because the S-bend curvature is continuous,
-    the gap ``g(z)`` and -- through the constant-adiabaticity condition -- the
-    coupling angle ``chi(z)`` and top-width difference ``dTW(z)`` all vary
-    smoothly with position. The decoupling gap ``g_c`` (end of the FAQUAD
-    evolution) is reached partway along the S-bend; beyond it (Region III)
-    ``dTW`` is linearly tapered back to zero at the device ends, as in the
-    paper.
+- ``"faquad_bends"``: the proposed design -- the FAQUAD top-width taper
+  ``dTW = 2 kappa cot(chi)/s`` is followed through the cubic separation bend
+  (Region II) so the adiabaticity is held constant over the *whole* evolution.
+- ``"faquad_taper"``: FAQUAD adiabaticity enforced only in the constant-gap
+  Region I; ``dTW`` is frozen at its Region-I value through the bend (the
+  conventional "optimize the straight section only" approach the paper improves
+  on).
+- ``"linear_taper"``: a naive linear top-width taper of the same peak ``dTW``.
+
+All three share the *same* physical gap profile and device length; only the
+top-width taper differs, exactly as in the paper's Fig. 2a comparison.
+"""
+
+
+class FaquadDesign:
+    """FAQUAD coupler geometry from calibrated kappa(g) data (paper Fig. 1a).
+
+    The longitudinal layout follows the paper's three regions:
+
+    - **Region I** (``|z| <= l_m/2``): a constant minimum-gap ``g_m`` straight
+      interaction section in which the FAQUAD top-width taper drives the
+      supermode mixing angle ``chi``.
+    - **Region II** (cubic bend): the gap opens as the cubic
+      ``g_e(z) = (2/3) a^2 (z - l_m/2)^3 + g_m`` (paper Eq. 9), the paraxial
+      Euler-bend approximation that yields the closed-form coupling envelope
+      ``kappa(z) = kappa_m exp(-((|z|-l_m/2)/z_0)^3)`` (Eq. 10), continuing the
+      FAQUAD evolution while the waveguides separate, up to the decoupling gap
+      ``g_c``.
+    - **Region III** (Euler bend -> straight): a genuine clothoid that *matches
+      the cubic bend's exit angle* and relaxes the curvature to zero into a
+      straight outer waveguide at the final gap ``g_f``; here ``dTW`` is tapered
+      linearly to zero (Fig. 1b).
+
+    Because the gap, the coupling ``kappa(z)``, the mixing angle ``chi(z)`` and
+    the top-width difference ``dTW(z)`` all vary smoothly, the supermode evolves
+    adiabatically; the adiabaticity parameter ``eta`` is fixed by
+    ``chi(z -> end) = pi`` (Eq. 12).
 
     Args:
         kappa_0: coupling prefactor [1/um] of ``kappa = kappa_0 exp(-g/g_0)``.
         g_0: coupling decay length [um].
         dbeta_dtw: phase-mismatch slope d(delta beta)/d(top width) [1/um^2].
         l_m: length of the constant-gap (Region I) section [um].
-        theta_max_deg: maximum waveguide-axis angle of the Euler S-bend [deg].
-        g_c: decoupling gap ending the FAQUAD evolution [um].
-        g_f: final gap between the output ports [um].
+        theta_max_deg: vestigial Euler-angle cap (see :data:`THETA_MAX_DEG`).
+        g_c: decoupling gap ending the FAQUAD/cubic evolution [um].
+        g_f: final gap between the straight output ports [um].
         dtw_max: fabrication limit on the top-width difference [um].
+        a: cubic-bend curvature parameter [1/um] (paper ``a``; see
+            :data:`A_CURV`).
+        variant: top-width taper law, one of :data:`VARIANTS`.
+        straight_out: straight outer-waveguide length appended past Region III.
     """
 
     def __init__(
@@ -223,7 +327,13 @@ class FaquadDesign:
         g_c: float = G_C,
         g_f: float = G_F,
         dtw_max: float = 0.5,
+        a: float = A_CURV,
+        variant: str = "faquad_bends",
+        straight_out: float = STRAIGHT_OUT,
     ) -> None:
+        if variant not in VARIANTS:
+            msg = f"unknown variant {variant!r}; expected one of {VARIANTS}"
+            raise ValueError(msg)
         self.kappa_0 = kappa_0
         self.g_0 = g_0
         self.dbeta_dtw = dbeta_dtw
@@ -232,45 +342,64 @@ class FaquadDesign:
         self.g_c = g_c
         self.g_f = g_f
         self.dtw_max = dtw_max
+        self.a = a
+        self.variant = variant
         self.kappa_m = kappa_0 * np.exp(-G_M / g_0)
+        # paper closed-form coupling-envelope length z_0 = (3 g_0 / (2 a^2))^1/3
+        self.z_0 = float((3.0 * g_0 / (2.0 * a**2)) ** (1.0 / 3.0))
 
-        # Euler S-bend that opens each waveguide laterally by (g_f - g_m)/2,
-        # i.e. opens the edge-to-edge gap from g_m to g_f.
-        z_sb, y_sb = euler_sbend((g_f - G_M) / 2.0, theta_max_deg)
-        self._z_sb = l_m / 2 + z_sb  # device coordinate (positive half)
-        self._g_sb = G_M + 2 * y_sb  # gap along the S-bend
-        self.l_sep = float(z_sb[-1])  # S-bend (separation) length per side
-        self.half_length = float(self._z_sb[-1])
-        # device coordinate where the gap reaches the decoupling gap g_c
-        self.z_c = float(np.interp(g_c, self._g_sb, self._z_sb))
+        self._build_gap_profile(straight_out)
 
         # chi(z) for a constant adiabaticity parameter eta, integrated
         # numerically: cos(chi) = -2 eta int_0^z kappa dz', with chi(0) = pi/2
-        # and eta fixed by chi(half_length) = pi (paper Eq. 11-12 generalized
-        # to the Euler-S-bend coupling envelope).
+        # and eta fixed by chi(half_length) = pi (paper Eqs. 11-12).
         zg = np.linspace(-self.half_length, self.half_length, 8001)
         integral = cumulative_trapezoid(self.kappa(zg), zg, initial=0.0)
         integral -= np.interp(0.0, zg, integral)
         self.eta = 1.0 / (2.0 * integral[-1])
         self._zg = zg
         self._chi = np.arccos(np.clip(-2.0 * self.eta * integral, -1.0, 1.0))
-        # signed top-width difference at the decoupling gap (+z_c side, < 0),
-        # from which Region III is linearly tapered to zero.
+        # FAQUAD dTW at the constant-gap end (Region I/II boundary) and at the
+        # decoupling gap, used by the taper variants / Region III linear taper.
+        self._dtw_m = float(self._dtw_faquad(self.l_m / 2))
         self._dtw_c = float(self._dtw_faquad(self.z_c))
 
-    def gap(self, z: float | np.ndarray) -> np.ndarray:
-        """Edge-to-edge gap g(z); z=0 is the device center.
+    def _build_gap_profile(self, straight_out: float) -> None:
+        """Assemble the positive-half gap profile g(|z|) over Regions I-III."""
+        l_m, a, g_c, g_f = self.l_m, self.a, self.g_c, self.g_f
+        # Region II: cubic gap opening from g_m at l_m/2 to g_c at z_II.
+        dz_c = ((g_c - G_M) * 3.0 / (2.0 * a**2)) ** (1.0 / 3.0)
+        z_ii = l_m / 2 + dz_c
+        z2 = np.linspace(l_m / 2, z_ii, 200)
+        g2 = (2.0 / 3.0) * a**2 * (z2 - l_m / 2) ** 3 + G_M
+        # Region III: Euler bend matched to the cubic exit slope, opening the
+        # gap from g_c to g_f (half-gap rise (g_f - g_c)/2) and flattening.
+        slope_c = a**2 * dz_c**2  # d(g/2)/dz at z_II (half-gap centerline)
+        theta_c = float(np.degrees(np.arctan(slope_c)))
+        ze, ye = euler_to_straight(theta_c, (g_f - g_c) / 2.0)
+        z3 = z_ii + ze
+        g3 = g_c + 2.0 * ye
+        # Region I (constant) + straight outer tail.
+        z1 = np.array([0.0, l_m / 2])
+        g1 = np.array([G_M, G_M])
+        z4 = np.array([z3[-1], z3[-1] + straight_out])
+        g4 = np.array([g_f, g_f])
+        zc = np.concatenate([z1, z2[1:], z3[1:], z4[1:]])
+        gc = np.concatenate([g1, g2[1:], g3[1:], g4[1:]])
+        # de-duplicate / enforce strictly increasing z for np.interp
+        keep = np.concatenate([[True], np.diff(zc) > 1e-9])
+        self._z_half = zc[keep]
+        self._g_half = gc[keep]
+        self.z_ii = float(z_ii)
+        self.theta_c_deg = theta_c
+        self.l_sep = float(self._z_half[-1] - l_m / 2)  # separation length / side
+        self.half_length = float(self._z_half[-1])
+        self.z_c = float(z_ii)  # gap reaches g_c exactly at z_II
 
-        Constant ``g_m`` in Region I, then the Euler S-bend profile that opens
-        smoothly to ``g_f`` (symmetric about z=0).
-        """
-        z = np.asarray(z, dtype=float)
-        az = np.abs(z)
-        return np.where(
-            az <= self.l_m / 2,
-            G_M,
-            np.interp(az, self._z_sb, self._g_sb),
-        )
+    def gap(self, z: float | np.ndarray) -> np.ndarray:
+        """Edge-to-edge gap g(z); z=0 is the device center (symmetric)."""
+        az = np.abs(np.asarray(z, dtype=float))
+        return np.interp(az, self._z_half, self._g_half)
 
     def kappa(self, z: float | np.ndarray) -> np.ndarray:
         """Coupling profile kappa(z) = kappa_0 exp(-g(z)/g_0) (paper Eq. 10)."""
@@ -280,6 +409,11 @@ class FaquadDesign:
         """FAQUAD mixing angle chi(z), chi(0) = pi/2, monotonic 0 -> pi."""
         return np.interp(np.asarray(z, dtype=float), self._zg, self._chi)
 
+    def dbeta(self, z: float | np.ndarray) -> np.ndarray:
+        """Phase-mismatch ``delta beta(z) = kappa(z) cot(chi(z))`` (paper Sec. 2)."""
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.nan_to_num(self.kappa(z) / np.tan(self.chi(z)), nan=0.0)
+
     def _dtw_faquad(self, z: float | np.ndarray) -> np.ndarray:
         """Raw FAQUAD top-width difference dTW = 2 kappa cot(chi) / s.
 
@@ -288,43 +422,92 @@ class FaquadDesign:
         mismatch is ``2 kappa cot(chi)`` and the top-width difference is
         ``dTW = 2 kappa cot(chi) / s`` (clipped to the fabrication limit).
         """
-        chi = self.chi(z)
         with np.errstate(divide="ignore", invalid="ignore"):
-            dbeta = 2 * self.kappa(z) / np.tan(chi)
+            dbeta = 2 * self.kappa(z) / np.tan(self.chi(z))
         dtw = np.nan_to_num(dbeta / self.dbeta_dtw, nan=0.0)
         return np.clip(dtw, -self.dtw_max, self.dtw_max)
 
     def dtw(self, z: float | np.ndarray) -> np.ndarray:
-        """Top-width difference dTW(z), tapered linearly to zero past g_c.
+        """Top-width difference dTW(z) for the configured :attr:`variant`.
 
-        In Regions I-II (gap up to the decoupling gap ``g_c``) dTW follows the
-        FAQUAD prescription; in Region III it is linearly tapered to zero at
-        the device ends, enhancing fabrication tolerance and bandwidth (paper
-        Sec. 2, Fig. 1b).
+        All variants are antisymmetric in ``z`` and return to zero at the device
+        ends. ``faquad_bends`` follows the FAQUAD prescription through the cubic
+        bend; ``faquad_taper`` freezes ``dTW`` past Region I; ``linear_taper``
+        ramps a linear taper of the same peak amplitude. In every case Region III
+        (past the decoupling gap ``g_c``) is linearly tapered to zero.
         """
         z = np.asarray(z, dtype=float)
         az = np.abs(z)
-        span = self.half_length - self.z_c
+        span = max(self.half_length - self.z_c, 1e-9)
         ramp = np.clip((self.half_length - az) / span, 0.0, 1.0)
+        if self.variant == "linear_taper":
+            peak = abs(self._dtw_c)
+            rise = -peak * np.clip(az / max(self.z_c, 1e-9), 0.0, 1.0)
+            inner = np.sign(z) * rise  # antisymmetric, sign matches FAQUAD
+            return np.where(az <= self.z_c, inner, np.sign(z) * (-peak) * ramp)
+        if self.variant == "faquad_taper":
+            # FAQUAD only in Region I; frozen at its end value through the bend.
+            inner = np.where(
+                az <= self.l_m / 2,
+                self._dtw_faquad(z),
+                np.sign(z) * self._dtw_m,
+            )
+            return np.where(az <= self.z_c, inner, np.sign(z) * self._dtw_c * ramp)
+        # faquad_bends (default): FAQUAD through Region II, linear in Region III.
         return np.where(
             az <= self.z_c,
             self._dtw_faquad(z),
             np.sign(z) * self._dtw_c * ramp,
         )
 
+    def adiabaticity(
+        self, z: float | np.ndarray, *, constant_width: bool = False
+    ) -> np.ndarray:
+        """Local adiabaticity eta(z) = (dchi/dz) sin(chi) / (2 kappa) (Eq. 7).
+
+        With the FAQUAD ``chi(z)`` this is flat at the design ``eta``. With
+        ``constant_width=True`` the phase-mismatch is *frozen* past Region I
+        (constant top-width bends), so ``chi`` is recomputed from
+        ``tan(chi) = kappa / delta_beta_frozen`` -- giving the strong deviation
+        of the constant-width bends in paper Fig. 5c.
+        """
+        z = np.asarray(z, dtype=float)
+        kap = self.kappa(z)
+        if not constant_width:
+            chi = self.chi(z)
+        else:
+            # Constant-width bends: the phase-mismatch is frozen at its
+            # Region-I-end value, so chi follows tan(chi) = kappa / dbeta_frozen
+            # (same 0..pi branch as the FAQUAD chi) instead of the engineered
+            # FAQUAD profile -- the deviation the paper's Fig. 5c highlights.
+            dbeta_frozen = float(self.dbeta(self.l_m / 2))
+            az = np.abs(z)
+            chi_bend = np.arctan2(kap, dbeta_frozen)  # in (0, pi/2)
+            chi = np.where(
+                az <= self.l_m / 2,
+                self.chi(z),
+                np.where(z >= 0, np.pi - chi_bend, chi_bend),
+            )
+        dchi = np.gradient(chi, z)
+        return np.abs(dchi) * np.sin(chi) / (2.0 * np.maximum(kap, 1e-12))
+
     def __repr__(self) -> str:
         return (
-            f"FaquadDesign(l_m={self.l_m:.1f}, theta_max_deg={self.theta_max_deg:.1f}, "
-            f"l_sep={self.l_sep:.1f}, z_c={self.z_c:.1f}, eta={self.eta:.3f})"
+            f"FaquadDesign(l_m={self.l_m:.1f}, a={self.a:.4f}, "
+            f"z_ii={self.z_ii:.1f}, l_sep={self.l_sep:.1f}, "
+            f"half_length={self.half_length:.1f}, eta={self.eta:.3f}, "
+            f"variant={self.variant!r})"
         )
 
 
 # --- meow structures ---
 
 
-def _background(wl: float, z_max: float, x_span: tuple[float, float]) -> list:
+def _background(
+    wl: float, z_max: float, x_span: tuple[float, float], model: str = "anisotropic"
+) -> list:
     """SiO2 under-cladding + LN slab (air top cladding after etching)."""
-    ln = ln_material(wl)
+    ln = ln_material(wl, model)
     sio2 = sio2_material(wl)
     box = mw.Structure(
         material=sio2,
@@ -354,10 +537,13 @@ def _background(wl: float, z_max: float, x_span: tuple[float, float]) -> list:
 
 
 def rib_structures(
-    wl: float, widths: list[float], centers: list[float]
+    wl: float,
+    widths: list[float],
+    centers: list[float],
+    model: str = "anisotropic",
 ) -> list[mw.Structure3D]:
     """Straight TFLN ribs (for FDE calibration), via angled-sidewall prisms."""
-    ln = ln_material(wl)
+    ln = ln_material(wl, model)
     ribs = [
         mw.Structure(
             material=ln,
@@ -387,7 +573,7 @@ def rib_structures(
             strict=True,
         )
     ]
-    return ribs + _background(wl, 1.0, x_span=(-4.5, 4.5))
+    return ribs + _background(wl, 1.0, x_span=(-4.5, 4.5), model=model)
 
 
 def calib_mesh(res: float = 0.04) -> mw.Mesh2D:
@@ -414,14 +600,18 @@ def solve_te_neffs(
     return [float(np.real(m.neff)) for m in te[:num_te]]
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=16)
 def calibrate(
-    wl: float = 1.55, res: float = 0.04, compute_modes: Callable | None = None
+    wl: float = 1.55,
+    res: float = 0.04,
+    compute_modes: Callable | None = None,
+    model: str = "anisotropic",
 ) -> tuple[float, float, float]:
     """Extract (kappa_0, g_0, dbeta_dtw) from FDE solves (workflow step 1).
 
-    ``compute_modes`` selects the FDE backend (default: tidy3d); it is part of
-    the memoization key, so different backends are cached separately.
+    ``compute_modes`` selects the FDE backend (default: tidy3d) and ``model``
+    selects the LN material model (:func:`ln_material`); both are part of the
+    memoization key, so different backends/models are cached separately.
     """
     mesh = calib_mesh(res)
     k0 = 2 * np.pi / wl
@@ -431,7 +621,7 @@ def calibrate(
     for g in gaps:
         x0 = (W_TOP + g) / 2
         n_p, n_m = solve_te_neffs(
-            rib_structures(wl, [W_TOP, W_TOP], [-x0, x0]),
+            rib_structures(wl, [W_TOP, W_TOP], [-x0, x0], model),
             wl,
             mesh,
             compute_modes=compute_modes,
@@ -444,7 +634,7 @@ def calibrate(
     dws = np.array([-0.05, 0.0, 0.05])
     neffs = [
         solve_te_neffs(
-            rib_structures(wl, [W_TOP + dw], [0.0]),
+            rib_structures(wl, [W_TOP + dw], [0.0], model),
             wl,
             mesh,
             4,
@@ -460,6 +650,95 @@ def calibrate(
 # --- parametric layout ---
 
 
+def combiner_from_design(
+    design: FaquadDesign, w_top: float = W_TOP, num_points: int = 601
+) -> gf.Component:
+    """Build the FAQUAD combiner layout from a :class:`FaquadDesign` via paths.
+
+    The whole device is defined with a single straight ``gdsfactory`` path that
+    is extruded with two **parametric-width** sections -- one per rib waveguide.
+    Each section's :func:`width_function` traces the rib *top* width ``w(z)``
+    and its :func:`offset_function` traces the rib centerline ``g(z)/2 + w/2``
+    along the constant-gap interaction region (I), the cubic separation bend
+    (II) and the matched Euler bend into the straight outer waveguide (III).
+    Sampling the straight base path uniformly in ``z`` makes the path parameter
+    ``t`` linear in ``z`` (``t = z/L``), so the profiles map directly. The
+    angled rib sidewalls are added at extrusion (:func:`device_structures`).
+
+    The top waveguide A ends as the cross port; the bottom waveguide B carries
+    the input/bar port. (``gdsfactory`` measures section ``offset`` to the
+    right of the travel direction, i.e. ``y = -offset``, which the offset
+    functions account for.)
+    """
+    from gdsfactory import path as _gp
+    from gdsfactory.cross_section import CrossSection, Section
+
+    length = 2.0 * design.half_length
+    zc = np.linspace(0.0, length, num_points)  # layout x coordinate
+    z = zc - design.half_length  # device coordinate (-half .. +half)
+    t = zc / length  # normalized path parameter in [0, 1]
+    gap = design.gap(z)
+    dtw = design.dtw(z)
+    w_a = w_top + dtw / 2  # waveguide A (top, +y, cross port)
+    w_b = w_top - dtw / 2  # waveguide B (bottom, -y, input/bar port)
+    y_a = gap / 2 + w_a / 2  # rib-A centerline (> 0)
+    y_b = -(gap / 2 + w_b / 2)  # rib-B centerline (< 0)
+
+    def _section(y_center: np.ndarray, width: np.ndarray, name: str) -> Section:
+        return Section(
+            width=float(width[0]),
+            offset=float(-y_center[0]),  # gdsfactory sign: y = -offset
+            layer=LAYER_RIB,
+            name=name,
+            width_function=lambda tt: np.interp(np.asarray(tt), t, width),
+            offset_function=lambda tt: -np.interp(np.asarray(tt), t, y_center),
+        )
+
+    xs = CrossSection(
+        sections=(
+            _section(y_a, w_a, "cross"),
+            _section(y_b, w_b, "bar"),
+        )
+    )
+    extruded = _gp.extrude(_gp.straight(length=length, npoints=num_points), xs)
+    c = gf.Component()
+    c.add_ref(extruded)
+    c.flatten()
+
+    def _q(w: float) -> float:
+        return 0.002 * round(w / 0.002)
+
+    c.add_port(
+        "in_bar",
+        center=(0.0, float(y_b[0])),
+        width=_q(float(w_b[0])),
+        orientation=180,
+        layer=LAYER_RIB,
+    )
+    c.add_port(
+        "in_cross",
+        center=(0.0, float(y_a[0])),
+        width=_q(float(w_a[0])),
+        orientation=180,
+        layer=LAYER_RIB,
+    )
+    c.add_port(
+        "out_bar",
+        center=(float(zc[-1]), float(y_b[-1])),
+        width=_q(float(w_b[-1])),
+        orientation=0,
+        layer=LAYER_RIB,
+    )
+    c.add_port(
+        "out_cross",
+        center=(float(zc[-1]), float(y_a[-1])),
+        width=_q(float(w_a[-1])),
+        orientation=0,
+        layer=LAYER_RIB,
+    )
+    return c
+
+
 @gf.cell
 def faquad_combiner(
     kappa_0: float,
@@ -469,58 +748,24 @@ def faquad_combiner(
     theta_max_deg: float = THETA_MAX_DEG,
     w_top: float = W_TOP,
     num_points: int = 601,
+    variant: str = "faquad_bends",
 ) -> gf.Component:
     """Parametric FAQUAD wavelength combiner layout (paper Fig. 1a).
 
-    Two rib waveguides whose top-width difference follows the FAQUAD taper
-    and whose gap follows the constant-gap + Euler-S-bend separation profile.
-    The drawn polygons are the rib *top* widths; the angled sidewalls are
-    added at extrusion time.
+    Builds the three-region cubic-bend FAQUAD layout (see
+    :class:`FaquadDesign`) from a single ``gdsfactory`` path extruded with
+    parametric rib top widths (:func:`combiner_from_design`). ``variant`` picks
+    the top-width taper law compared in paper Fig. 2a.
     """
-    design = FaquadDesign(kappa_0, g_0, dbeta_dtw, l_m, theta_max_deg)
-    c = gf.Component()
-    z = np.linspace(-design.half_length, design.half_length, num_points)
-    gap = design.gap(z)
-    dtw = design.dtw(z)
-    w_a = w_top + dtw / 2  # waveguide A (top, ends as the cross port)
-    w_b = w_top - dtw / 2  # waveguide B (bottom, the input/bar port)
-
-    y_a_lo = gap / 2
-    y_a_hi = gap / 2 + w_a
-    y_b_hi = -gap / 2
-    y_b_lo = -gap / 2 - w_b
-
-    zs = z - z[0]  # layout coordinates start at 0
-    for lo, hi in [(y_a_lo, y_a_hi), (y_b_lo, y_b_hi)]:
-        upper = np.stack([zs, hi], axis=1)
-        lower = np.stack([zs, lo], axis=1)[::-1]
-        c.add_polygon(np.concatenate([upper, lower]), layer=LAYER_RIB)
-
-    c.add_port(
-        "in_bar",
-        center=(0.0, float((y_b_lo[0] + y_b_hi[0]) / 2)),
-        width=0.002 * round(float(w_b[0]) / 0.002),
-        orientation=180,
-        layer=LAYER_RIB,
+    design = FaquadDesign(
+        kappa_0, g_0, dbeta_dtw, l_m, theta_max_deg, variant=variant
     )
-    c.add_port(
-        "out_bar",
-        center=(float(zs[-1]), float((y_b_lo[-1] + y_b_hi[-1]) / 2)),
-        width=0.002 * round(float(w_b[-1]) / 0.002),
-        orientation=0,
-        layer=LAYER_RIB,
-    )
-    c.add_port(
-        "out_cross",
-        center=(float(zs[-1]), float((y_a_lo[-1] + y_a_hi[-1]) / 2)),
-        width=0.002 * round(float(w_a[-1]) / 0.002),
-        orientation=0,
-        layer=LAYER_RIB,
-    )
-    return c
+    return combiner_from_design(design, w_top, num_points)
 
 
-def device_structures(component: gf.Component, wl: float) -> list[mw.Structure3D]:
+def device_structures(
+    component: gf.Component, wl: float, model: str = "anisotropic"
+) -> list[mw.Structure3D]:
     """Extrude the combiner with 65-degree sidewalls into meow structures.
 
     The drawn polygon is the rib *top* width: grow it by the sidewall run
@@ -530,7 +775,7 @@ def device_structures(component: gf.Component, wl: float) -> list[mw.Structure3D
     extrusion_rules = {
         LAYER_RIB: [
             mw.GdsExtrusionRule(
-                material=ln_material(wl),
+                material=ln_material(wl, model),
                 h_min=H_SLAB,
                 h_max=H_FILM,
                 buffer=run,
@@ -540,7 +785,7 @@ def device_structures(component: gf.Component, wl: float) -> list[mw.Structure3D
     }
     structs = mw.extrude_gds(component, extrusion_rules)
     z_max = float(component.xmax)
-    return structs + _background(wl, z_max, x_span=(-4.5, 4.5))
+    return structs + _background(wl, z_max, x_span=(-4.5, 4.5), model=model)
 
 
 def device_mesh(res: float = 0.04) -> mw.Mesh2D:
@@ -581,9 +826,10 @@ def device_cells(
     num_cells: int = 128,
     res: float = 0.04,
     design: FaquadDesign | None = None,
+    model: str = "anisotropic",
 ) -> list[mw.Cell]:
     """Discretize the combiner into EME cells (adaptive if a design is given)."""
-    structs = device_structures(component, wl)
+    structs = device_structures(component, wl, model)
     length = float(component.xmax)
     if design is None:
         Ls = np.full(num_cells, length / num_cells)

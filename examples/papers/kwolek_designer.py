@@ -63,6 +63,7 @@ from examples.papers.kwolek2026_faquad import (
     LAYER_RIB,
     FaquadDesign,
     adaptive_cell_lengths,
+    combiner_from_design,
     ln_material,
     sio2_material,
 )
@@ -144,11 +145,25 @@ class TFPlatform:
         return self.etch_depth * np.tan(np.deg2rad(self.sidewall_deg))
 
 
-def tfln_platform(core_thickness: float, **kwargs: float) -> TFPlatform:
-    """An X-cut thin-film lithium niobate platform of a given thickness."""
+def tfln_platform(
+    core_thickness: float, model: str = "anisotropic", **kwargs: float
+) -> TFPlatform:
+    """An X-cut thin-film lithium niobate platform of a given thickness.
+
+    ``model`` selects the LiNbO3 material model (see
+    :func:`kwolek2026_faquad.ln_material`): ``"anisotropic"`` (the real uniaxial
+    crystal) or ``"isotropic"`` (the extraordinary index on every axis). Running
+    a design on both isolates the influence of the LN anisotropy.
+    """
+    if model == "anisotropic":
+        core: Callable[[float], mw.Material] = ln_material
+        suffix = ""
+    else:
+        core = lambda wl: ln_material(wl, model)  # noqa: E731
+        suffix = f"-{model}"
     return TFPlatform(
-        name=f"TFLN-{core_thickness * 1e3:.0f}nm",
-        core=ln_material,
+        name=f"TFLN-{core_thickness * 1e3:.0f}nm{suffix}",
+        core=core,
         core_thickness=core_thickness,
         **kwargs,
     )
@@ -662,39 +677,13 @@ def faquad_combiner(
 ) -> gf.Component:
     """Parametric FAQUAD combiner layout for a designed device (paper Fig. 1a).
 
-    Two rib waveguides whose top-width difference follows the FAQUAD taper and
-    whose gap follows the constant-gap + Euler-S-bend separation profile (drawn
-    polygons are the rib *top* widths).
+    Delegates to :func:`kwolek2026_faquad.combiner_from_design`: the device is a
+    single ``gdsfactory`` path extruded with two parametric-width rib sections
+    tracing the constant-gap region, the cubic separation bend and the matched
+    Euler bend into the straight outer waveguides (the angled sidewalls are
+    added at extrusion).
     """
-    c = gf.Component()
-    z = np.linspace(-design.half_length, design.half_length, num_points)
-    gap = design.gap(z)
-    dtw = design.dtw(z)
-    w_a = w_top + dtw / 2
-    w_b = w_top - dtw / 2
-    y_a_lo, y_a_hi = gap / 2, gap / 2 + w_a
-    y_b_hi, y_b_lo = -gap / 2, -gap / 2 - w_b
-    zs = z - z[0]
-    for lo, hi in [(y_a_lo, y_a_hi), (y_b_lo, y_b_hi)]:
-        upper = np.stack([zs, hi], axis=1)
-        lower = np.stack([zs, lo], axis=1)[::-1]
-        c.add_polygon(np.concatenate([upper, lower]), layer=LAYER_RIB)
-    c.add_port(
-        "in_bar",
-        center=(0.0, float((y_b_lo[0] + y_b_hi[0]) / 2)),
-        width=0.002 * round(float(w_b[0]) / 0.002),
-        orientation=180,
-        layer=LAYER_RIB,
-    )
-    for name, ys in [("out_bar", (y_b_lo, y_b_hi)), ("out_cross", (y_a_lo, y_a_hi))]:
-        c.add_port(
-            name,
-            center=(float(zs[-1]), float((ys[0][-1] + ys[1][-1]) / 2)),
-            width=0.002 * round(float(ys[1][-1] - ys[0][-1]) / 0.002),
-            orientation=0,
-            layer=LAYER_RIB,
-        )
-    return c
+    return combiner_from_design(design, w_top, num_points)
 
 
 def device_structures(

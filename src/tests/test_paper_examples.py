@@ -49,6 +49,19 @@ def test_kwolek_test_structures_gds(tmp_path: Path) -> None:
     assert all(p.suffix == ".gds" and p.exists() for p in written)
 
 
+def test_kwolek_fig3_resonator_layouts() -> None:
+    """The Fig. 3 DUT/control racetracks and measurement layout build."""
+    dut = kts.dut_resonator(l_m=40.0, radius=30.0)
+    assert {"bus_in", "bus_out"} <= {p.name for p in dut.ports}
+    # the FAQUAD coupler is closed into a ring -> the loop rises well above 0
+    assert dut.ysize > 2 * 30.0  # at least the two 180-degree bends tall
+    ctrl = kts.control_resonator(l_m=40.0, radius=30.0)
+    assert ctrl.get_polygons()
+    layout = kts.fh_measurement_layout(l_m=40.0, radius=30.0)
+    # DUT stacked above the control resonator
+    assert layout.ysize > dut.ysize
+
+
 # --- Zhu 2025: user-defined multi-layer stack designer ---
 
 
@@ -786,6 +799,57 @@ def test_ln_material_anisotropy() -> None:
     assert ne < no_y  # negative uniaxial crystal
     assert 2.1 < ne < 2.2
     assert 2.2 < no_y < 2.3
+
+
+def test_ln_material_isotropic_uses_extraordinary_index() -> None:
+    """The fake isotropic LN puts ne on every axis (no birefringence)."""
+    aniso = kw.ln_material(1.55, "anisotropic")
+    iso = kw.ln_material(1.55, "isotropic")
+    ne = np.sqrt(np.real(aniso.eps[0, 0]))
+    eps_iso = np.real(np.diag(iso.eps))
+    assert np.allclose(eps_iso, ne**2)  # ne on all three axes
+    assert np.allclose(np.sqrt(eps_iso), np.sqrt(eps_iso[0]))  # truly isotropic
+
+
+def test_faquad_three_region_cubic_geometry(
+    calibration: tuple[float, float, float],
+) -> None:
+    """Region I constant gap, Region II cubic (Eq. 9), Region III Euler."""
+    design = kw.FaquadDesign(*calibration)
+    # the cubic Region II reaches the decoupling gap g_c exactly at z_ii
+    assert np.isclose(design.gap(design.z_ii), kw.G_C, atol=1e-6)
+    assert design.l_m / 2 < design.z_ii < design.half_length
+    # the cubic gap matches Eq. 9 in Region II
+    z = 0.5 * (design.l_m / 2 + design.z_ii)
+    expected = (2.0 / 3.0) * design.a**2 * (z - design.l_m / 2) ** 3 + kw.G_M
+    assert np.isclose(design.gap(z), expected, rtol=1e-3)
+    # the closed-form coupling-envelope length z_0 = (3 g_0 / (2 a^2))^(1/3)
+    assert np.isclose(design.z_0, (3 * design.g_0 / (2 * design.a**2)) ** (1 / 3))
+
+
+def test_faquad_variants_share_geometry_differ_in_taper(
+    calibration: tuple[float, float, float],
+) -> None:
+    """The Fig. 2a variants share the gap profile but differ in dTW."""
+    designs = {v: kw.FaquadDesign(*calibration, variant=v) for v in kw.VARIANTS}
+    ref = designs["faquad_bends"]
+    zs = np.linspace(-ref.half_length, ref.half_length, 121)  # spans all regions
+    for v, d in designs.items():
+        assert np.allclose(d.gap(zs), ref.gap(zs))  # same physical gap/length
+        assert np.isclose(d.half_length, ref.half_length)
+        dtw = d.dtw(zs)
+        assert np.allclose(dtw, -dtw[::-1], atol=1e-9)  # antisymmetric
+        assert np.isclose(d.dtw(0.0), 0.0, atol=1e-9)
+        if v != "faquad_bends":  # a different taper law -> different profile
+            assert not np.allclose(d.dtw(zs), ref.dtw(zs))
+
+
+def test_combiner_has_ring_closure_port(
+    calibration: tuple[float, float, float],
+) -> None:
+    """The parametric-path combiner exposes in_cross (for ring closure)."""
+    c = kw.faquad_combiner(*calibration)
+    assert "in_cross" in {p.name for p in c.ports}
 
 
 def test_combiner_layout(calibration: tuple[float, float, float]) -> None:
