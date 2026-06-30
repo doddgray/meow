@@ -259,6 +259,31 @@ and SH** (`*_propagation.png`, with the per-cell mode fields in a compressed
 HDF5 `*_fields.h5`). The EME is distributed across local worker threads
 (`analyze_design`).
 
+**Spectrum grid, port tapers and test structures (shared `_designer_extras`).**
+The wavelength-varying designers (`kwolek_designer` and the `dichroic_designer`
+family) share three helpers in `_designer_extras.py`:
+
+- `spectrum_grid` -- a **column of the dense broad-band spectra**, one row per
+  design, all on the **same wavelength axis**, with each design's target
+  wavelength(s) drawn as **dashed vertical lines**. `kwolek_designer` writes it
+  as `figures/kwolek_designer_spectrum_grid.png` (FH/SH marked), the dichroic
+  designer as `figures/dichroic_designer_spectrum_grid.png` (cutoff marked).
+- `tapered_ports` -- optional **linear access tapers** from the device edge
+  width to a target width at each named port, controlled by the
+  `port_widths` / `taper_lengths` keyword arguments of `faquad_combiner`
+  (Kwolek) and `tapered_component` (dichroic); the **default adds no taper** and
+  keeps the designed edge widths.
+- `coupler_cutback_array` -- a **test-structure array** with a varied number of
+  cascaded cross/bar couplings but a **constant total waveguide length** between
+  regularly-spaced ports on either side of a **5 mm-wide chip** (the cut-back
+  layout for the per-coupler excess loss), plus a routed binary `splitter_tree`.
+
+`kwolek_designer.design_test_structures` writes, per design, the cut-back array
+**and all the paper's resonant-loss structures** (all-pass + add-drop rings and
+the Fig. 3 DUT / control racetracks) as GDS and a labelled preview;
+`dichroic_designer.dichroic_test_structures` writes the cut-back array for the
+dichroic coupler.
+
 `kwolek_designer_slurm.py` is the **slurm-cluster version**: it produces the
 same per-design output (broad-band spectrum + GDS + FH/SH field plots) but
 distributes each design's EME as concurrent cell-subset jobs (`submit_runs` ->
