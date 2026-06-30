@@ -49,6 +49,39 @@ def test_kwolek_test_structures_gds(tmp_path: Path) -> None:
     assert all(p.suffix == ".gds" and p.exists() for p in written)
 
 
+def test_designer_extras_cutback_and_tapers() -> None:
+    """Shared designer helpers: no-op tapers, tapers, constant-length cut-back."""
+    from examples.papers import _designer_extras as dx
+
+    comb = kw.faquad_combiner(0.05, 0.4, 0.2, l_m=40.0)
+    # default: no taper -> identity
+    assert dx.tapered_ports(comb) is comb
+    tapered = dx.tapered_ports(comb, {"in_bar": 2.0}, taper_lengths=10.0)
+    assert {p.name for p in tapered.ports} == {p.name for p in comb.ports}
+    assert tapered.ports["in_bar"].width == pytest.approx(2.0, abs=2e-3)
+    # cut-back array: regularly-spaced ports across a 5 mm chip, equal row length
+    arr = dx.coupler_cutback_array(
+        comb, counts=(0, 1, 2), in_port="in_bar", thru_port="out_bar",
+        chip_width=5000.0, pitch=50.0, width=kw.W_TOP,
+    )
+    assert arr.xmax - arr.xmin == pytest.approx(5000.0, abs=5.0)  # 5 mm wide
+    assert {f"in_{n}" for n in (0, 1, 2)} <= {p.name for p in arr.ports}
+
+
+def test_designer_extras_spectrum_grid(tmp_path: Path) -> None:
+    """The spectrum grid stacks one row per design and writes a figure."""
+    from examples.papers import _designer_extras as dx
+
+    wls = np.linspace(0.62, 1.86, 20)
+    rows = [
+        {"label": f"d{i}", "wls": wls, "bar": np.full_like(wls, 0.5),
+         "cross": np.full_like(wls, 0.5), "design_wls": [0.775, 1.55]}
+        for i in range(2)
+    ]
+    out = dx.spectrum_grid(rows, tmp_path / "grid.png", db=True)
+    assert Path(out).exists()
+
+
 def test_kwolek_fig3_resonator_layouts() -> None:
     """The Fig. 3 DUT/control racetracks and measurement layout build."""
     dut = kts.dut_resonator(l_m=40.0, radius=30.0)

@@ -673,7 +673,12 @@ def filter_from_params(
 # layout + platform-aware extrusion / EME cells
 # --------------------------------------------------------------------------
 def faquad_combiner(
-    design: FaquadDesign, w_top: float, num_points: int = 601
+    design: FaquadDesign,
+    w_top: float,
+    num_points: int = 601,
+    *,
+    port_widths: dict[str, float] | None = None,
+    taper_lengths: dict[str, float] | float = 50.0,
 ) -> gf.Component:
     """Parametric FAQUAD combiner layout for a designed device (paper Fig. 1a).
 
@@ -682,8 +687,16 @@ def faquad_combiner(
     tracing the constant-gap region, the cubic separation bend and the matched
     Euler bend into the straight outer waveguides (the angled sidewalls are
     added at extrusion).
+
+    ``port_widths`` optionally adds linear access tapers from the device edge
+    width to a target width at the named ports (``in_bar``/``in_cross``/
+    ``out_bar``/``out_cross``), over ``taper_lengths`` [um]; the default
+    (``None``) adds *no* taper and keeps the designed edge widths.
     """
-    return combiner_from_design(design, w_top, num_points)
+    from examples.papers._designer_extras import tapered_ports
+
+    c = combiner_from_design(design, w_top, num_points)
+    return tapered_ports(c, port_widths, taper_lengths, layer=LAYER_RIB)
 
 
 def device_structures(
@@ -889,6 +902,111 @@ def analyze_design(
     return run.gather()
 
 
+def design_test_structures(
+    design: FaquadFilterDesign,
+    out_dir: Path | str,
+    *,
+    counts: tuple[int, ...] = (0, 1, 2, 4),
+    chip_width: float = 5000.0,
+) -> dict[str, object]:
+    """Write the per-design test-structure array (cut-back + resonators) + GDS.
+
+    Two families of passives for the designed FAQUAD coupler, on the same rib
+    layer, written to GDS and previewed in ``<label>_test_structures.png``:
+
+    - a **coupler cut-back array** -- rows with a varied number of cascaded
+      FAQUAD couplings but a *constant total waveguide length* between
+      regularly-spaced ports on either side of a ``chip_width``-wide (5 mm) chip,
+      to extract the per-coupler excess loss;
+    - **all the paper's resonant-loss test structures** -- all-pass and add-drop
+      micro-rings (radius + gap sweeps) and the Fig. 3 DUT / control racetrack
+      resonators (the DUT's coupler is the FAQUAD device).
+    """
+    import matplotlib.pyplot as plt
+
+    from examples.papers import _analysis
+    from examples.papers import kwolek2026_test_structures as kts
+    from examples.papers._designer_extras import coupler_cutback_array
+    from examples.papers._plot import plot_component
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    stem = _analysis._file_stem(faquad_label(design))
+    gdsdir = out / "gds"
+    gdsdir.mkdir(exist_ok=True)
+
+    cutback = coupler_cutback_array(
+        design.component, counts=counts, in_port="in_bar", thru_port="out_bar",
+        chip_width=chip_width, pitch=2.0 * design.platform.g_f + 4.0 * design.w_top,
+        width=design.w_top, layer=LAYER_RIB,
+    )
+    resonators = {
+        "allpass": kts.all_pass_ring(),
+        "adddrop": kts.add_drop_ring(),
+        "dut": kts.dut_resonator(),
+        "control": kts.control_resonator(),
+        "ring_array": kts.resonator_test_array(),
+    }
+    written: list[str] = []
+    for name, comp in {"cutback_array": cutback, **resonators}.items():
+        path = gdsdir / f"{stem}_{name}.gds"
+        comp.write_gds(path)
+        written.append(str(path))
+
+    fig, axes = plt.subplots(2, 1, figsize=(11, 7))
+    plot_component(cutback, axes[0])
+    axes[0].set_title(
+        f"coupler cut-back array ({', '.join(str(n) for n in counts)} couplings, "
+        f"constant length, {chip_width / 1e3:.0f} mm chip)"
+    )
+    axes[0].set_aspect("auto")
+    plot_component(kts.resonator_test_array(), axes[1])
+    axes[1].set_title("resonant-loss test structures (rings + DUT/control)")
+    axes[1].set_aspect("equal")
+    fig.suptitle(f"{faquad_label(design)}: test structures")
+    fig.tight_layout()
+    figpath = out / f"{stem}_test_structures.png"
+    fig.savefig(figpath, dpi=150)
+    plt.close(fig)
+    return {"gds": written, "figure": str(figpath)}
+
+
+def spectrum_grid_figure(
+    designs: list[FaquadFilterDesign], analyses_root: Path, out_path: Path
+) -> Path | None:
+    """Grid (column) of every design's dense broad-band bar/cross spectrum.
+
+    Reads the per-design ``*_spectrum.json`` written by :func:`analyze_design`
+    and stacks them in a column sharing one wavelength axis, with each design's
+    FH/SH target wavelengths drawn as dashed vertical lines.
+    """
+    import json
+
+    from examples.papers import _analysis
+    from examples.papers._designer_extras import spectrum_grid
+
+    rows = []
+    for d in designs:
+        stem = _analysis._file_stem(faquad_label(d))
+        jpath = analyses_root / stem / f"{stem}_spectrum.json"
+        if not jpath.exists():
+            continue
+        spec = json.loads(jpath.read_text())
+        rows.append({
+            "label": faquad_label(d),
+            "wls": np.asarray(spec["wavelength_um"]),
+            "bar": np.asarray(spec["bar"]),
+            "cross": np.asarray(spec["cross"]),
+            "design_wls": [d.sh_wl, d.fh_wl],
+        })
+    if not rows:
+        return None
+    return spectrum_grid(
+        rows, out_path, db=True,
+        title="FAQUAD designer: broad-band bar/cross spectra (>1 octave)",
+    )
+
+
 def main() -> dict[str, object]:
     """Design the full matrix (a coarse subset at low resolution) and plot it.
 
@@ -993,7 +1111,23 @@ def main() -> dict[str, object]:
         )
         for d in designs
     }
-    return {"designs": summary, "analyses": analyses}
+    # per-design test-structure arrays (cut-back + resonant-loss structures)
+    test_structures = {
+        faquad_label(d): design_test_structures(
+            d, analyses_root / _analysis._file_stem(faquad_label(d))
+        )
+        for d in designs
+    }
+    # column grid of every design's broad-band bar/cross spectrum
+    grid = spectrum_grid_figure(
+        designs, analyses_root, FIGDIR / "kwolek_designer_spectrum_grid.png"
+    )
+    return {
+        "designs": summary,
+        "analyses": analyses,
+        "test_structures": test_structures,
+        "spectrum_grid": str(grid) if grid else None,
+    }
 
 
 if __name__ == "__main__":
