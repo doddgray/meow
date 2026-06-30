@@ -622,6 +622,147 @@ def _silicon_platform() -> Platform:
     )
 
 
+def tapered_component(
+    design: DichroicDesign,
+    port_widths: dict[str, float] | None = None,
+    taper_lengths: dict[str, float] | float = 20.0,
+) -> gf.Component:
+    """The designed device with optional linear access tapers on its ports.
+
+    ``port_widths`` maps port names (``in0`` / ``short_pass`` / ``long_pass``)
+    to target widths [um]; the default (``None``) adds *no* taper and keeps the
+    designed edge widths. Useful to match a routing/measurement width.
+    """
+    from examples.papers._designer_extras import tapered_ports
+
+    return tapered_ports(
+        design.component, port_widths, taper_lengths, layer=LAYER_WG
+    )
+
+
+# shared broad-band grid axis: covers every demo cutoff (1.30 .. 2.00 um)
+GRID_BAND = (1.30, 2.00)
+
+
+def analyze_dichroic_design(
+    design: DichroicDesign,
+    out_dir: Path | str,
+    *,
+    num_cells: int | None = None,
+    num_modes: int | None = None,
+) -> dict:
+    """EME broad-band short-/long-pass spectrum + GDS + field plots for a design.
+
+    Mirrors ``dichroic_designer_slurm`` but in-process (the spectrum is
+    distributed over local worker threads). Writes ``*_spectrum.{png,csv,json}``
+    (``t_short`` / ``t_long`` over the shared :data:`GRID_BAND`), the GDS and a
+    summary into ``out_dir`` and returns the summary dict.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from examples.papers import _analysis, _backends
+
+    n = pick(low=9, medium=31, high=61)
+    settings = {
+        "label": f"{design.cutoff_wl * 1e3:.0f}nm",
+        "num_cells": num_cells or _resolution.num_cells(low=16, medium=48),
+        "num_modes": num_modes or _resolution.num_modes(low=4, medium=6),
+        "device_res": pick(low=0.07, medium=0.05, high=0.035),
+        "backend": _backends.backend_name(),
+        "spectrum_wls": np.linspace(GRID_BAND[0], GRID_BAND[1], n),
+        "prop_wls": np.array([design.cutoff_wl]),
+        "n_neff": pick(low=4, medium=9, high=15),
+        "num_z": pick(low=200, medium=600, high=1000),
+    }
+    workers = _backends.max_workers() or 4
+
+    def executor_factory(_name: str) -> ThreadPoolExecutor:
+        return ThreadPoolExecutor(max_workers=workers)
+
+    run = _analysis.submit_dichroic_run(
+        to_params(design), settings, executor_factory=executor_factory,
+        out_dir=out_dir, save_fields=False,
+    )
+    return run.gather()
+
+
+def dichroic_test_structures(
+    design: DichroicDesign,
+    out_dir: Path | str,
+    *,
+    counts: tuple[int, ...] = (0, 1, 2, 4),
+    chip_width: float = 5000.0,
+) -> dict[str, object]:
+    """Cut-back coupler array (constant length, 5 mm chip) as GDS + a preview.
+
+    Rows with a varied number of cascaded dichroic couplings but a constant
+    total waveguide length between regularly-spaced ports on either side of the
+    chip -- the cut-back layout for the per-coupler excess loss.
+    """
+    import matplotlib.pyplot as plt
+
+    from examples.papers._designer_extras import coupler_cutback_array
+    from examples.papers._plot import plot_component
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    stem = f"{design.cutoff_wl * 1e3:.0f}nm"
+    w_port = float(design.component.ports["in0"].width)
+    array = coupler_cutback_array(
+        design.component, counts=counts, in_port="in0", thru_port="long_pass",
+        chip_width=chip_width, pitch=8.0 * w_port + 4.0, width=w_port,
+        layer=LAYER_WG,
+    )
+    gpath = out / f"dichroic_{stem}_cutback_array.gds"
+    array.write_gds(gpath)
+
+    fig, ax = plt.subplots(figsize=(11, 4))
+    plot_component(array, ax)
+    ax.set_title(
+        f"{stem} cutoff: coupler cut-back array "
+        f"({', '.join(str(n) for n in counts)} couplings, {chip_width / 1e3:.0f} mm)"
+    )
+    ax.set_aspect("auto")
+    fpath = out / f"dichroic_{stem}_test_structures.png"
+    fig.tight_layout()
+    fig.savefig(fpath, dpi=150)
+    plt.close(fig)
+    return {"gds": str(gpath), "figure": str(fpath)}
+
+
+def dichroic_spectrum_grid(
+    designs: list[DichroicDesign], analyses_root: Path, out_path: Path
+) -> Path | None:
+    """Column grid of every design's broad-band short/long-pass spectrum."""
+    import json
+
+    from examples.papers import _analysis
+    from examples.papers._designer_extras import spectrum_grid
+
+    rows = []
+    for d in designs:
+        label = f"{d.cutoff_wl * 1e3:.0f}nm"
+        stem = _analysis._file_stem(label)
+        jpath = analyses_root / label / f"{stem}_spectrum.json"
+        if not jpath.exists():
+            continue
+        spec = json.loads(jpath.read_text())
+        rows.append({
+            "label": f"{d.cutoff_wl * 1e3:.0f} nm cutoff",
+            "wls": np.asarray(spec["wavelength_um"]),
+            "short_pass": np.asarray(spec["t_short"]),
+            "long_pass": np.asarray(spec["t_long"]),
+            "design_wls": [d.cutoff_wl],
+        })
+    if not rows:
+        return None
+    return spectrum_grid(
+        rows, out_path, db=True, xlim_nm=(GRID_BAND[0] * 1e3, GRID_BAND[1] * 1e3),
+        ports=(("short_pass", "C0"), ("long_pass", "C3")),
+        title="Dichroic designer: broad-band short-/long-pass spectra",
+    )
+
+
 def main() -> dict[str, object]:
     """Design dichroic splitters for several cutoffs on an SOI platform."""
     import matplotlib.pyplot as plt
@@ -691,7 +832,23 @@ def main() -> dict[str, object]:
     fig.tight_layout()
     fig.savefig(FIGDIR / "dichroic_designer.png", dpi=150)
     plt.close(fig)
-    return summary
+
+    # per-design EME broad-band spectra (-> column grid) + cut-back test arrays
+    analyses_root = FIGDIR / "dichroic_designer"
+    analyses, tests = {}, {}
+    for d in designs:
+        label = f"{d.cutoff_wl * 1e3:.0f}nm"
+        analyses[label] = analyze_dichroic_design(d, analyses_root / label)
+        tests[label] = dichroic_test_structures(d, analyses_root / label)
+    grid = dichroic_spectrum_grid(
+        designs, analyses_root, FIGDIR / "dichroic_designer_spectrum_grid.png"
+    )
+    return {
+        "designs": summary,
+        "analyses": analyses,
+        "test_structures": tests,
+        "spectrum_grid": str(grid) if grid else None,
+    }
 
 
 if __name__ == "__main__":

@@ -9,12 +9,12 @@
     620.0,
     1860.0
   ],
-  "fh_cross": 0.1306,
-  "fh_bar": 0.1836,
-  "sh_bar": 0.0166,
-  "sh_cross": 0.1056,
-  "fh_er_db": -1.48,
-  "sh_er_db": -8.03,
+  "fh_cross": 0.2744,
+  "fh_bar": 0.1886,
+  "sh_bar": 0.0161,
+  "sh_cross": 0.1543,
+  "fh_er_db": 1.63,
+  "sh_er_db": -9.81,
   "saved_fields": true,
   "out_dir": "/home/user/meow/examples/papers/figures/kwolek_designer/TFLT-500nm_1550-775nm",
   "files": [
