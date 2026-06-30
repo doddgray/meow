@@ -1,0 +1,19 @@
+{
+  "label": "1150nm",
+  "kind": "dichroic",
+  "cutoff_nm": 1150.0,
+  "w_a_nm": 550.0,
+  "gap_nm": 750.0,
+  "length_um": 2000.0,
+  "short_pass_at_cutoff": 0.0096,
+  "long_pass_at_cutoff": 0.1588,
+  "saved_fields": false,
+  "out_dir": "/home/user/meow/examples/papers/figures/dichroic_designer_si3n4_200nm/1150nm",
+  "files": [
+    "1150nm.gds",
+    "1150nm_design.png",
+    "1150nm_spectrum.csv",
+    "1150nm_spectrum.json",
+    "1150nm_spectrum.png"
+  ]
+}

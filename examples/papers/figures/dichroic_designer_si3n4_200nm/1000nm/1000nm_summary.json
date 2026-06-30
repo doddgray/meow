@@ -1,0 +1,19 @@
+{
+  "label": "1000nm",
+  "kind": "dichroic",
+  "cutoff_nm": 1000.0,
+  "w_a_nm": 527.7,
+  "gap_nm": 550.0,
+  "length_um": 2000.0,
+  "short_pass_at_cutoff": 0.0002,
+  "long_pass_at_cutoff": 0.7234,
+  "saved_fields": false,
+  "out_dir": "/home/user/meow/examples/papers/figures/dichroic_designer_si3n4_200nm/1000nm",
+  "files": [
+    "1000nm.gds",
+    "1000nm_design.png",
+    "1000nm_spectrum.csv",
+    "1000nm_spectrum.json",
+    "1000nm_spectrum.png"
+  ]
+}

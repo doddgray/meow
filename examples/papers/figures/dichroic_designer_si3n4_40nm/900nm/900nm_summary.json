@@ -1,0 +1,19 @@
+{
+  "label": "900nm",
+  "kind": "dichroic",
+  "cutoff_nm": 900.0,
+  "w_a_nm": 1525.0,
+  "gap_nm": 750.0,
+  "length_um": 2000.0,
+  "short_pass_at_cutoff": 0.1104,
+  "long_pass_at_cutoff": 0.315,
+  "saved_fields": false,
+  "out_dir": "/home/user/meow/examples/papers/figures/dichroic_designer_si3n4_40nm/900nm",
+  "files": [
+    "900nm.gds",
+    "900nm_design.png",
+    "900nm_spectrum.csv",
+    "900nm_spectrum.json",
+    "900nm_spectrum.png"
+  ]
+}
