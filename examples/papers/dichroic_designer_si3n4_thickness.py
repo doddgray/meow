@@ -33,6 +33,7 @@ from examples.papers.dichroic_designer import (
     DichroicDesign,
     Platform,
     design_dichroic,
+    dichroic_test_structures,
     segmented_neff,
     solid_neff,
 )
@@ -40,6 +41,9 @@ from examples.papers.magden2018_dichroic import analytical_transmission
 
 FIGDIR = Path(__file__).parent / "figures"
 pick = _resolution.pick
+
+# shared broad-band grid axis covering the 900-1200 nm cutoffs
+SI3N4_BAND = (0.80, 1.35)
 
 # 900..1200 nm by 50 nm, plus 990 nm.
 CUTOFFS = np.array([0.90, 0.95, 0.99, 1.00, 1.05, 1.10, 1.15, 1.20])
@@ -91,6 +95,7 @@ def transmission_spectrum(
     max_window: float = 0.20,
     gamma_span: float = 6.0,
     n_fine: int = 121,
+    wls: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Coupled-mode short/long-pass transmission spectrum of a designed device.
 
@@ -117,9 +122,14 @@ def transmission_spectrum(
     )
     slope, intercept = np.polyfit(wls_fde, deltas, 1)  # delta ~ slope*wl + intercept
     kappa = max(design.kappa, 1e-9)
-    half = gamma_span * kappa / abs(slope) if abs(slope) > 1e-12 else max_window * wl_c
-    half = min(half, max_window * wl_c)
-    wls = np.linspace(wl_c - half, wl_c + half, n_fine)
+    if wls is None:
+        half = (
+            gamma_span * kappa / abs(slope)
+            if abs(slope) > 1e-12
+            else max_window * wl_c
+        )
+        half = min(half, max_window * wl_c)
+        wls = np.linspace(wl_c - half, wl_c + half, n_fine)
     gamma = (slope * wls + intercept) / kappa
     floor = 10 ** (-design.extinction_db / 10)
     t_short = np.clip(analytical_transmission(gamma), floor, 1.0 - floor)
@@ -245,6 +255,51 @@ def grid_figure(
     plt.close(fig)
 
 
+def column_grid_figure(
+    name: str,
+    plat: Platform,
+    wgb: WGB,
+    designs: list[DichroicDesign | None],
+    res: float,
+    *,
+    band: tuple[float, float] = SI3N4_BAND,
+    n: int = 121,
+) -> None:
+    """Column of every cutoff's broad-band spectrum on one shared axis.
+
+    Unlike :func:`grid_figure` (layout + per-design narrow spectrum), this stacks
+    the dense coupled-mode short-/long-pass spectra in a column over the *same*
+    wavelength axis, with each design's targeted cutoff drawn as a dashed line.
+    """
+    from examples.papers._designer_extras import spectrum_grid
+
+    wls = np.linspace(band[0], band[1], n)
+    rows = []
+    for d in [d for d in designs if d is not None]:
+        _wls, t_short, t_long = transmission_spectrum(plat, d, wgb, res, wls=wls)
+        rows.append({
+            "label": f"{d.cutoff_wl * 1e3:.0f} nm cutoff",
+            "wls": wls, "short_pass": t_short, "long_pass": t_long,
+            "design_wls": [d.cutoff_wl],
+        })
+    if rows:
+        spectrum_grid(
+            rows, FIGDIR / f"dichroic_designer_si3n4_{name}_spectrum_grid.png",
+            db=True, xlim_nm=(band[0] * 1e3, band[1] * 1e3),
+            ports=(("short_pass", "C0"), ("long_pass", "C3")),
+            title=f"Si3N4 {name}: broad-band short-/long-pass spectra",
+        )
+
+
+def thickness_test_structures(
+    name: str, designs: list[DichroicDesign | None]
+) -> None:
+    """Per-cutoff cut-back coupler arrays (constant length, 5 mm chip) + GDS."""
+    root = FIGDIR / f"dichroic_designer_si3n4_{name}"
+    for d in [d for d in designs if d is not None]:
+        dichroic_test_structures(d, root / f"{d.cutoff_wl * 1e3:.0f}nm")
+
+
 def main() -> dict[str, object]:
     """Design + plot the Si3N4 thickness sweep (200, 100, 40 nm)."""
     FIGDIR.mkdir(exist_ok=True, parents=True)
@@ -265,6 +320,8 @@ def main() -> dict[str, object]:
         designs = sweep(plat, wgb, cutoffs, res)
         result_figure(name, plat, wgb, designs, res)
         grid_figure(name, plat, wgb, designs, res)
+        column_grid_figure(name, plat, wgb, designs, res)
+        thickness_test_structures(name, designs)
         out[name] = _summary(designs)
     return out
 

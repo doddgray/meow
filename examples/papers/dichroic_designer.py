@@ -648,6 +648,7 @@ def analyze_dichroic_design(
     design: DichroicDesign,
     out_dir: Path | str,
     *,
+    band: tuple[float, float] = GRID_BAND,
     num_cells: int | None = None,
     num_modes: int | None = None,
 ) -> dict:
@@ -669,7 +670,7 @@ def analyze_dichroic_design(
         "num_modes": num_modes or _resolution.num_modes(low=4, medium=6),
         "device_res": pick(low=0.07, medium=0.05, high=0.035),
         "backend": _backends.backend_name(),
-        "spectrum_wls": np.linspace(GRID_BAND[0], GRID_BAND[1], n),
+        "spectrum_wls": np.linspace(band[0], band[1], n),
         "prop_wls": np.array([design.cutoff_wl]),
         "n_neff": pick(low=4, medium=9, high=15),
         "num_z": pick(low=200, medium=600, high=1000),
@@ -731,7 +732,11 @@ def dichroic_test_structures(
 
 
 def dichroic_spectrum_grid(
-    designs: list[DichroicDesign], analyses_root: Path, out_path: Path
+    designs: list[DichroicDesign],
+    analyses_root: Path,
+    out_path: Path,
+    *,
+    band: tuple[float, float] = GRID_BAND,
 ) -> Path | None:
     """Column grid of every design's broad-band short/long-pass spectrum."""
     import json
@@ -757,7 +762,7 @@ def dichroic_spectrum_grid(
     if not rows:
         return None
     return spectrum_grid(
-        rows, out_path, db=True, xlim_nm=(GRID_BAND[0] * 1e3, GRID_BAND[1] * 1e3),
+        rows, out_path, db=True, xlim_nm=(band[0] * 1e3, band[1] * 1e3),
         ports=(("short_pass", "C0"), ("long_pass", "C3")),
         title="Dichroic designer: broad-band short-/long-pass spectra",
     )
