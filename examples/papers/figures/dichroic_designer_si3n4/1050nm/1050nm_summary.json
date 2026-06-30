@@ -1,0 +1,19 @@
+{
+  "label": "1050nm",
+  "kind": "dichroic",
+  "cutoff_nm": 1050.0,
+  "w_a_nm": 453.8,
+  "gap_nm": 650.0,
+  "length_um": 2000.0,
+  "short_pass_at_cutoff": 0.0004,
+  "long_pass_at_cutoff": 0.939,
+  "saved_fields": false,
+  "out_dir": "/home/user/meow/examples/papers/figures/dichroic_designer_si3n4/1050nm",
+  "files": [
+    "1050nm.gds",
+    "1050nm_design.png",
+    "1050nm_spectrum.csv",
+    "1050nm_spectrum.json",
+    "1050nm_spectrum.png"
+  ]
+}

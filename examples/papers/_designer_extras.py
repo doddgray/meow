@@ -35,24 +35,28 @@ def spectrum_grid(
     *,
     title: str = "",
     xlim_nm: tuple[float, float] | None = None,
-    ports: Sequence[tuple[str, str]] = (("bar", "C0"), ("cross", "C3")),
+    ports: Sequence[tuple[str, ...]] = (("bar", "C0"), ("cross", "C3")),
     db: bool = False,
 ) -> Any:
     """Plot a column of broad-band transmission spectra (one row per design).
 
     Every row shares the same wavelength axis (so designs are directly
     comparable), and each design's target wavelength(s) are drawn as dashed
-    vertical lines.
+    vertical lines. Multiple traces can be overlaid per row (e.g. an EME spectrum
+    on top of a coupled-mode estimate) by listing several ``ports`` entries with
+    their own colour / linestyle / label.
 
     Args:
         rows: one dict per design with keys ``"label"`` (row title), ``"wls"``
             (wavelengths [um]), one array per entry in ``ports`` (keyed by the
-            port name, e.g. ``"bar"``/``"cross"``), and ``"design_wls"`` (the
-            target wavelength(s) [um] to mark with dashed lines).
+            port name), and ``"design_wls"`` (the target wavelength(s) [um] to
+            mark with dashed lines). A per-row ``"wls_<key>"`` overrides the
+            wavelength axis for that trace.
         out_path: file path to save the figure to.
         title: overall figure title.
         xlim_nm: shared x-axis bounds [nm]; inferred from the data if ``None``.
-        ports: ``(key, color)`` pairs naming the transmission arrays to plot.
+        ports: ``(key, color)`` or ``(key, color, linestyle)`` or
+            ``(key, color, linestyle, label)`` tuples naming each trace.
         db: plot transmission in dB (else linear 0..1).
 
     Returns:
@@ -72,21 +76,24 @@ def spectrum_grid(
         xlim_nm = (lo, hi)
 
     for ax, row in zip(axes, rows, strict=True):
-        wls_nm = np.asarray(row["wls"]) * 1e3
-        for key, color in ports:
+        for spec in ports:
+            key, color = spec[0], spec[1]
+            ls = spec[2] if len(spec) > 2 else "-"
+            label = spec[3] if len(spec) > 3 else key
             if key not in row:
                 continue
+            wls_nm = np.asarray(row.get(f"wls_{key}", row["wls"])) * 1e3
             y = np.asarray(row[key], dtype=float)
             if db:
                 y = 10 * np.log10(np.clip(y, 1e-6, None))
-            ax.plot(wls_nm, y, color=color, label=key)
+            ax.plot(wls_nm, y, color=color, ls=ls, label=label)
         for wl in np.atleast_1d(row.get("design_wls", [])):
             ax.axvline(float(wl) * 1e3, color="0.4", ls="--", lw=1)
         ax.set_xlim(*xlim_nm)
         ax.set_ylabel("T [dB]" if db else "T")
         ax.set_title(row.get("label", ""), fontsize=9, loc="left")
         ax.grid(visible=True, alpha=0.4)
-        ax.legend(fontsize=7, ncol=len(ports), loc="center right")
+        ax.legend(fontsize=6, ncol=len(ports), loc="center right")
     axes[-1].set_xlabel("wavelength [nm]")
     if title:
         fig.suptitle(title)

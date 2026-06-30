@@ -32,6 +32,7 @@ from examples.papers.dichroic_designer import (
     WGB,
     DichroicDesign,
     Platform,
+    analyze_dichroic_design,
     design_dichroic,
     dichroic_test_structures,
     segmented_neff,
@@ -136,6 +137,33 @@ def transmission_spectrum(
     return wls, t_short, 1.0 - t_short
 
 
+def eme_spectrum(
+    design: DichroicDesign,
+    out_dir: Path,
+    *,
+    band: tuple[float, float] = SI3N4_BAND,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Dense **EME** short-/long-pass spectrum of a design over ``band``.
+
+    Runs the full distributed EME (no field save) via
+    :func:`dichroic_designer.analyze_dichroic_design` and reads back the saved
+    ``t_short`` / ``t_long`` arrays -- the numerical counterpart of the
+    (cheap, coupled-mode) :func:`transmission_spectrum`.
+    """
+    import json
+
+    from examples.papers import _analysis
+
+    analyze_dichroic_design(design, out_dir, band=band)
+    stem = _analysis._file_stem(f"{design.cutoff_wl * 1e3:.0f}nm")
+    spec = json.loads((out_dir / f"{stem}_spectrum.json").read_text())
+    return (
+        np.asarray(spec["wavelength_um"]),
+        np.asarray(spec["t_short"]),
+        np.asarray(spec["t_long"]),
+    )
+
+
 def _summary(designs: list[DichroicDesign | None]) -> dict[str, object]:
     return {
         f"{d.cutoff_wl * 1e3:.0f}nm": {
@@ -215,8 +243,14 @@ def grid_figure(
     wgb: WGB,
     designs: list[DichroicDesign | None],
     res: float,
+    eme: dict[float, tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
 ) -> None:
-    """Each optimized layout next to its simulated transmission spectrum."""
+    """Each optimized layout next to its simulated transmission spectrum.
+
+    The coupled-mode short-/long-pass spectrum is drawn dashed; when ``eme``
+    (cutoff -> ``(wls, t_short, t_long)``) is given, the dense **EME** spectrum is
+    overlaid solid for comparison.
+    """
     import matplotlib.pyplot as plt
 
     ok = [d for d in designs if d is not None]
@@ -237,14 +271,22 @@ def grid_figure(
         wls, t_short, t_long = transmission_spectrum(plat, d, wgb, res)
         ts_db = 10 * np.log10(t_short)
         tl_db = 10 * np.log10(t_long)
-        ax_s.plot(wls * 1e3, ts_db, "C0", label="short (WGA)")
-        ax_s.plot(wls * 1e3, tl_db, "C3", label="long (WGB)")
+        ax_s.plot(wls * 1e3, ts_db, "C0--", label="short (coupled-mode)")
+        ax_s.plot(wls * 1e3, tl_db, "C3--", label="long (coupled-mode)")
+        ymin = float(min(ts_db.min(), tl_db.min()))
+        if eme and d.cutoff_wl in eme:
+            e_wls, e_short, e_long = eme[d.cutoff_wl]
+            es_db = 10 * np.log10(np.clip(e_short, 1e-6, None))
+            el_db = 10 * np.log10(np.clip(e_long, 1e-6, None))
+            ax_s.plot(e_wls * 1e3, es_db, "C0", label="short (EME)")
+            ax_s.plot(e_wls * 1e3, el_db, "C3", label="long (EME)")
+            ymin = min(ymin, float(es_db.min()), float(el_db.min()))
         ax_s.axvline(d.cutoff_wl * 1e3, color="0.5", ls=":", lw=0.8)
-        ax_s.set_ylim(max(-42.0, float(min(ts_db.min(), tl_db.min())) - 3), 2)
+        ax_s.set_ylim(max(-42.0, ymin - 3), 2)
         ax_s.set_ylabel("T [dB]", fontsize=8)
         ax_s.grid(visible=True)
         if row == 0:
-            ax_s.legend(fontsize=7)
+            ax_s.legend(fontsize=6)
     axes[-1, 0].set_xlabel("z [um]")
     axes[-1, 1].set_xlabel("wavelength [nm]")
     fig.suptitle(
@@ -264,12 +306,15 @@ def column_grid_figure(
     *,
     band: tuple[float, float] = SI3N4_BAND,
     n: int = 121,
+    eme: dict[float, tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
 ) -> None:
     """Column of every cutoff's broad-band spectrum on one shared axis.
 
     Unlike :func:`grid_figure` (layout + per-design narrow spectrum), this stacks
-    the dense coupled-mode short-/long-pass spectra in a column over the *same*
-    wavelength axis, with each design's targeted cutoff drawn as a dashed line.
+    the dense short-/long-pass spectra in a column over the *same* wavelength
+    axis, with each design's targeted cutoff drawn as a dashed line. When ``eme``
+    (cutoff -> ``(wls, t_short, t_long)``) is given, the **dense EME** spectra are
+    overlaid (solid) on the coupled-mode estimate (dashed).
     """
     from examples.papers._designer_extras import spectrum_grid
 
@@ -277,17 +322,30 @@ def column_grid_figure(
     rows = []
     for d in [d for d in designs if d is not None]:
         _wls, t_short, t_long = transmission_spectrum(plat, d, wgb, res, wls=wls)
-        rows.append({
+        row = {
             "label": f"{d.cutoff_wl * 1e3:.0f} nm cutoff",
-            "wls": wls, "short_pass": t_short, "long_pass": t_long,
+            "wls": wls,
+            "short_pass_cm": t_short, "long_pass_cm": t_long,
             "design_wls": [d.cutoff_wl],
-        })
+        }
+        if eme and d.cutoff_wl in eme:
+            e_wls, e_short, e_long = eme[d.cutoff_wl]
+            row["wls_short_pass"] = e_wls
+            row["wls_long_pass"] = e_wls
+            row["short_pass"] = e_short
+            row["long_pass"] = e_long
+        rows.append(row)
     if rows:
+        ports = [
+            ("short_pass", "C0", "-", "short (EME)"),
+            ("long_pass", "C3", "-", "long (EME)"),
+            ("short_pass_cm", "C0", "--", "short (coupled-mode)"),
+            ("long_pass_cm", "C3", "--", "long (coupled-mode)"),
+        ]
         spectrum_grid(
             rows, FIGDIR / f"dichroic_designer_si3n4_{name}_spectrum_grid.png",
-            db=True, xlim_nm=(band[0] * 1e3, band[1] * 1e3),
-            ports=(("short_pass", "C0"), ("long_pass", "C3")),
-            title=f"Si3N4 {name}: broad-band short-/long-pass spectra",
+            db=True, xlim_nm=(band[0] * 1e3, band[1] * 1e3), ports=ports,
+            title=f"Si3N4 {name}: broad-band short-/long-pass (EME vs coupled-mode)",
         )
 
 
@@ -318,9 +376,16 @@ def main() -> dict[str, object]:
         print(f"=== {name} ===", flush=True)
         plat = platform(t_um, clad_t)
         designs = sweep(plat, wgb, cutoffs, res)
+        # dense EME spectrum per design (overlaid on the coupled-mode estimate)
+        root = FIGDIR / f"dichroic_designer_si3n4_{name}"
+        eme = {
+            d.cutoff_wl: eme_spectrum(d, root / f"{d.cutoff_wl * 1e3:.0f}nm")
+            for d in designs
+            if d is not None
+        }
         result_figure(name, plat, wgb, designs, res)
-        grid_figure(name, plat, wgb, designs, res)
-        column_grid_figure(name, plat, wgb, designs, res)
+        grid_figure(name, plat, wgb, designs, res, eme=eme)
+        column_grid_figure(name, plat, wgb, designs, res, eme=eme)
         thickness_test_structures(name, designs)
         out[name] = _summary(designs)
     return out
