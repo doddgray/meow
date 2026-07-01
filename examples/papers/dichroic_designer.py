@@ -49,6 +49,8 @@ from examples.papers import _resolution
 from examples.papers.magden2018_dichroic import LAYER_WG, dichroic_filter
 
 if TYPE_CHECKING:
+    import matplotlib.pyplot as plt
+
     from examples.papers._ad_optimize import OptimizationTrace
 
 FIGDIR = Path(__file__).parent / "figures"
@@ -442,7 +444,11 @@ class DichroicDesign:
     opt_trace: OptimizationTrace | None = field(default=None, repr=False)
     """The AD optimization trace (see :mod:`examples.papers._ad_optimize`) that
     produced ``w_a``, when built with ``design_dichroic(..., use_gradient=True)``;
-    ``None`` for the (default) root-find path."""
+    the stage-1 cross-section trace when built with
+    :func:`design_dichroic_joint`; ``None`` for the (default) root-find path."""
+    opt_trace_lengths: OptimizationTrace | None = field(default=None, repr=False)
+    """The stage-2 (coupling gap + section lengths) AD optimization trace, when
+    built with :func:`design_dichroic_joint`; ``None`` otherwise."""
 
     @property
     def total_length(self) -> float:
@@ -488,107 +494,139 @@ def _allocate_lengths(
 
 
 # --------------------------------------------------------------------------
-# joint AD optimization over the full practical design-parameter set
+# two-stage joint AD optimization: (1) cross-section for phase match + max
+# group-velocity mismatch, (2) coupling gap + section lengths to minimize the
+# adiabatic-transition loss
 # --------------------------------------------------------------------------
-JOINT_PARAM_NAMES: tuple[str, ...] = (
-    "w_a [um]",
-    "w_b [um]",
-    "gap [um]",
-    "g_b [um]",
-    "frac_mid",
-    "frac_out",
-    "l1 [um]",
-    "l2 [um]",
-    "l3 [um]",
-    "l4 [um]",
-)
-"""Parameter order of :func:`optimize_dichroic_joint`."""
-
-
-def _joint_geometric_quantities(
+def _dispersion_quantities(
     platform: Platform,
     cutoff_wl: float,
     res: float,
     w_a: float,
     w_b: float,
-    gap: float,
     g_b: float,
     frac_mid: float,
     frac_out: float,
     compute_modes: Callable | None = None,
+    dwl: float = 0.02,
 ) -> tuple[float, float, float, float]:
-    """``(n_a, n_b, kappa, dn_dw)`` at one geometric point of the joint design."""
+    """``(n_a, n_b, ng_a, ng_b)`` - effective and group indices at ``cutoff_wl``.
+
+    The group index ``n_g = n - wl * dn/dwl`` is formed from a central
+    finite difference of each *isolated* waveguide's effective index over
+    wavelength (the same isolated-WGA/WGB convention :func:`phase_match_width`
+    and :func:`coupling_kappa` use elsewhere in this module).
+    """
     wgb = WGB(rail_width=w_b, gap=g_b, n_rails=3, frac_mid=frac_mid, frac_out=frac_out)
-    n_b = segmented_neff(platform, wgb, cutoff_wl, res=res, compute_modes=compute_modes)
     n_a = solid_neff(platform, w_a, cutoff_wl, res=res, compute_modes=compute_modes)
-    kappa = coupling_kappa(
-        platform, w_a, wgb, gap, cutoff_wl, res=res, compute_modes=compute_modes
+    n_b = segmented_neff(platform, wgb, cutoff_wl, res=res, compute_modes=compute_modes)
+    n_a_p = solid_neff(
+        platform, w_a, cutoff_wl + dwl, res=res, compute_modes=compute_modes
     )
-    dw = 0.02
-    n_hi = solid_neff(
-        platform, w_a + dw, cutoff_wl, res=res, compute_modes=compute_modes
+    n_a_m = solid_neff(
+        platform, w_a, cutoff_wl - dwl, res=res, compute_modes=compute_modes
     )
-    n_lo = solid_neff(
-        platform, w_a - dw, cutoff_wl, res=res, compute_modes=compute_modes
+    n_b_p = segmented_neff(
+        platform, wgb, cutoff_wl + dwl, res=res, compute_modes=compute_modes
     )
-    dn_dw = (n_hi - n_lo) / (2 * dw)
-    return n_a, n_b, kappa, dn_dw
+    n_b_m = segmented_neff(
+        platform, wgb, cutoff_wl - dwl, res=res, compute_modes=compute_modes
+    )
+    dna_dwl = (n_a_p - n_a_m) / (2 * dwl)
+    dnb_dwl = (n_b_p - n_b_m) / (2 * dwl)
+    ng_a = n_a - cutoff_wl * dna_dwl
+    ng_b = n_b - cutoff_wl * dnb_dwl
+    return n_a, n_b, ng_a, ng_b
 
 
-JOINT_X0_DEFAULT: tuple[float, ...] = (
-    0.60, 0.25, 0.75, 0.12, 1.0, 1.0, 200.0, 260.0, 900.0, 200.0,
+_gvm_sign_cache: dict[str, float] = {}
+
+
+def reference_gvm_sign() -> float:
+    """Sign of ``ng_WGA - ng_WGB`` for the original Magden 2018 SOI design.
+
+    This fixes the physical convention every optimized cross-section's group
+    velocity mismatch must match: computed once (and memoized) from the
+    paper's own SOI stack and nominal ``(w_a, w_b, g_b)``
+    (:mod:`examples.papers.magden2018_dichroic`) near its C-band cutoff. It
+    comes out positive - the solid WGA strip has the *higher* group index
+    (is more dispersive) than the segmented WGB, matching this module's
+    existing note that "the multi-rail WGB is less dispersive than the solid
+    WGA".
+    """
+    if "sign" not in _gvm_sign_cache:
+        from examples.papers.magden2018_dichroic import G_B, H_SI, W_A, W_B
+
+        ref_platform = Platform(
+            core=mw.silicon, clad=mw.silicon_oxide, core_thickness=H_SI
+        )
+        _, _, ng_a, ng_b = _dispersion_quantities(
+            ref_platform, 1.55, 0.04, W_A, W_B, G_B, 1.0, 1.0
+        )
+        _gvm_sign_cache["sign"] = float(np.sign(ng_a - ng_b)) or 1.0
+    return _gvm_sign_cache["sign"]
+
+
+CROSSSECTION_PARAM_NAMES: tuple[str, ...] = (
+    "w_a [um]",
+    "w_b [um]",
+    "g_b [um]",
+    "frac_mid",
+    "frac_out",
 )
+"""Parameter order of :func:`optimize_dichroic_crosssection`."""
+
+CROSSSECTION_X0_DEFAULT: tuple[float, ...] = (0.60, 0.25, 0.12, 1.0, 1.0)
 """Default (deliberately off-target) initial guess for
-:func:`optimize_dichroic_joint`."""
+:func:`optimize_dichroic_crosssection`."""
 
 
-def optimize_dichroic_joint(
+def optimize_dichroic_crosssection(
     platform: Platform,
     cutoff_wl: float,
     *,
-    x0: tuple[float, ...] = JOINT_X0_DEFAULT,
+    x0: tuple[float, ...] = CROSSSECTION_X0_DEFAULT,
     bounds: tuple[tuple[float, float], ...] | None = None,
-    target_extinction_db: float = 20.0,
-    max_total_length: float = 5000.0,
     res: float = 0.05,
     steps: int = 26,
-    lr: float = 0.025,
+    lr: float = 0.03,
+    dwl: float = 0.02,
+    phase_weight: float = 2000.0,
+    gvm_weight: float = 5.0,
     compute_modes: Callable | None = None,
 ) -> tuple[np.ndarray, OptimizationTrace]:
-    """Joint AD-gradient optimization over the full practical parameter set.
+    """Stage 1: optimize the WGA/WGB cross-section for phase match + max GVM.
 
-    Minimizes a composite loss over the 10-parameter vector ``(w_a, w_b, gap,
-    g_b, frac_mid, frac_out, l1, l2, l3, l4)`` (see :data:`JOINT_PARAM_NAMES`):
-    the WGA/WGB full widths, the WGA-WGB coupling gap, the inter-rail gap of
-    the three-ridge WGB, the fractional middle/outer WGB rail widths (as
-    fractions of ``w_b``), and the four adiabatic section lengths, allowing up
-    to ``max_total_length`` (5 mm by default). The loss combines:
+    Jointly minimizes a composite loss over ``(w_a, w_b, g_b, frac_mid,
+    frac_out)`` (see :data:`CROSSSECTION_PARAM_NAMES`) - the WGA/WGB full
+    widths, the WGB inter-rail gap, and the fractional middle/outer WGB rail
+    widths:
 
-    - the phase-match residual ``(n_WGA - n_WGB)^2`` at ``cutoff_wl``,
-    - a soft hinge penalizing a Landau-Zener extinction (:func:`_taper_extinction`)
-      below ``target_extinction_db``,
-    - a small linear preference for a more compact (shorter total length)
-      device - since the required extinction is met by *either* a smaller
-      coupling gap (stronger, exponentially larger ``kappa``) or a longer
-      phase-matching taper, this preference is what drives the gap towards
-      the tightest coupling that still meets the extinction target within a
-      short taper, rather than leaving it undetermined, and
-    - a soft hinge penalizing a total length beyond ``max_total_length``.
+    - the phase-match residual ``(n_WGA - n_WGB)^2`` at ``cutoff_wl``, and
+    - *minus* the group-velocity mismatch ``ng_WGA - ng_WGB`` (the group-index
+      difference, see :func:`_dispersion_quantities`), oriented to
+      :func:`reference_gvm_sign` so the two waveguides are driven towards the
+      *steepest* divergence away from the crossing in the same short-pass
+      (WGA) / long-pass (WGB) sense as the original design, not just an
+      arbitrary phase match - a sharper crossing means better spectral
+      selectivity.
+
+    This is the WGA-WGB coupling *gap* is deliberately **not** a parameter
+    here: it has no effect on either isolated-waveguide quantity above (only
+    on the coupling strength ``kappa``), so it is optimized in the second
+    stage instead (:func:`optimize_dichroic_lengths`), alongside the section
+    lengths it trades off against for adiabaticity.
 
     The loss is wrapped once with :func:`meow.make_differentiable_objective`
-    (exact central finite differences of the whole FDE-based objective), and
-    optimized by ``jax.grad`` + projected Adam
-    (:func:`examples.papers._ad_optimize.adam_minimize`)
-    in **bounds-normalized** coordinates, so a single learning rate is
-    meaningful across the mixed micron/dimensionless/length-in-microns
-    parameter scales. The four length parameters do not affect the FDE
-    quantities, so their finite-difference steps are served from a cache keyed
-    on the 6 geometric parameters - no extra eigensolves.
+    (exact central finite differences of the whole FDE-based objective, which
+    is needed here since the group index is itself already a finite
+    difference over wavelength) and optimized by ``jax.grad`` + projected
+    Adam (:func:`examples.papers._ad_optimize.adam_minimize`) in
+    **bounds-normalized** coordinates.
 
     Returns:
-        ``(params_opt, trace)`` - the optimized parameter vector, in the
-        :data:`JOINT_PARAM_NAMES` order, and the optimization trace (with
-        ``trace.params`` de-normalized back to physical units).
+        ``(params_opt, trace)`` in :data:`CROSSSECTION_PARAM_NAMES` order,
+        with ``trace.params`` de-normalized back to physical units.
     """
     import jax.numpy as jnp
 
@@ -599,52 +637,24 @@ def optimize_dichroic_joint(
         bounds = (
             (2 * w_tip, 0.9),  # w_a
             (2 * w_tip, 0.45),  # w_b - stay in the sub-wavelength (weakly-guiding)
-            (min_gap, 1.2),  # gap - the coupling weakens sharply beyond ~1.2 um
             (min_gap, 0.30),  # g_b
             (0.6, 1.6),  # frac_mid
             (0.6, 1.6),  # frac_out
-            (20.0, 400.0),  # l1
-            (20.0, max_total_length),  # l2
-            (50.0, 3000.0),  # l3
-            (20.0, 400.0),  # l4
         )
     lo = np.array([b[0] for b in bounds], dtype=float)
     hi = np.array([b[1] for b in bounds], dtype=float)
     scale = hi - lo
-
-    cache: dict[tuple[float, ...], tuple[float, float, float, float]] = {}
-
-    def geometric(params6: tuple[float, ...]) -> tuple[float, float, float, float]:
-        if params6 not in cache:
-            if len(cache) > 64:
-                cache.clear()
-            cache[params6] = _joint_geometric_quantities(
-                platform, cutoff_wl, res, *params6, compute_modes=compute_modes
-            )
-        return cache[params6]
+    sign = reference_gvm_sign()
 
     def objective(params: np.ndarray) -> np.ndarray:
-        w_a, w_b, gap, g_b, frac_mid, frac_out, l1, l2, l3, l4 = (
-            float(p) for p in params
+        w_a, w_b, g_b, frac_mid, frac_out = (float(p) for p in params)
+        n_a, n_b, ng_a, ng_b = _dispersion_quantities(
+            platform, cutoff_wl, res, w_a, w_b, g_b, frac_mid, frac_out,
+            compute_modes=compute_modes, dwl=dwl,
         )
-        n_a, n_b, kappa, dn_dw = geometric((w_a, w_b, gap, g_b, frac_mid, frac_out))
         phase_loss = (n_a - n_b) ** 2
-        extinction_db = _taper_extinction(
-            kappa, dn_dw, w_a, platform.min_tip, cutoff_wl, l2
-        )
-        ext_shortfall = max(target_extinction_db - extinction_db, 0.0)
-        total_length = l1 + l2 + l3 + l4
-        length_excess = max(total_length - max_total_length, 0.0)
-        # the compactness preference excludes l2 (the critical phase-matching
-        # taper, whose length is driven by the extinction shortfall above) so
-        # it does not fight that gradient; it only trims the non-critical
-        # input/bend/output sections (l1, l3, l4).
-        loss = (
-            2000.0 * phase_loss
-            + 0.02 * ext_shortfall**2
-            + 3e-4 * (l1 + l3 + l4)
-            + 1e-4 * length_excess**2
-        )
+        gvm = sign * (ng_a - ng_b)
+        loss = phase_weight * phase_loss - gvm_weight * gvm
         return np.asarray(loss, dtype=float)
 
     differentiable_loss = mw.make_differentiable_objective(objective, shape=())
@@ -661,8 +671,131 @@ def optimize_dichroic_joint(
         steps=steps,
         lr=lr,
         bounds=[(0.0, 1.0)] * len(x0),
-        param_names=JOINT_PARAM_NAMES,
-        objective_name="joint design loss",
+        param_names=CROSSSECTION_PARAM_NAMES,
+        objective_name="cross-section design loss",
+    )
+    trace.params = [lo + np.asarray(p) * scale for p in trace.params]
+    x_opt = lo + x_opt_norm * scale
+    return x_opt, trace
+
+
+LENGTHS_PARAM_NAMES: tuple[str, ...] = (
+    "gap [um]", "l1 [um]", "l2 [um]", "l3 [um]", "l4 [um]",
+)
+"""Parameter order of :func:`optimize_dichroic_lengths`."""
+
+LENGTHS_X0_DEFAULT: tuple[float, ...] = (0.75, 200.0, 260.0, 900.0, 200.0)
+"""Default initial guess for :func:`optimize_dichroic_lengths`."""
+
+
+def optimize_dichroic_lengths(
+    platform: Platform,
+    cutoff_wl: float,
+    w_a: float,
+    wgb: WGB,
+    *,
+    x0: tuple[float, ...] = LENGTHS_X0_DEFAULT,
+    bounds: tuple[tuple[float, float], ...] | None = None,
+    max_total_length: float = 5000.0,
+    res: float = 0.05,
+    steps: int = 20,
+    lr: float = 0.05,
+    fd_step: float = 1e-2,
+    compute_modes: Callable | None = None,
+) -> tuple[np.ndarray, OptimizationTrace]:
+    """Stage 2: optimize the coupling gap + section lengths to minimize loss.
+
+    Given the *fixed* cross-section (``w_a``, ``wgb``, typically from
+    :func:`optimize_dichroic_crosssection`), minimizes the Landau-Zener
+    diabatic-transfer loss (:func:`_taper_extinction`, i.e. maximizes
+    adiabaticity) over ``(gap, l1, l2, l3, l4)`` (see
+    :data:`LENGTHS_PARAM_NAMES`), subject to the ``max_total_length`` (5 mm by
+    default) budget. ``dn_WGA/dw`` (the adiabaticity rate) only depends on the
+    fixed ``w_a``, so it is computed once; the coupling ``kappa`` depends on
+    ``gap`` (an FDE overlap, :func:`coupling_kappa`) and is cached across the
+    length-only finite-difference steps, which need no extra eigensolves.
+    ``fd_step`` (the central-difference step of
+    :func:`meow.make_differentiable_objective`) defaults larger than usual:
+    ``kappa`` is a *difference* of two overlapping-but-separated mode fields,
+    so it is a much more numerically delicate quantity than the isolated-
+    waveguide indices elsewhere in this module, and the default ``1e-3`` step
+    is small enough that solver noise can flip its finite-difference sign.
+
+    The loss is the (unbounded, always-improvable) predicted loss ``-ER[dB]``
+    plus a small compactness preference on the non-critical section lengths
+    (``l1``, ``l3``, ``l4`` - not ``l2``, whose length is what actually
+    controls the adiabaticity) plus a hard penalty beyond the length budget:
+    since a smaller gap (stronger, exponentially larger ``kappa``) or a
+    longer ``l2`` both reduce the loss with no explicit penalty on the gap
+    itself, this reliably drives the gap to the tightest coupling that fits
+    the remaining length budget into ``l2``.
+    """
+    import jax.numpy as jnp
+
+    from examples.papers._ad_optimize import adam_minimize
+
+    if bounds is None:
+        min_gap = platform.min_gap
+        bounds = (
+            (min_gap, 1.2),  # gap - the coupling weakens sharply beyond ~1.2 um
+            (20.0, 400.0),  # l1
+            (20.0, max_total_length),  # l2
+            (50.0, 3000.0),  # l3
+            (20.0, 400.0),  # l4
+        )
+    lo = np.array([b[0] for b in bounds], dtype=float)
+    hi = np.array([b[1] for b in bounds], dtype=float)
+    scale = hi - lo
+
+    dw = 0.02
+    n_hi = solid_neff(
+        platform, w_a + dw, cutoff_wl, res=res, compute_modes=compute_modes
+    )
+    n_lo = solid_neff(
+        platform, w_a - dw, cutoff_wl, res=res, compute_modes=compute_modes
+    )
+    dn_dw = (n_hi - n_lo) / (2 * dw)
+
+    kappa_cache: dict[float, float] = {}
+
+    def kappa_of(gap: float) -> float:
+        if gap not in kappa_cache:
+            if len(kappa_cache) > 64:
+                kappa_cache.clear()
+            kappa_cache[gap] = coupling_kappa(
+                platform, w_a, wgb, gap, cutoff_wl, res=res, compute_modes=compute_modes
+            )
+        return kappa_cache[gap]
+
+    def objective(params: np.ndarray) -> np.ndarray:
+        gap, l1, l2, l3, l4 = (float(p) for p in params)
+        kappa = kappa_of(gap)
+        extinction_db = _taper_extinction(
+            kappa, dn_dw, w_a, platform.min_tip, cutoff_wl, l2
+        )
+        total_length = l1 + l2 + l3 + l4
+        length_excess = max(total_length - max_total_length, 0.0)
+        loss = -extinction_db + 3e-4 * (l1 + l3 + l4) + 1e-4 * length_excess**2
+        return np.asarray(loss, dtype=float)
+
+    differentiable_loss = mw.make_differentiable_objective(
+        objective, shape=(), step=fd_step
+    )
+
+    def loss_fn(x_norm: object) -> object:
+        real = lo + jnp.asarray(x_norm) * scale
+        return differentiable_loss(real)
+
+    x0_arr = np.clip(np.asarray(x0, dtype=float), lo, hi)
+    x0_norm = (x0_arr - lo) / scale
+    x_opt_norm, trace = adam_minimize(
+        loss_fn,
+        list(x0_norm),
+        steps=steps,
+        lr=lr,
+        bounds=[(0.0, 1.0)] * len(x0),
+        param_names=LENGTHS_PARAM_NAMES,
+        objective_name="adiabatic-loss design loss",
     )
     trace.params = [lo + np.asarray(p) * scale for p in trace.params]
     x_opt = lo + x_opt_norm * scale
@@ -1028,46 +1161,53 @@ def design_dichroic_joint(
     platform: Platform,
     cutoff_wl: float,
     *,
-    x0: tuple[float, ...] = JOINT_X0_DEFAULT,
+    x0_crosssection: tuple[float, ...] = CROSSSECTION_X0_DEFAULT,
+    x0_lengths: tuple[float, ...] = LENGTHS_X0_DEFAULT,
     gap_out: float = 2.0,
-    target_extinction_db: float = 20.0,
     max_total_length: float = 5000.0,
     res: float = 0.05,
-    steps: int = 26,
-    lr: float = 0.025,
+    crosssection_steps: int = 26,
+    crosssection_lr: float = 0.03,
+    length_steps: int = 20,
+    length_lr: float = 0.05,
     compute_modes: Callable | None = None,
 ) -> DichroicDesign:
-    """Design a dichroic splitter by joint AD optimization of every parameter.
+    """Two-stage design: cross-section for phase match + max GVM, then lengths.
 
-    Runs :func:`optimize_dichroic_joint` - the full 10-parameter (widths, gaps,
-    fractional rail widths, section lengths) joint optimization - and builds the
-    resulting :class:`DichroicDesign` (its ``opt_trace`` holds the 10-parameter
-    trace, unlike :func:`design_dichroic`'s single-parameter ``opt_trace``).
+    1. :func:`optimize_dichroic_crosssection` picks ``(w_a, w_b, g_b, frac_mid,
+       frac_out)`` to phase-match WGA/WGB at ``cutoff_wl`` with the maximum
+       (correctly-signed) group velocity mismatch.
+    2. :func:`optimize_dichroic_lengths` then picks the coupling ``gap`` and
+       the four section lengths (up to ``max_total_length``) to minimize the
+       adiabatic-transition loss of that *fixed* cross-section.
+
+    Returns the resulting :class:`DichroicDesign`, with ``opt_trace`` (stage 1)
+    and ``opt_trace_lengths`` (stage 2) both populated.
     """
-    params, trace = optimize_dichroic_joint(
-        platform,
-        cutoff_wl,
-        x0=x0,
-        target_extinction_db=target_extinction_db,
-        max_total_length=max_total_length,
-        res=res,
-        steps=steps,
-        lr=lr,
-        compute_modes=compute_modes,
+    cs_params, cs_trace = optimize_dichroic_crosssection(
+        platform, cutoff_wl, x0=x0_crosssection, res=res,
+        steps=crosssection_steps, lr=crosssection_lr, compute_modes=compute_modes,
     )
-    w_a, w_b, gap, g_b, frac_mid, frac_out, l1, l2, l3, l4 = (float(p) for p in params)
+    w_a, w_b, g_b, frac_mid, frac_out = (float(p) for p in cs_params)
     wgb = WGB(rail_width=w_b, gap=g_b, n_rails=3, frac_mid=frac_mid, frac_out=frac_out)
-    _, _, kappa, dn_dw = _joint_geometric_quantities(
-        platform,
-        cutoff_wl,
-        res,
-        w_a,
-        w_b,
-        gap,
-        g_b,
-        frac_mid,
-        frac_out,
-        compute_modes=compute_modes,
+
+    len_params, len_trace = optimize_dichroic_lengths(
+        platform, cutoff_wl, w_a, wgb, x0=x0_lengths,
+        max_total_length=max_total_length, res=res,
+        steps=length_steps, lr=length_lr, compute_modes=compute_modes,
+    )
+    gap, l1, l2, l3, l4 = (float(p) for p in len_params)
+
+    dw = 0.02
+    n_hi = solid_neff(
+        platform, w_a + dw, cutoff_wl, res=res, compute_modes=compute_modes
+    )
+    n_lo = solid_neff(
+        platform, w_a - dw, cutoff_wl, res=res, compute_modes=compute_modes
+    )
+    dn_dw = (n_hi - n_lo) / (2 * dw)
+    kappa = coupling_kappa(
+        platform, w_a, wgb, gap, cutoff_wl, res=res, compute_modes=compute_modes
     )
     extinction_db = _taper_extinction(
         kappa, dn_dw, w_a, platform.min_tip, cutoff_wl, l2
@@ -1097,8 +1237,29 @@ def design_dichroic_joint(
         dn_dw=dn_dw,
         extinction_db=extinction_db,
         component=component,
-        opt_trace=trace,
+        opt_trace=cs_trace,
+        opt_trace_lengths=len_trace,
     )
+
+
+def _plot_normalized_params(trace: OptimizationTrace, ax: plt.Axes) -> None:
+    """Each parameter's trajectory min-max normalized to its own [0, 1] range.
+
+    A shared linear axis flattens parameters that differ by orders of
+    magnitude (sub-um widths/gaps next to mm-scale lengths) to the baseline;
+    physical values are reported separately (layout panel / return dict).
+    """
+    all_params = np.asarray(trace.params)
+    p_lo, p_hi = all_params.min(axis=0), all_params.max(axis=0)
+    p_span = np.where(p_hi > p_lo, p_hi - p_lo, 1.0)
+    it = np.arange(len(trace.losses))
+    for j, name in enumerate(trace.param_names):
+        ax.plot(it, (all_params[:, j] - p_lo[j]) / p_span[j], "o-", ms=3, label=name)
+    ax.set_xlabel("iteration")
+    ax.set_ylabel("parameter value (min-max normalized)")
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(visible=True)
+    ax.set_title("design parameters (each normalized to its own range)")
 
 
 def joint_ad_optimization_figure(
@@ -1106,26 +1267,24 @@ def joint_ad_optimization_figure(
     cutoff_wl: float,
     out_path: Path,
     *,
-    x0: tuple[float, ...] = JOINT_X0_DEFAULT,
+    x0_crosssection: tuple[float, ...] = CROSSSECTION_X0_DEFAULT,
+    x0_lengths: tuple[float, ...] = LENGTHS_X0_DEFAULT,
     res: float = 0.05,
-    steps: int = 26,
-    lr: float = 0.025,
+    crosssection_steps: int = 26,
+    length_steps: int = 20,
 ) -> dict[str, object]:
-    """Joint AD-optimization demo: trace over all 10 parameters + performance + layout.
+    """Two-stage AD-optimization demo: both traces + performance + layout.
 
-    Designs a device by **joint gradient-based** optimization
-    (:func:`design_dichroic_joint`) over the full practical parameter set -
-    both waveguide full widths, the WGA-WGB coupling gap, the WGB inter-rail
-    gap, the fractional middle/outer WGB rail widths, and all four section
-    lengths (up to 5 mm total) - starting from a deliberately off-target
-    initial guess, at the target ``cutoff_wl``. Plots:
+    Designs a device with :func:`design_dichroic_joint` from deliberately
+    off-target initial guesses, at the target ``cutoff_wl``. Plots:
 
-    - (a) the optimization trace (composite loss vs. iteration);
-    - (b) every design parameter's trajectory vs. iteration;
-    - (c) the index-crossing performance before (initial parameters) and
-      after (optimized parameters) optimization, with the target cutoff
-      marked;
-    - (d) the optimized device layout.
+    - (a)/(b) stage 1's loss trace and its 5 cross-section parameters'
+      trajectories (phase match + group-velocity mismatch);
+    - (c)/(d) stage 2's loss trace and its 5 gap/length parameters'
+      trajectories (adiabatic-transition loss);
+    - (e) the index-crossing performance before (initial cross-section) and
+      after (optimized cross-section) stage 1, with the target cutoff marked;
+    - (f) the optimized device layout.
     """
     import matplotlib.pyplot as plt
 
@@ -1133,46 +1292,39 @@ def joint_ad_optimization_figure(
     from examples.papers._plot import plot_component
 
     design = design_dichroic_joint(
-        platform, cutoff_wl, x0=x0, res=res, steps=steps, lr=lr
+        platform, cutoff_wl, x0_crosssection=x0_crosssection, x0_lengths=x0_lengths,
+        res=res, crosssection_steps=crosssection_steps, length_steps=length_steps,
     )
     assert design.opt_trace is not None  # noqa: S101 (always set here)
-    trace = design.opt_trace
-    p_init = np.asarray(trace.params[0])
-    p_opt = np.asarray(trace.params[-1])
+    assert design.opt_trace_lengths is not None  # noqa: S101 (always set here)
+    cs_trace, len_trace = design.opt_trace, design.opt_trace_lengths
+    cs_init = np.asarray(cs_trace.params[0])
+    cs_opt = np.asarray(cs_trace.params[-1])
+    len_init = np.asarray(len_trace.params[0])
+    len_opt = np.asarray(len_trace.params[-1])
 
-    fig = plt.figure(figsize=(15, 10))
-    grid = fig.add_gridspec(2, 2)
-    ax_loss = fig.add_subplot(grid[0, 0])
-    ax_params = fig.add_subplot(grid[0, 1])
-    plot_trace(trace, ax_loss, ax_params, loss_ylog=True)
-    # the 10 parameters span wildly different scales (sub-um widths/gaps,
-    # O(1) fractions, up-to-5-mm lengths); plot_trace's shared linear axis
-    # would flatten most of them to the baseline, so re-plot this panel with
-    # each parameter's trajectory min-max normalized to its own [0, 1] range
-    # (physical values are reported in the layout panel/return dict instead).
-    ax_params.clear()
-    all_params = np.asarray(trace.params)
-    p_lo, p_hi = all_params.min(axis=0), all_params.max(axis=0)
-    p_span = np.where(p_hi > p_lo, p_hi - p_lo, 1.0)
-    it = np.arange(len(trace.losses))
-    for j, name in enumerate(trace.param_names):
-        ax_params.plot(
-            it, (all_params[:, j] - p_lo[j]) / p_span[j], "o-", ms=3, label=name
-        )
-    ax_params.set_xlabel("iteration")
-    ax_params.set_ylabel("parameter value (min-max normalized)")
-    ax_params.legend(fontsize=7, ncol=2)
-    ax_params.grid(visible=True)
-    ax_params.set_title("design parameters (each normalized to its own range)")
+    fig = plt.figure(figsize=(15, 15))
+    grid = fig.add_gridspec(3, 2)
+    ax_loss1 = fig.add_subplot(grid[0, 0])
+    ax_params1 = fig.add_subplot(grid[0, 1])
+    plot_trace(cs_trace, ax_loss1, ax_params1, loss_ylog=False)
+    ax_params1.clear()
+    _plot_normalized_params(cs_trace, ax_params1)
 
-    ax_perf = fig.add_subplot(grid[1, 0])
+    ax_loss2 = fig.add_subplot(grid[1, 0])
+    ax_params2 = fig.add_subplot(grid[1, 1])
+    plot_trace(len_trace, ax_loss2, ax_params2, loss_ylog=False)
+    ax_params2.clear()
+    _plot_normalized_params(len_trace, ax_params2)
+
+    ax_perf = fig.add_subplot(grid[2, 0])
     wls = np.linspace(cutoff_wl * 0.85, cutoff_wl * 1.15, 25)
     wgb_init = WGB(
-        rail_width=float(p_init[1]), gap=float(p_init[3]),
-        n_rails=3, frac_mid=float(p_init[4]), frac_out=float(p_init[5]),
+        rail_width=float(cs_init[1]), gap=float(cs_init[2]),
+        n_rails=3, frac_mid=float(cs_init[3]), frac_out=float(cs_init[4]),
     )
     n_b_init = [segmented_neff(platform, wgb_init, wl, res=res) for wl in wls]
-    n_a_init = [solid_neff(platform, float(p_init[0]), wl, res=res) for wl in wls]
+    n_a_init = [solid_neff(platform, float(cs_init[0]), wl, res=res) for wl in wls]
     n_b_opt = [segmented_neff(platform, design.wgb, wl, res=res) for wl in wls]
     n_a_opt = [solid_neff(platform, design.w_a, wl, res=res) for wl in wls]
     ax_perf.plot(wls * 1e3, n_b_init, "C3:", label="WGB initial")
@@ -1186,7 +1338,7 @@ def joint_ad_optimization_figure(
     ax_perf.legend(fontsize=7)
     ax_perf.grid(visible=True)
 
-    ax_layout = fig.add_subplot(grid[1, 1])
+    ax_layout = fig.add_subplot(grid[2, 1])
     plot_component(design.component, ax_layout)
     ax_layout.set_aspect("auto")
     ax_layout.set_title(
@@ -1199,25 +1351,31 @@ def joint_ad_optimization_figure(
     )
 
     fig.suptitle(
-        "Dichroic designer: joint AD gradient-based optimization over all "
-        f"practical design parameters (jax.grad via make_differentiable_objective, "
-        f"target {cutoff_wl * 1e3:.0f} nm)"
+        "Dichroic designer: two-stage AD gradient-based optimization - (1) "
+        "cross-section for phase match + max group-velocity mismatch, (2) "
+        f"gap/lengths to minimize adiabatic loss (target {cutoff_wl * 1e3:.0f} nm)"
     )
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return {
         "figure": str(out_path),
-        "params_init": dict(
-            zip(JOINT_PARAM_NAMES, np.round(p_init, 4).tolist(), strict=True)
+        "crosssection_params_init": dict(
+            zip(CROSSSECTION_PARAM_NAMES, np.round(cs_init, 4).tolist(), strict=True)
         ),
-        "params_opt": dict(
-            zip(JOINT_PARAM_NAMES, np.round(p_opt, 4).tolist(), strict=True)
+        "crosssection_params_opt": dict(
+            zip(CROSSSECTION_PARAM_NAMES, np.round(cs_opt, 4).tolist(), strict=True)
         ),
-        "final_loss": trace.losses[-1],
+        "lengths_params_init": dict(
+            zip(LENGTHS_PARAM_NAMES, np.round(len_init, 4).tolist(), strict=True)
+        ),
+        "lengths_params_opt": dict(
+            zip(LENGTHS_PARAM_NAMES, np.round(len_opt, 4).tolist(), strict=True)
+        ),
+        "crosssection_final_loss": cs_trace.losses[-1],
+        "lengths_final_loss": len_trace.losses[-1],
         "extinction_db": round(design.extinction_db, 3),
         "total_length_um": round(design.total_length, 1),
-        "iterations": len(trace.losses),
     }
 
 
@@ -1446,7 +1604,8 @@ def main() -> dict[str, object]:
         platform, targets[-1],
         FIGDIR / "dichroic_designer_joint_ad_optimization.png",
         res=pick(low=0.08, medium=0.05, high=0.04),
-        steps=pick(low=12, medium=26, high=30),
+        crosssection_steps=pick(low=12, medium=26, high=30),
+        length_steps=pick(low=10, medium=20, high=24),
     )
 
     return {

@@ -171,9 +171,11 @@ def main() -> dict[str, object]:
     joint_ad_demo = joint_ad_optimization_figure(
         platform, float(cutoffs[len(cutoffs) // 2]),
         FIGDIR / "dichroic_designer_si3n4_joint_ad_optimization.png",
-        x0=(0.35, 0.20, 0.50, 0.06, 1.0, 1.0, 150.0, 200.0, 600.0, 150.0),
+        x0_crosssection=(0.35, 0.20, 0.06, 1.0, 1.0),
+        x0_lengths=(0.50, 150.0, 200.0, 600.0, 150.0),
         res=pick(low=0.08, medium=0.05, high=0.04),
-        steps=pick(low=12, medium=26, high=30),
+        crosssection_steps=pick(low=12, medium=26, high=30),
+        length_steps=pick(low=10, medium=20, high=24),
     )
     return {
         "designs": summary,

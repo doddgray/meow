@@ -424,26 +424,58 @@ def test_dichroic_filter_heterogeneous_rails_matches_uniform_default() -> None:
     assert hetero.ymax - hetero.ymin > 0
 
 
-def test_optimize_dichroic_joint_reduces_loss() -> None:
-    """The 10-parameter joint AD optimizer runs and improves the composite loss."""
+def test_reference_gvm_sign_matches_original_paper() -> None:
+    """The Magden 2018 SOI design has ng_WGA > ng_WGB (WGA is more dispersive).
+
+    This fixes the sign every cross-section optimization's group-velocity
+    mismatch term is oriented to match.
+    """
+    from examples.papers import dichroic_designer as dd
+
+    assert dd.reference_gvm_sign() == pytest.approx(1.0)
+
+
+def test_optimize_dichroic_crosssection_reduces_loss() -> None:
+    """Stage 1: phase-match + max-GVM cross-section optimizer runs and improves."""
     from examples.papers import dichroic_designer as dd
 
     plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
-    params, trace = dd.optimize_dichroic_joint(plat, 1.54, res=0.09, steps=2, lr=0.05)
-    assert params.shape == (10,)
-    assert trace.param_names == dd.JOINT_PARAM_NAMES
+    params, trace = dd.optimize_dichroic_crosssection(
+        plat, 1.54, res=0.09, steps=2, lr=0.05
+    )
+    assert params.shape == (5,)
+    assert trace.param_names == dd.CROSSSECTION_PARAM_NAMES
+    assert len(trace.losses) == 3
+    assert trace.losses[-1] < trace.losses[0]
+
+
+def test_optimize_dichroic_lengths_reduces_loss() -> None:
+    """Stage 2: gap + lengths adiabatic-loss optimizer runs and improves."""
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    wgb = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3)
+    params, trace = dd.optimize_dichroic_lengths(
+        plat, 1.54, 0.35, wgb, res=0.09, steps=2, lr=0.1
+    )
+    assert params.shape == (5,)
+    assert trace.param_names == dd.LENGTHS_PARAM_NAMES
     assert len(trace.losses) == 3
     assert trace.losses[-1] < trace.losses[0]
 
 
 def test_design_dichroic_joint_populates_trace() -> None:
-    """design_dichroic_joint runs the joint optimizer and builds a valid design."""
+    """design_dichroic_joint runs both stages and builds a valid design."""
     from examples.papers import dichroic_designer as dd
 
     plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
-    d = dd.design_dichroic_joint(plat, 1.54, res=0.09, steps=2, lr=0.05)
+    d = dd.design_dichroic_joint(
+        plat, 1.54, res=0.09, crosssection_steps=2, length_steps=2
+    )
     assert d.opt_trace is not None
+    assert d.opt_trace_lengths is not None
     assert len(d.opt_trace.losses) == 3
+    assert len(d.opt_trace_lengths.losses) == 3
     assert d.total_length <= 5000.0 + 1.0
     assert d.component is not None
 
