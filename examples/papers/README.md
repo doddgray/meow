@@ -353,6 +353,61 @@ directory); `mao2019_designer.py`, `ramadan1998_designer.py` and
 `song2023_designer.py` are not yet converted and remain on their original
 closed-form / bisection designers.
 
+### Joint optimization over every practical dichroic parameter
+
+`dichroic_designer.optimize_dichroic_joint` extends the single-parameter
+`optimize_phase_match_width` to a **10-parameter joint optimization** over
+every practical degree of freedom of the dichroic beam splitter, driven by
+`jax.grad` through `meow.make_differentiable_objective` (exact central finite
+differences of the whole FDE-based design objective - needed here because,
+unlike the phase-match residual, the coupling `kappa` is an **overlap**, not a
+propagation-constant, quantity, so `make_differentiable_neffs` alone cannot
+capture its gradient):
+
+- both waveguide **full widths** `w_a` (WGA) and `w_b` (the WGB rail-width
+  scale),
+- the WGA-WGB **coupling gap** and the WGB **inter-rail gap** `g_b`,
+- the **fractional middle/outer WGB rail widths** `frac_mid`/`frac_out`
+  (`mid_width = frac_mid * w_b`, `out_width = frac_out * w_b`; `1.0` recovers
+  the uniform-rail-width WGB), and
+- all **four section lengths** `l1..l4`, allowed to total up to 5 mm.
+
+The composite loss is the phase-match residual, a soft hinge on the
+Landau-Zener extinction (`_taper_extinction`) falling short of the target, and
+a small compactness preference on the non-critical section lengths (`l1`,
+`l3`, `l4` - not `l2`, the phase-matching taper, whose length is driven by the
+extinction term) plus a hard penalty beyond the 5 mm budget; since the
+extinction target can be met by *either* a smaller coupling gap (exponentially
+stronger `kappa`) or a longer taper, the compactness preference is what
+resolves that trade-off towards the tightest coupling that still fits a short
+taper, rather than leaving it undetermined. Adam optimizes in
+**bounds-normalized** coordinates (each parameter mapped to `[0, 1]` over its
+box bound) so a single learning rate is meaningful across the mixed
+micron/dimensionless/length-in-microns parameter scales.
+
+`WGB` and `magden2018_dichroic.dichroic_filter` (plus its `lateral_positions`/
+`w_b_total` helpers) were generalized with `frac_mid`/`frac_out` parameters to
+support this heterogeneous-rail-width layout; both default to `1.0`, so every
+pre-existing call site (with a uniform-width WGB) is unaffected.
+
+`design_dichroic_joint()` runs the optimizer and builds the resulting
+`DichroicDesign`; `joint_ad_optimization_figure()` runs it from a deliberately
+off-target initial guess and plots the loss trace, every parameter's
+trajectory, the before/after index-crossing performance, and the optimized
+layout, written as `figures/dichroic_designer_joint_ad_optimization.png` (and
+the `_si3n4`/`_si3n4_200nm` counterparts in the Si3N4 variants). Because
+`make_differentiable_objective` re-solves `2 * n_params` times per gradient,
+this optimization is substantially more expensive per iteration than the
+single-parameter path; the demo therefore uses a coarser mesh resolution and
+fewer iterations than the discrete-sweep designs in the same module. The
+evanescent WGA-WGB coupling this model finds is weak enough (consistent with
+`magden2018_dichroic`'s own note that even the paper's specified taper is
+"strongly diabatic") that the joint optimizer's best-effort extinction can
+fall well short of an aggressive target within the length budget - the
+optimization is still a genuine, correct gradient descent of the composite
+objective; it is just bounded by the same physical coupling-strength limit
+documented elsewhere in this directory.
+
 ## Running
 
 ```sh

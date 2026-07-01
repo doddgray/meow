@@ -100,21 +100,41 @@ class Platform:
 
 @dataclass
 class WGB:
-    """A sub-wavelength multi-rail (segmented) WGB cross-section."""
+    """A sub-wavelength multi-rail (segmented) WGB cross-section.
+
+    ``frac_mid``/``frac_out`` scale the central/outer rail widths as fractions
+    of ``rail_width`` (only meaningful for ``n_rails == 3``; ``1.0`` recovers
+    the uniform-rail-width WGB).
+    """
 
     rail_width: float
     gap: float
     n_rails: int = 3
+    frac_mid: float = 1.0
+    frac_out: float = 1.0
+
+    @property
+    def widths(self) -> list[float]:
+        """Per-rail widths (heterogeneous mid/outer widths for 3 rails)."""
+        if self.n_rails == 3:
+            mid, out = self.frac_mid * self.rail_width, self.frac_out * self.rail_width
+            return [out, mid, out]
+        return [self.rail_width] * self.n_rails
 
     @property
     def total_width(self) -> float:
         """Edge-to-edge width of the multi-rail WGB."""
-        return self.n_rails * self.rail_width + (self.n_rails - 1) * self.gap
+        return float(sum(self.widths) + (self.n_rails - 1) * self.gap)
 
     def centers(self, x0: float = 0.0) -> list[float]:
         """Lateral rail centres, symmetric about ``x0``."""
-        pitch = self.rail_width + self.gap
-        return [x0 + (i - (self.n_rails - 1) / 2) * pitch for i in range(self.n_rails)]
+        widths = self.widths
+        pos = x0 - self.total_width / 2
+        centers = []
+        for w in widths:
+            centers.append(pos + w / 2)
+            pos += w + self.gap
+        return centers
 
 
 # --------------------------------------------------------------------------
@@ -238,9 +258,7 @@ def segmented_neff(
     """Fundamental TE effective index of the isolated multi-rail WGB."""
     span = max(2.5, x0 + 1.5 * wgb.total_width)
     mesh = _mesh(platform, -span, span, res)
-    structs = _ridge_structures(
-        platform, [wgb.rail_width] * wgb.n_rails, wgb.centers(x0), (-span, span)
-    )
+    structs = _ridge_structures(platform, wgb.widths, wgb.centers(x0), (-span, span))
     return float(
         np.real(
             _te_modes(structs, wl, mesh, compute_modes=compute_modes)[0].neff
@@ -389,9 +407,7 @@ def coupling_kappa(
         compute_modes=compute_modes,
     )[0]
     mode_b = _te_modes(
-        _ridge_structures(
-            platform, [wgb.rail_width] * wgb.n_rails, wgb.centers(x0_b), (-span, span)
-        ),
+        _ridge_structures(platform, wgb.widths, wgb.centers(x0_b), (-span, span)),
         wl,
         mesh,
         compute_modes=compute_modes,
@@ -469,6 +485,188 @@ def _allocate_lengths(
     if l2 < l_io:  # budget too small: share the remainder
         l2 = l3 = max(l_io, 0.5 * (platform.max_length - 2 * l_io))
     return l_io, l2, l3, l_io
+
+
+# --------------------------------------------------------------------------
+# joint AD optimization over the full practical design-parameter set
+# --------------------------------------------------------------------------
+JOINT_PARAM_NAMES: tuple[str, ...] = (
+    "w_a [um]",
+    "w_b [um]",
+    "gap [um]",
+    "g_b [um]",
+    "frac_mid",
+    "frac_out",
+    "l1 [um]",
+    "l2 [um]",
+    "l3 [um]",
+    "l4 [um]",
+)
+"""Parameter order of :func:`optimize_dichroic_joint`."""
+
+
+def _joint_geometric_quantities(
+    platform: Platform,
+    cutoff_wl: float,
+    res: float,
+    w_a: float,
+    w_b: float,
+    gap: float,
+    g_b: float,
+    frac_mid: float,
+    frac_out: float,
+    compute_modes: Callable | None = None,
+) -> tuple[float, float, float, float]:
+    """``(n_a, n_b, kappa, dn_dw)`` at one geometric point of the joint design."""
+    wgb = WGB(rail_width=w_b, gap=g_b, n_rails=3, frac_mid=frac_mid, frac_out=frac_out)
+    n_b = segmented_neff(platform, wgb, cutoff_wl, res=res, compute_modes=compute_modes)
+    n_a = solid_neff(platform, w_a, cutoff_wl, res=res, compute_modes=compute_modes)
+    kappa = coupling_kappa(
+        platform, w_a, wgb, gap, cutoff_wl, res=res, compute_modes=compute_modes
+    )
+    dw = 0.02
+    n_hi = solid_neff(
+        platform, w_a + dw, cutoff_wl, res=res, compute_modes=compute_modes
+    )
+    n_lo = solid_neff(
+        platform, w_a - dw, cutoff_wl, res=res, compute_modes=compute_modes
+    )
+    dn_dw = (n_hi - n_lo) / (2 * dw)
+    return n_a, n_b, kappa, dn_dw
+
+
+JOINT_X0_DEFAULT: tuple[float, ...] = (
+    0.60, 0.25, 0.75, 0.12, 1.0, 1.0, 200.0, 260.0, 900.0, 200.0,
+)
+"""Default (deliberately off-target) initial guess for
+:func:`optimize_dichroic_joint`."""
+
+
+def optimize_dichroic_joint(
+    platform: Platform,
+    cutoff_wl: float,
+    *,
+    x0: tuple[float, ...] = JOINT_X0_DEFAULT,
+    bounds: tuple[tuple[float, float], ...] | None = None,
+    target_extinction_db: float = 20.0,
+    max_total_length: float = 5000.0,
+    res: float = 0.05,
+    steps: int = 26,
+    lr: float = 0.025,
+    compute_modes: Callable | None = None,
+) -> tuple[np.ndarray, OptimizationTrace]:
+    """Joint AD-gradient optimization over the full practical parameter set.
+
+    Minimizes a composite loss over the 10-parameter vector ``(w_a, w_b, gap,
+    g_b, frac_mid, frac_out, l1, l2, l3, l4)`` (see :data:`JOINT_PARAM_NAMES`):
+    the WGA/WGB full widths, the WGA-WGB coupling gap, the inter-rail gap of
+    the three-ridge WGB, the fractional middle/outer WGB rail widths (as
+    fractions of ``w_b``), and the four adiabatic section lengths, allowing up
+    to ``max_total_length`` (5 mm by default). The loss combines:
+
+    - the phase-match residual ``(n_WGA - n_WGB)^2`` at ``cutoff_wl``,
+    - a soft hinge penalizing a Landau-Zener extinction (:func:`_taper_extinction`)
+      below ``target_extinction_db``,
+    - a small linear preference for a more compact (shorter total length)
+      device - since the required extinction is met by *either* a smaller
+      coupling gap (stronger, exponentially larger ``kappa``) or a longer
+      phase-matching taper, this preference is what drives the gap towards
+      the tightest coupling that still meets the extinction target within a
+      short taper, rather than leaving it undetermined, and
+    - a soft hinge penalizing a total length beyond ``max_total_length``.
+
+    The loss is wrapped once with :func:`meow.make_differentiable_objective`
+    (exact central finite differences of the whole FDE-based objective), and
+    optimized by ``jax.grad`` + projected Adam
+    (:func:`examples.papers._ad_optimize.adam_minimize`)
+    in **bounds-normalized** coordinates, so a single learning rate is
+    meaningful across the mixed micron/dimensionless/length-in-microns
+    parameter scales. The four length parameters do not affect the FDE
+    quantities, so their finite-difference steps are served from a cache keyed
+    on the 6 geometric parameters - no extra eigensolves.
+
+    Returns:
+        ``(params_opt, trace)`` - the optimized parameter vector, in the
+        :data:`JOINT_PARAM_NAMES` order, and the optimization trace (with
+        ``trace.params`` de-normalized back to physical units).
+    """
+    import jax.numpy as jnp
+
+    from examples.papers._ad_optimize import adam_minimize
+
+    if bounds is None:
+        w_tip, min_gap = platform.min_tip, platform.min_gap
+        bounds = (
+            (2 * w_tip, 0.9),  # w_a
+            (2 * w_tip, 0.45),  # w_b - stay in the sub-wavelength (weakly-guiding)
+            (min_gap, 1.2),  # gap - the coupling weakens sharply beyond ~1.2 um
+            (min_gap, 0.30),  # g_b
+            (0.6, 1.6),  # frac_mid
+            (0.6, 1.6),  # frac_out
+            (20.0, 400.0),  # l1
+            (20.0, max_total_length),  # l2
+            (50.0, 3000.0),  # l3
+            (20.0, 400.0),  # l4
+        )
+    lo = np.array([b[0] for b in bounds], dtype=float)
+    hi = np.array([b[1] for b in bounds], dtype=float)
+    scale = hi - lo
+
+    cache: dict[tuple[float, ...], tuple[float, float, float, float]] = {}
+
+    def geometric(params6: tuple[float, ...]) -> tuple[float, float, float, float]:
+        if params6 not in cache:
+            if len(cache) > 64:
+                cache.clear()
+            cache[params6] = _joint_geometric_quantities(
+                platform, cutoff_wl, res, *params6, compute_modes=compute_modes
+            )
+        return cache[params6]
+
+    def objective(params: np.ndarray) -> np.ndarray:
+        w_a, w_b, gap, g_b, frac_mid, frac_out, l1, l2, l3, l4 = (
+            float(p) for p in params
+        )
+        n_a, n_b, kappa, dn_dw = geometric((w_a, w_b, gap, g_b, frac_mid, frac_out))
+        phase_loss = (n_a - n_b) ** 2
+        extinction_db = _taper_extinction(
+            kappa, dn_dw, w_a, platform.min_tip, cutoff_wl, l2
+        )
+        ext_shortfall = max(target_extinction_db - extinction_db, 0.0)
+        total_length = l1 + l2 + l3 + l4
+        length_excess = max(total_length - max_total_length, 0.0)
+        # the compactness preference excludes l2 (the critical phase-matching
+        # taper, whose length is driven by the extinction shortfall above) so
+        # it does not fight that gradient; it only trims the non-critical
+        # input/bend/output sections (l1, l3, l4).
+        loss = (
+            2000.0 * phase_loss
+            + 0.02 * ext_shortfall**2
+            + 3e-4 * (l1 + l3 + l4)
+            + 1e-4 * length_excess**2
+        )
+        return np.asarray(loss, dtype=float)
+
+    differentiable_loss = mw.make_differentiable_objective(objective, shape=())
+
+    def loss_fn(x_norm: object) -> object:
+        real = lo + jnp.asarray(x_norm) * scale
+        return differentiable_loss(real)
+
+    x0_arr = np.clip(np.asarray(x0, dtype=float), lo, hi)
+    x0_norm = (x0_arr - lo) / scale
+    x_opt_norm, trace = adam_minimize(
+        loss_fn,
+        list(x0_norm),
+        steps=steps,
+        lr=lr,
+        bounds=[(0.0, 1.0)] * len(x0),
+        param_names=JOINT_PARAM_NAMES,
+        objective_name="joint design loss",
+    )
+    trace.params = [lo + np.asarray(p) * scale for p in trace.params]
+    x_opt = lo + x_opt_norm * scale
+    return x_opt, trace
 
 
 def design_dichroic(
@@ -559,6 +757,8 @@ def design_dichroic(
         l2=lengths[1],
         l3=lengths[2],
         l4=lengths[3],
+        frac_mid=wgb.frac_mid,
+        frac_out=wgb.frac_out,
     )
     return DichroicDesign(
         platform=platform,
@@ -631,6 +831,8 @@ def design_from_params(
         l2=lengths[1],
         l3=lengths[2],
         l4=lengths[3],
+        frac_mid=wgb.frac_mid,
+        frac_out=wgb.frac_out,
     )
     return DichroicDesign(
         platform=platform,
@@ -818,6 +1020,184 @@ def ad_optimization_figure(
         "w_init_nm": round(w_init * 1e3, 1),
         "w_opt_nm": round(w_opt * 1e3, 1),
         "final_loss": trace.losses[-1],
+        "iterations": len(trace.losses),
+    }
+
+
+def design_dichroic_joint(
+    platform: Platform,
+    cutoff_wl: float,
+    *,
+    x0: tuple[float, ...] = JOINT_X0_DEFAULT,
+    gap_out: float = 2.0,
+    target_extinction_db: float = 20.0,
+    max_total_length: float = 5000.0,
+    res: float = 0.05,
+    steps: int = 26,
+    lr: float = 0.025,
+    compute_modes: Callable | None = None,
+) -> DichroicDesign:
+    """Design a dichroic splitter by joint AD optimization of every parameter.
+
+    Runs :func:`optimize_dichroic_joint` - the full 10-parameter (widths, gaps,
+    fractional rail widths, section lengths) joint optimization - and builds the
+    resulting :class:`DichroicDesign` (its ``opt_trace`` holds the 10-parameter
+    trace, unlike :func:`design_dichroic`'s single-parameter ``opt_trace``).
+    """
+    params, trace = optimize_dichroic_joint(
+        platform,
+        cutoff_wl,
+        x0=x0,
+        target_extinction_db=target_extinction_db,
+        max_total_length=max_total_length,
+        res=res,
+        steps=steps,
+        lr=lr,
+        compute_modes=compute_modes,
+    )
+    w_a, w_b, gap, g_b, frac_mid, frac_out, l1, l2, l3, l4 = (float(p) for p in params)
+    wgb = WGB(rail_width=w_b, gap=g_b, n_rails=3, frac_mid=frac_mid, frac_out=frac_out)
+    _, _, kappa, dn_dw = _joint_geometric_quantities(
+        platform,
+        cutoff_wl,
+        res,
+        w_a,
+        w_b,
+        gap,
+        g_b,
+        frac_mid,
+        frac_out,
+        compute_modes=compute_modes,
+    )
+    extinction_db = _taper_extinction(
+        kappa, dn_dw, w_a, platform.min_tip, cutoff_wl, l2
+    )
+    component = dichroic_filter(
+        w_a=w_a,
+        w_b=w_b,
+        g_b=g_b,
+        gap=gap,
+        gap_out=gap_out,
+        w_tip=platform.min_tip,
+        l1=l1,
+        l2=l2,
+        l3=l3,
+        l4=l4,
+        frac_mid=frac_mid,
+        frac_out=frac_out,
+    )
+    return DichroicDesign(
+        platform=platform,
+        cutoff_wl=cutoff_wl,
+        wgb=wgb,
+        w_a=w_a,
+        gap=gap,
+        lengths=(l1, l2, l3, l4),
+        kappa=kappa,
+        dn_dw=dn_dw,
+        extinction_db=extinction_db,
+        component=component,
+        opt_trace=trace,
+    )
+
+
+def joint_ad_optimization_figure(
+    platform: Platform,
+    cutoff_wl: float,
+    out_path: Path,
+    *,
+    x0: tuple[float, ...] = JOINT_X0_DEFAULT,
+    res: float = 0.05,
+    steps: int = 26,
+    lr: float = 0.025,
+) -> dict[str, object]:
+    """Joint AD-optimization demo: trace over all 10 parameters + performance + layout.
+
+    Designs a device by **joint gradient-based** optimization
+    (:func:`design_dichroic_joint`) over the full practical parameter set -
+    both waveguide full widths, the WGA-WGB coupling gap, the WGB inter-rail
+    gap, the fractional middle/outer WGB rail widths, and all four section
+    lengths (up to 5 mm total) - starting from a deliberately off-target
+    initial guess, at the target ``cutoff_wl``. Plots:
+
+    - (a) the optimization trace (composite loss vs. iteration);
+    - (b) every design parameter's trajectory vs. iteration;
+    - (c) the index-crossing performance before (initial parameters) and
+      after (optimized parameters) optimization, with the target cutoff
+      marked;
+    - (d) the optimized device layout.
+    """
+    import matplotlib.pyplot as plt
+
+    from examples.papers._ad_optimize import plot_trace
+    from examples.papers._plot import plot_component
+
+    design = design_dichroic_joint(
+        platform, cutoff_wl, x0=x0, res=res, steps=steps, lr=lr
+    )
+    assert design.opt_trace is not None  # noqa: S101 (always set here)
+    trace = design.opt_trace
+    p_init = np.asarray(trace.params[0])
+    p_opt = np.asarray(trace.params[-1])
+
+    fig = plt.figure(figsize=(15, 10))
+    grid = fig.add_gridspec(2, 2)
+    ax_loss = fig.add_subplot(grid[0, 0])
+    ax_params = fig.add_subplot(grid[0, 1])
+    plot_trace(trace, ax_loss, ax_params, loss_ylog=True)
+
+    ax_perf = fig.add_subplot(grid[1, 0])
+    wls = np.linspace(cutoff_wl * 0.85, cutoff_wl * 1.15, 25)
+    wgb_init = WGB(
+        rail_width=float(p_init[1]), gap=float(p_init[3]),
+        n_rails=3, frac_mid=float(p_init[4]), frac_out=float(p_init[5]),
+    )
+    n_b_init = [segmented_neff(platform, wgb_init, wl, res=res) for wl in wls]
+    n_a_init = [solid_neff(platform, float(p_init[0]), wl, res=res) for wl in wls]
+    n_b_opt = [segmented_neff(platform, design.wgb, wl, res=res) for wl in wls]
+    n_a_opt = [solid_neff(platform, design.w_a, wl, res=res) for wl in wls]
+    ax_perf.plot(wls * 1e3, n_b_init, "C3:", label="WGB initial")
+    ax_perf.plot(wls * 1e3, n_a_init, "C1:", label="WGA initial")
+    ax_perf.plot(wls * 1e3, n_b_opt, "k--", lw=2, label="WGB optimized")
+    ax_perf.plot(wls * 1e3, n_a_opt, "C0-", lw=2, label="WGA optimized")
+    ax_perf.axvline(cutoff_wl * 1e3, color="0.5", ls=":", lw=1)
+    ax_perf.set_xlabel("wavelength [nm]")
+    ax_perf.set_ylabel("effective index")
+    ax_perf.set_title(f"phase-match performance at target {cutoff_wl * 1e3:.0f} nm")
+    ax_perf.legend(fontsize=7)
+    ax_perf.grid(visible=True)
+
+    ax_layout = fig.add_subplot(grid[1, 1])
+    plot_component(design.component, ax_layout)
+    ax_layout.set_aspect("auto")
+    ax_layout.set_title(
+        f"joint AD-optimized device: w_a={design.w_a * 1e3:.0f} nm, "
+        f"w_b={design.wgb.rail_width * 1e3:.0f} nm, gap={design.gap * 1e3:.0f} nm,\n"
+        f"g_b={design.wgb.gap * 1e3:.0f} nm, frac_mid={design.wgb.frac_mid:.2f}, "
+        f"frac_out={design.wgb.frac_out:.2f}, L={design.total_length:.0f} um, "
+        f"ER~{design.extinction_db:.2f} dB",
+        fontsize=8,
+    )
+
+    fig.suptitle(
+        "Dichroic designer: joint AD gradient-based optimization over all "
+        f"practical design parameters (jax.grad via make_differentiable_objective, "
+        f"target {cutoff_wl * 1e3:.0f} nm)"
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return {
+        "figure": str(out_path),
+        "params_init": dict(
+            zip(JOINT_PARAM_NAMES, np.round(p_init, 4).tolist(), strict=True)
+        ),
+        "params_opt": dict(
+            zip(JOINT_PARAM_NAMES, np.round(p_opt, 4).tolist(), strict=True)
+        ),
+        "final_loss": trace.losses[-1],
+        "extinction_db": round(design.extinction_db, 3),
+        "total_length_um": round(design.total_length, 1),
         "iterations": len(trace.losses),
     }
 
@@ -1031,12 +1411,23 @@ def main() -> dict[str, object]:
         designs, analyses_root, FIGDIR / "dichroic_designer_spectrum_grid.png"
     )
 
-    # AD gradient-based optimization demo (jax.grad through make_differentiable_neffs)
+    # single-parameter AD demo (jax.grad through make_differentiable_neffs)
     ad_demo = ad_optimization_figure(
         platform, wgb, targets[-1], res,
         FIGDIR / "dichroic_designer_ad_optimization.png",
         gradient_w0=pick(low=0.7, medium=0.7, high=0.7),
         gradient_steps=pick(low=15, medium=25, high=25),
+    )
+
+    # joint AD optimization demo over every practical design parameter
+    # (jax.grad through make_differentiable_objective; a coarser resolution
+    # than the discrete-sweep designs above bounds its ~2 * n_params re-solve
+    # cost per gradient step)
+    joint_ad_demo = joint_ad_optimization_figure(
+        platform, targets[-1],
+        FIGDIR / "dichroic_designer_joint_ad_optimization.png",
+        res=pick(low=0.08, medium=0.05, high=0.04),
+        steps=pick(low=12, medium=26, high=30),
     )
 
     return {
@@ -1045,6 +1436,7 @@ def main() -> dict[str, object]:
         "test_structures": tests,
         "spectrum_grid": str(grid) if grid else None,
         "ad_optimization": ad_demo,
+        "joint_ad_optimization": joint_ad_demo,
     }
 
 

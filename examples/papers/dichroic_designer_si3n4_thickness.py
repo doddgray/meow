@@ -35,6 +35,7 @@ from examples.papers.dichroic_designer import (
     analyze_dichroic_design,
     design_dichroic,
     dichroic_test_structures,
+    joint_ad_optimization_figure,
     segmented_neff,
     solid_neff,
 )
@@ -388,6 +389,20 @@ def main() -> dict[str, object]:
         column_grid_figure(name, plat, wgb, designs, res, eme=eme)
         thickness_test_structures(name, designs)
         out[name] = _summary(designs)
+        if t_nm == 200:
+            # joint AD optimization demo (all practical parameters) at the
+            # representative (200 nm core) thickness only, to bound run time.
+            joint_ad_demo = joint_ad_optimization_figure(
+                plat, float(cutoffs[len(cutoffs) // 2]),
+                FIGDIR / f"dichroic_designer_si3n4_{name}_joint_ad_optimization.png",
+                x0=(
+                    0.35, wgb.rail_width, 0.50, wgb.gap, 1.0, 1.0,
+                    150.0, 200.0, 600.0, 150.0,
+                ),
+                res=pick(low=0.09, medium=0.06, high=0.05),
+                steps=pick(low=10, medium=20, high=24),
+            )
+            out[f"{name}_joint_ad_optimization"] = joint_ad_demo
     return out
 
 

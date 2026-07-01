@@ -385,6 +385,69 @@ def test_design_dichroic_gradient_path_populates_trace() -> None:
     assert d.total_length <= plat.max_length + 1.0
 
 
+def test_wgb_heterogeneous_rail_widths() -> None:
+    """WGB.frac_mid/frac_out give heterogeneous mid/outer rail widths.
+
+    ``frac_mid=frac_out=1.0`` (the default) must reproduce the uniform-width
+    WGB exactly; scaling them apart changes only the corresponding rails.
+    """
+    from examples.papers import dichroic_designer as dd
+
+    uniform = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3)
+    assert uniform.widths == pytest.approx([0.25, 0.25, 0.25])
+    assert uniform.total_width == pytest.approx(3 * 0.25 + 2 * 0.10)
+    assert uniform.centers(0.0) == pytest.approx([-0.35, 0.0, 0.35])
+
+    hetero = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3, frac_mid=1.4, frac_out=0.8)
+    out_w, mid_w = 0.8 * 0.25, 1.4 * 0.25
+    assert hetero.widths == pytest.approx([out_w, mid_w, out_w])
+    total = mid_w + 2 * out_w + 2 * 0.10
+    assert hetero.total_width == pytest.approx(total)
+    centers = hetero.centers(0.0)
+    assert centers == pytest.approx(
+        [-(mid_w / 2 + 0.10 + out_w / 2), 0.0, mid_w / 2 + 0.10 + out_w / 2]
+    )
+    # rails are contiguous with the specified gaps, symmetric about x0
+    assert centers[1] - mid_w / 2 - (centers[0] + out_w / 2) == pytest.approx(0.10)
+
+
+def test_dichroic_filter_heterogeneous_rails_matches_uniform_default() -> None:
+    """dichroic_filter(frac_mid=frac_out=1.0) matches the pre-existing layout."""
+    default = md.dichroic_filter()
+    explicit = md.dichroic_filter(frac_mid=1.0, frac_out=1.0)
+    assert default.xmax == pytest.approx(explicit.xmax)
+    assert default.ymin == pytest.approx(explicit.ymin)
+    assert default.ymax == pytest.approx(explicit.ymax)
+
+    # a heterogeneous WGB still builds a valid, wider-than-mid-alone layout
+    hetero = md.dichroic_filter(frac_mid=1.3, frac_out=0.7)
+    assert hetero.ymax - hetero.ymin > 0
+
+
+def test_optimize_dichroic_joint_reduces_loss() -> None:
+    """The 10-parameter joint AD optimizer runs and improves the composite loss."""
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    params, trace = dd.optimize_dichroic_joint(plat, 1.54, res=0.09, steps=2, lr=0.05)
+    assert params.shape == (10,)
+    assert trace.param_names == dd.JOINT_PARAM_NAMES
+    assert len(trace.losses) == 3
+    assert trace.losses[-1] < trace.losses[0]
+
+
+def test_design_dichroic_joint_populates_trace() -> None:
+    """design_dichroic_joint runs the joint optimizer and builds a valid design."""
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    d = dd.design_dichroic_joint(plat, 1.54, res=0.09, steps=2, lr=0.05)
+    assert d.opt_trace is not None
+    assert len(d.opt_trace.losses) == 3
+    assert d.total_length <= 5000.0 + 1.0
+    assert d.component is not None
+
+
 def test_dichroic_designer_si3n4_platform_and_width() -> None:
     """The Si3N4 example designs a fabricable splitter in the 900-1200 nm band."""
     from examples.papers import dichroic_designer as dd
