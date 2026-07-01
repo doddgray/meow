@@ -1145,6 +1145,25 @@ def joint_ad_optimization_figure(
     ax_loss = fig.add_subplot(grid[0, 0])
     ax_params = fig.add_subplot(grid[0, 1])
     plot_trace(trace, ax_loss, ax_params, loss_ylog=True)
+    # the 10 parameters span wildly different scales (sub-um widths/gaps,
+    # O(1) fractions, up-to-5-mm lengths); plot_trace's shared linear axis
+    # would flatten most of them to the baseline, so re-plot this panel with
+    # each parameter's trajectory min-max normalized to its own [0, 1] range
+    # (physical values are reported in the layout panel/return dict instead).
+    ax_params.clear()
+    all_params = np.asarray(trace.params)
+    p_lo, p_hi = all_params.min(axis=0), all_params.max(axis=0)
+    p_span = np.where(p_hi > p_lo, p_hi - p_lo, 1.0)
+    it = np.arange(len(trace.losses))
+    for j, name in enumerate(trace.param_names):
+        ax_params.plot(
+            it, (all_params[:, j] - p_lo[j]) / p_span[j], "o-", ms=3, label=name
+        )
+    ax_params.set_xlabel("iteration")
+    ax_params.set_ylabel("parameter value (min-max normalized)")
+    ax_params.legend(fontsize=7, ncol=2)
+    ax_params.grid(visible=True)
+    ax_params.set_title("design parameters (each normalized to its own range)")
 
     ax_perf = fig.add_subplot(grid[1, 0])
     wls = np.linspace(cutoff_wl * 0.85, cutoff_wl * 1.15, 25)
