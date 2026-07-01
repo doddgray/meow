@@ -118,7 +118,9 @@ from meow.environment import (
     Environment,
 )
 from meow.fde import (
+    EigenvectorAdjoint,
     ModeMetrics,
+    ScalarModeSolution,
     Sim,
     compute_modes,
     compute_modes_lumerical,
@@ -133,6 +135,7 @@ from meow.fde import (
     orthonormalize_modes,
     post_process_modes,
     solve_mode,
+    solve_scalar_modes_full,
 )
 from meow.gds_structures import (
     GdsExtrusionRule,
@@ -211,9 +214,11 @@ from meow.ridb import (
 )
 from meow.sensitivity import (
     finite_difference_gradient,
+    make_differentiable_modes,
     make_differentiable_neffs,
     make_differentiable_objective,
     modal_power,
+    mode_overlap_power,
     neff_gradient,
     neff_sensitivity,
     neff_value_and_grad,
@@ -256,6 +261,7 @@ __all__ = [
     "CrossSection",
     "DType",
     "Dim",
+    "EigenvectorAdjoint",
     "Environment",
     "FloatArray1D",
     "FloatArray2D",
@@ -289,6 +295,7 @@ __all__ = [
     "SampledAnisotropicMaterial",
     "SampledMaterial",
     "SavedEME",
+    "ScalarModeSolution",
     "SellmeierModel",
     "SerializedArray",
     "Shape",
@@ -370,6 +377,7 @@ __all__ = [
     "load_table",
     "magnetic_energy",
     "magnetic_energy_density",
+    "make_differentiable_modes",
     "make_differentiable_neffs",
     "make_differentiable_objective",
     "make_run_dir",
@@ -379,6 +387,7 @@ __all__ = [
     "modal_power",
     "mode",
     "mode_label",
+    "mode_overlap_power",
     "modes_to_dataset",
     "neff_gradient",
     "neff_sensitivity",
@@ -412,6 +421,7 @@ __all__ = [
     "silicon_oxide",
     "slurm_executor",
     "solve_mode",
+    "solve_scalar_modes_full",
     "solver_threads",
     "sort_structures",
     "split_square_matrix",

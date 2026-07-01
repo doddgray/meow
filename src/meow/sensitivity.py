@@ -1,15 +1,53 @@
-"""Modal sensitivities: exact ``dneff/depsilon`` adjoint kernel from primal fields.
+"""Modal sensitivities and the three ``jax``-differentiable EME primitives.
 
-meow's FDE backends solve each cross-section's eigenproblem with an external
-(non-differentiable) solver, so meow does not propagate autodiff gradients
-*through* a mode solve. This module supplies the missing piece for gradient-based
-design and sensitivity analysis: the **first-order perturbation-theory
-sensitivity** of a mode's effective index to the permittivity, evaluated purely
-from the primal mode fields (no re-solve, no operator matrix).
+meow's FDE backends solve each cross-section's eigenproblem with an external or
+iterative (non-``jax``-native) solver, so gradients do not flow *through* a mode
+solve automatically. This module supplies the missing piece: three
+:func:`jax.custom_vjp`-wrapped primitives, each trading off cost, exactness and
+what part of the physics they capture. Pick the cheapest one that is exact for
+your objective (backward-pass cost / what it captures / backend):
 
-For a z-invariant waveguide mode, first-order perturbation theory gives the shift
-in propagation constant ``beta = k0 * neff`` under a permittivity perturbation
-``depsilon(x, y)`` as
+- :func:`make_differentiable_neffs` - O(1), no re-solve / neff (propagation
+  constant) only / any backend (tidy3d, mpb, lumerical, sparse).
+- :func:`make_differentiable_modes` - O(1), no re-solve / neff **and** mode
+  field, exact / :mod:`meow.fde.sparse` (scalar) only.
+- :func:`make_differentiable_objective` - O(``2 n_params``) re-solves /
+  everything (full ``dS/dp``) / any backend.
+
+1. **``make_differentiable_neffs``** - cheapest and most general (works with any
+   backend). Exact for objectives that depend on the design only through
+   propagation constants: phase, coupling length, adiabaticity, a neff-crossing
+   (cutoff) condition. Backward pass is the **first-order perturbation-theory**
+   sensitivity of neff to the permittivity, evaluated purely from the primal
+   mode fields (no re-solve, no operator matrix) - see :func:`neff_gradient`
+   below. It treats mode-overlap/interface matrices as constant, so it is an
+   approximation (often still a very good one) for objectives that depend on
+   *how well two modes overlap*, not just their propagation constants.
+
+2. **``make_differentiable_modes``** - the exact generalization of (1) to
+   overlap-mediated objectives (transmission through a taper, a splitting
+   ratio), at the same O(1)-eigensolve cost. It returns the mode **field**
+   alongside neff, with a backward pass built from
+   :class:`meow.fde.sparse.EigenvectorAdjoint` - the exact bordered/deflated
+   eigenpair sensitivity (no truncated modal expansion, no finite difference).
+   Because the field itself carries a correct gradient, *any* ``jax.numpy``
+   expression built from it differentiates exactly through ordinary
+   ``jax.grad``. The cost is backend: it needs the discretized operator, which
+   only meow's scalar/semivectorial sparse solver exposes (the external
+   vectorial backends do not) - so use it as a fast, differentiable surrogate
+   for the optimization inner loop, then validate the converged design with a
+   full vectorial EME.
+
+3. **``make_differentiable_objective``** - the exact fallback for *any*
+   objective on *any* backend, at the cost of ``2 * n_params`` re-solves
+   (central finite differences of the whole EME). Use it when the objective's
+   parameter-dependence must go through a real vectorial solve (e.g. a
+   high-index-contrast anisotropic crystal) and the number of design parameters
+   is modest.
+
+For a z-invariant waveguide mode, first-order perturbation theory (the kernel
+behind ``make_differentiable_neffs``) gives the shift in propagation constant
+``beta = k0 * neff`` under a permittivity perturbation ``depsilon(x, y)`` as
 
     d(neff) = (c * eps0 / (4 P)) * integral( depsilon . |E|^2 ) dA
 
@@ -30,6 +68,11 @@ embarrassingly-parallel reduction across the cluster.
 The companion :func:`finite_difference_gradient` re-solves to give a gold-standard
 check, so a production run can ship its gradient alongside an FD-verified
 confidence number.
+
+Whichever primitive builds a design's forward model, it composes with the
+already-``jax``-native EME cascade (:mod:`meow.eme.propagation`,
+:mod:`meow.eme.interface`), so ``jax.grad`` of a transmission/loss objective
+flows automatically from the S-matrix back to the design parameters.
 """
 
 from __future__ import annotations
@@ -47,6 +90,7 @@ if TYPE_CHECKING:
 
     from meow.arrays import FloatArray2D
     from meow.cross_section import CrossSection
+    from meow.fde.sparse import ScalarModeSolution
     from meow.mode import Mode
 
 # c * eps0 is the SI constant that converts the (unit-power-normalized, micron-
@@ -422,3 +466,145 @@ def make_differentiable_objective(
 
     differentiable_objective.defvjp(_fwd, _bwd)
     return differentiable_objective
+
+
+def mode_overlap_power(field_a: Any, field_b: Any) -> Any:
+    """Unnormalized real-field overlap power ``(sum(field_a * field_b))**2``.
+
+    A convenience objective-building block for use with the fields returned by
+    :func:`make_differentiable_modes`: since those fields are ordinary ``jax``
+    arrays (real, from the scalar-mode solver), any ``jax.numpy`` expression of
+    them - not just this one - differentiates correctly through their exact
+    adjoint. This helper is the simplest such expression: the (unnormalized)
+    coupled power between two real scalar mode fields on the same grid, e.g. the
+    butt-coupling / mode-mismatch transmission between two waveguide sections.
+
+    Args:
+        field_a: a real mode field array (any shape, matching ``field_b``).
+        field_b: a real mode field array (same shape as ``field_a``).
+
+    Returns:
+        The scalar ``(sum(field_a * field_b))**2``.
+    """
+    import jax.numpy as jnp
+
+    return jnp.sum(field_a * field_b) ** 2
+
+
+def make_differentiable_modes(
+    solve: Callable[[np.ndarray], list[list[ScalarModeSolution]]],
+    *,
+    shape: tuple[int, int],
+    field_size: int,
+    eps_jacobian: Callable[[np.ndarray, int], list[np.ndarray]],
+) -> Callable[[Any], tuple[Any, Any]]:
+    r"""Build a ``jax``-differentiable ``(neffs, fields)(params)`` - the exact adjoint.
+
+    Like :func:`make_differentiable_neffs`, this wraps a non-differentiable mode
+    solve in a :func:`jax.custom_vjp` via :func:`jax.pure_callback`, memoizing the
+    solve between the forward and backward passes so a value-and-gradient costs a
+    single eigensolve. It differs in **what** it exposes and **how exact** the
+    result is: it returns the mode **fields** alongside the effective indices,
+    with a backward pass built from :class:`meow.fde.sparse.EigenvectorAdjoint` -
+    the exact bordered/deflated eigenpair sensitivity, not a truncated modal
+    expansion or a finite difference. Because the fields themselves carry correct
+    gradients, **any** ``jax.numpy`` objective built from them - a mode overlap, a
+    splitting ratio, a butt-coupling transmission - differentiates exactly through
+    ordinary reverse-mode ``jax.grad``, with no bespoke overlap-sensitivity
+    formula and no re-solve. This is the piece :func:`make_differentiable_neffs`
+    is missing (it treats overlap/interface matrices as constant) and
+    :func:`make_differentiable_objective` pays for with ``2 * n_params``
+    re-solves (because the external vectorial backends do not expose their
+    operator): here, the *same* single eigensolve gives an exact Jacobian over
+    every design parameter, at the cost of one sparse LU factorization per mode
+    (comparable to the eigensolve) plus ``n_params`` cheap triangular solves.
+
+    The tradeoff is the mode solve itself: this uses meow's **scalar/
+    semivectorial** sparse shift-invert solver (:mod:`meow.fde.sparse`), not the
+    vectorial tidy3d/mpb/lumerical backends, because only the scalar solver's
+    operator is available to build the adjoint. This is the standard practice of
+    using a fast, differentiable surrogate model for the inner optimization loop,
+    then validating/refining the converged design with a full vectorial EME.
+
+    Args:
+        solve: maps a parameter vector to the solved modes, grouped per
+            cross-section/slot: ``solve(params)[i][k]`` is
+            :class:`~meow.fde.sparse.ScalarModeSolution` ``k`` of slot ``i``
+            (e.g. from :func:`meow.fde.sparse.solve_scalar_modes_full`). The
+            per-slot mode count must match ``shape`` and every field must be the
+            same size (``field_size``, i.e. solved on a common-size grid).
+        shape: ``(num_slots, num_modes)`` of the returned ``neffs`` array.
+        field_size: the flattened field length (``ny * nx``) of every mode.
+        eps_jacobian: ``eps_jacobian(params, j)`` returns, per slot, the analytic
+            ``d(eps)/d(params[j])`` as a flat array matching the operator's
+            row-major ``(iy, ix)`` flattening (see
+            :func:`meow.fde.sparse.scalar_operator`).
+
+    Returns:
+        A ``jax.custom_vjp`` callable ``f(params) -> (neffs, fields)`` of shapes
+        ``shape`` and ``(*shape, field_size)`` respectively (both real).
+    """
+    import jax
+    import jax.numpy as jnp
+
+    num_slots, num_modes = shape
+    cache: dict[bytes, list[list[ScalarModeSolution]]] = {}
+
+    def _solve(params: np.ndarray) -> list[list[ScalarModeSolution]]:
+        key = np.asarray(params, dtype=float).tobytes()
+        if key not in cache:
+            if len(cache) > 8:
+                cache.clear()
+            cache[key] = solve(np.asarray(params, dtype=float))
+        return cache[key]
+
+    def _fwd_np(params: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        modes = _solve(np.asarray(params))
+        neffs = np.array([[m.neff for m in row] for row in modes], dtype=np.float64)
+        fields = np.array(
+            [[m.field for m in row] for row in modes], dtype=np.float64
+        )
+        return neffs, fields
+
+    def _grad_np(
+        params: np.ndarray, g_neffs: np.ndarray, g_fields: np.ndarray
+    ) -> np.ndarray:
+        params = np.asarray(params, dtype=float)
+        modes = _solve(params)
+        g_neffs = np.asarray(g_neffs, dtype=float)
+        g_fields = np.asarray(g_fields, dtype=float)
+        adjoints = [[mode.adjoint() for mode in row] for row in modes]
+        grad = np.zeros(params.shape, dtype=float)
+        for j in range(params.size):
+            deps = eps_jacobian(params, j)
+            for i, row in enumerate(modes):
+                for k, mode in enumerate(row):
+                    dv, dlambda = adjoints[i][k].solve(deps[i], mode.k0)
+                    dneff = dlambda / (2.0 * mode.k0**2 * mode.neff)
+                    grad[j] += g_neffs[i, k] * dneff
+                    grad[j] += float(g_fields[i, k] @ dv)
+        return grad
+
+    neffs_out = jax.ShapeDtypeStruct(shape, jnp.float64)
+    fields_out = jax.ShapeDtypeStruct((num_slots, num_modes, field_size), jnp.float64)
+
+    @jax.custom_vjp
+    def differentiable_modes(params: Any) -> tuple[Any, Any]:
+        return jax.pure_callback(_fwd_np, (neffs_out, fields_out), params)
+
+    def _fwd(params: Any) -> tuple[tuple[Any, Any], Any]:
+        return differentiable_modes(params), params
+
+    def _bwd(params: Any, cotangent: tuple[Any, Any]) -> tuple[Any]:
+        g_neffs, g_fields = cotangent
+        grad = jax.pure_callback(
+            _grad_np,
+            jax.ShapeDtypeStruct(jnp.shape(params), jnp.result_type(params)),
+            params,
+            g_neffs,
+            g_fields,
+        )
+        return (grad,)
+
+    differentiable_modes.defvjp(_fwd, _bwd)
+    return differentiable_modes

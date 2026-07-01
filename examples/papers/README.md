@@ -308,6 +308,51 @@ spectrum/propagation/design figures, GDS and data into a fresh timestamped
 subfolder. As with the others, `submit_runs` returns immediately and
 `gather_runs` assembles every run in a later session.
 
+## AD gradient-based design optimization
+
+`dichroic_designer.py` and `kwolek_designer.py` can optimize their nominal
+design parameter directly by **`jax.grad`** through
+`meow.make_differentiable_neffs` (see the library's
+[HPC & gradients guide](../../docs/hpc.md)), instead of the default
+root-find/bisection, over the *same fixed layer stack* used everywhere else in
+the module:
+
+- **`dichroic_designer.optimize_phase_match_width`** minimizes the phase-mismatch
+  loss `(n_WGA(w_a, cutoff_wl) - n_WGB(cutoff_wl))^2` over the WGA width `w_a` at
+  the target cutoff - the gradient-descent counterpart of `phase_match_width`'s
+  `brentq` root-find. Pass `design_dichroic(..., use_gradient=True,
+  gradient_w0=...)` to use it in a full design.
+- **`kwolek_designer.optimize_width_gradient`** directly **maximizes the FH/SH
+  coupling contrast** `log(kappa_FH) - log(kappa_SH)` over the nominal top width
+  `w_top` at the fixed minimum gap - the literal Kwolek design goal stated as a
+  scalar objective, with a soft feasibility penalty (so the optimizer finds a
+  genuine interior optimum instead of saturating at the width bound) - the
+  gradient-based counterpart of `optimize_width`'s bisection-on-feasibility. Pass
+  `design_faquad_filter(..., use_gradient=True, gradient_w0=...)` to use it.
+
+Both objectives are built from the effective-index **splitting**/**crossing** of
+a two-waveguide cross-section, which is exactly what `make_differentiable_neffs`
+differentiates exactly from a *single* eigensolve (meow's tidy3d cross-section
+builder already applies Kottke subpixel smoothing, so the width -> permittivity
+map is smooth enough for its default finite-difference `eps` Jacobian) -
+`jax.grad` + a small Adam optimizer (`examples/papers/_ad_optimize.py`) then
+walks the width to the optimum, recording an **optimization trace** (objective
+and parameter value per iteration).
+
+`ad_optimization_figure()` in each module runs the optimizer from a
+deliberately off-target initial width and plots, in one figure: the
+optimization trace, the before/after performance (the index-crossing curve for
+dichroic; FH/SH coupling vs. width for Kwolek) at the initial vs. optimized
+width, and the optimized device layout. `main()` writes these as
+`figures/dichroic_designer_ad_optimization.png` and
+`figures/kwolek_designer_ad_optimization.png`.
+
+This pattern generalizes to any designer whose target quantity is a neff
+crossing or splitting (most of the wavelength-varying designers in this
+directory); `mao2019_designer.py`, `ramadan1998_designer.py` and
+`song2023_designer.py` are not yet converted and remain on their original
+closed-form / bisection designers.
+
 ## Running
 
 ```sh

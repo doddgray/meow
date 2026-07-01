@@ -38,13 +38,35 @@ already-JAX SAX EME cascade, so `jax.grad` of any objective flows back to the
 design parameters automatically. This is exact for objectives whose parameter
 dependence is through the propagation constants.
 
-## Full `dS/dp` (mode-overlap sensitivities)
+## Exact overlap gradients (`make_differentiable_modes`)
 
-When the objective depends on **mode mismatch / overlaps** (e.g. butt-coupling
-transmission), the neff-only gradient is incomplete. `meow.make_differentiable_objective`
-wraps a real, gauge-invariant figure of merit (transmission `|S_ij|²`, splitting
-ratio, loss) as a `jax.custom_vjp` whose backward differences the *whole* solve —
-so the gradient includes every effect (the complete `dS/dp`) and composes with
+`meow.make_differentiable_modes(solve, shape=..., field_size=..., eps_jacobian=...)`
+closes the gap in `make_differentiable_neffs`: it returns the mode **field**
+alongside `neff`, with a backward pass built from the sparse solver's exact
+eigenpair adjoint (`meow.fde.sparse.EigenvectorAdjoint` — a bordered/deflated
+linear solve against the discretized operator, not a truncated modal expansion
+or a finite difference). Because the field itself carries a correct gradient,
+*any* `jax.numpy` expression built from it — an overlap, a splitting ratio, a
+butt-coupling transmission (see `meow.mode_overlap_power` for the simplest case)
+— differentiates exactly through ordinary `jax.grad`, at the **same O(1)-solve
+cost** as `make_differentiable_neffs` (one sparse LU factorization per mode, plus
+cheap triangular solves per parameter — no re-solve, unlike the option below).
+
+The tradeoff is backend: the exact adjoint needs the discretized operator, which
+only `meow.fde.sparse`'s scalar/semivectorial solver exposes (the external
+vectorial backends do not). Use it as a fast, differentiable surrogate for the
+optimization inner loop — most of an inner loop's iterations only need to know
+*which direction* to move the parameters — then validate/refine the converged
+design with a full vectorial EME.
+
+## Full `dS/dp` (any backend, any objective)
+
+When the objective depends on overlaps *and* the vectorial/anisotropic physics
+that only tidy3d/mpb/lumerical capture (e.g. a high-index-contrast anisotropic
+crystal), `meow.make_differentiable_objective` is the exact fallback: it wraps a
+real, gauge-invariant figure of merit (transmission `|S_ij|²`, splitting ratio,
+loss) as a `jax.custom_vjp` whose backward differences the *whole* solve — so the
+gradient includes every effect (the complete `dS/dp`) and composes with
 `jax.grad`, at the cost of `2·N_params` re-solves. Two design notes:
 
 - The **complex** EME S-matrix is gauge-inconsistent across re-solves (each mode
@@ -53,9 +75,14 @@ so the gradient includes every effect (the complete `dS/dp`) and composes with
 - An *analytic* overlap (eigenvector) sensitivity via truncated guided-mode
   perturbation theory is **not** accurate for high-contrast waveguides (the
   overlap change is dominated by radiation modes outside any finite computed
-  basis), so differencing the full solve is the robust exact route. Use the cheap
-  `make_differentiable_neffs` for propagation-mediated objectives and
-  `make_differentiable_objective` when overlap/mismatch effects matter.
+  basis) — this is exactly what `make_differentiable_modes`'s *exact* (not
+  truncated) adjoint fixes for the scalar solver; `make_differentiable_objective`
+  is the fallback when you need the vectorial backends too.
+
+In short: use `make_differentiable_neffs` for propagation-mediated objectives on
+any backend, `make_differentiable_modes` for overlap-mediated objectives via the
+fast scalar surrogate, and `make_differentiable_objective` when you need the
+vectorial backends' exact `dS/dp` and can afford the re-solves.
 
 ## Differentiable inverse design (`meow.levelset`)
 

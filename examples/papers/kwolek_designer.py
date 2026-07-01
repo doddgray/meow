@@ -52,7 +52,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import gdsfactory as gf
 import numpy as np
@@ -67,6 +67,9 @@ from examples.papers.kwolek2026_faquad import (
     ln_material,
     sio2_material,
 )
+
+if TYPE_CHECKING:
+    from examples.papers._ad_optimize import OptimizationTrace
 
 FIGDIR = Path(__file__).parent / "figures"
 pick = _resolution.pick
@@ -392,6 +395,118 @@ def optimize_width(
     return float(lo)
 
 
+def _two_wg_solve_and_cs(
+    platform: TFPlatform, w_top: float, wl: float, res: float
+) -> tuple[list[mw.Structure3D], mw.Mesh2D]:
+    """Shared two-waveguide (gap = ``platform.g_m``) structures/mesh builder."""
+    x0 = (w_top + platform.g_m) / 2
+    span = max(3.6, 1.5 * (w_top + platform.g_m))
+    mesh = _mesh(platform, (-span, span), res)
+    structs = rib_structures(platform, wl, [w_top, w_top], [-x0, x0], (-span, span))
+    return structs, mesh
+
+
+def optimize_width_gradient(
+    platform: TFPlatform,
+    fh_wl: float,
+    sh_wl: float,
+    *,
+    theta_max_deg: float = 3.0,
+    target_extinction_db: float = 20.0,
+    w0: float = 1.0,
+    res: float = 0.04,
+    steps: int = 25,
+    lr: float = 0.03,
+    w_bounds: tuple[float, float] = (0.4, 2.0),
+    penalty_weight: float = 50.0,
+) -> tuple[float, OptimizationTrace]:
+    """Gradient-based (AD) alternative to :func:`optimize_width`.
+
+    Directly **maximizes the FH/SH coupling contrast** ``log(kappa_FH) -
+    log(kappa_SH)`` at the fixed minimum gap ``platform.g_m`` over the nominal
+    top width ``w_top``, via ``jax.grad`` + projected Adam - the literal Kwolek
+    design goal ("FH couples strongly, SH stays decoupled") stated as a scalar
+    objective instead of the bisection-on-feasibility of :func:`optimize_width`.
+    A soft penalty keeps ``kappa_FH`` above the level needed to reach
+    ``target_extinction_db`` within the length budget (``kappa_min ~ 1 /
+    (eta_target * l_m_max)``, the same feasibility condition
+    :func:`optimize_width` enforces by bisection) - without it, the contrast
+    rises monotonically with width and the optimizer would simply saturate at
+    ``w_bounds[1]``; the penalty creates the genuine interior tradeoff the
+    paper's design targets (best SH rejection *compatible with* a fabricable FH
+    combiner).
+
+    Both ``kappa_FH`` and ``kappa_SH`` are half the symmetric/antisymmetric
+    effective-index splitting of the two-waveguide cross-section at ``g_m`` (the
+    same quantity :func:`calibrate_coupling` extracts), so a **single** cross-
+    section solve per wavelength gives an exact gradient via
+    :func:`meow.make_differentiable_neffs` - no re-solve regardless of the
+    number of design parameters.
+
+    Returns:
+        ``(w_top_opt, trace)`` - the optimized width and the optimization trace.
+    """
+    import jax.numpy as jnp
+
+    from examples.papers._ad_optimize import adam_maximize
+
+    k0_fh = 2 * np.pi / fh_wl
+    k0_sh = 2 * np.pi / sh_wl
+    eta_target = 10 ** (-target_extinction_db / 20.0)
+    sep = _sep_length(theta_max_deg, platform.g_f)
+    l_m_max = max(50.0, platform.max_length - 2 * sep)
+    kappa_min = 1.0 / (eta_target * l_m_max)  # approx eta ~ 1 / (kappa_m * l_m)
+
+    def solve(params: np.ndarray) -> list[list[mw.Mode]]:
+        w = float(params[0])
+        out = []
+        for wl in (fh_wl, sh_wl):
+            structs, mesh = _two_wg_solve_and_cs(platform, w, wl, res)
+            out.append(_te_neffs_modes(structs, wl, mesh))
+        return out
+
+    def cross_sections(params: np.ndarray) -> list[mw.CrossSection]:
+        w = float(params[0])
+        css = []
+        for wl in (fh_wl, sh_wl):
+            structs, mesh = _two_wg_solve_and_cs(platform, w, wl, res)
+            cell = mw.Cell(structures=structs, mesh=mesh, z_min=0.0, z_max=1.0)
+            css.append(mw.CrossSection.from_cell(cell=cell, env=mw.Environment(wl=wl)))
+        return css
+
+    f = mw.make_differentiable_neffs(solve, shape=(2, 2), cross_sections=cross_sections)
+
+    def objective(params: object) -> object:
+        neffs = jnp.real(f(params))
+        kappa_fh = 0.5 * k0_fh * jnp.abs(neffs[0, 0] - neffs[0, 1])
+        kappa_sh = 0.5 * k0_sh * jnp.abs(neffs[1, 0] - neffs[1, 1])
+        contrast = jnp.log(jnp.clip(kappa_fh, 1e-9)) - jnp.log(jnp.clip(kappa_sh, 1e-9))
+        shortfall = jnp.clip(kappa_min - kappa_fh, 0.0) / kappa_min
+        return contrast - penalty_weight * shortfall**2
+
+    w_opt, trace = adam_maximize(
+        objective,
+        [w0],
+        steps=steps,
+        lr=lr,
+        bounds=[w_bounds],
+        param_names=("w_top [um]",),
+        objective_name="contrast - feasibility penalty",
+    )
+    return float(w_opt[0]), trace
+
+
+def _te_neffs_modes(
+    structures: list[mw.Structure3D], wl: float, mesh: mw.Mesh2D
+) -> list[mw.Mode]:
+    """The 2 lowest TE-majority modes (for the symmetric/antisymmetric split)."""
+    cell = mw.Cell(structures=structures, mesh=mesh, z_min=0.0, z_max=1.0)
+    cs = mw.CrossSection.from_cell(cell=cell, env=mw.Environment(wl=wl, T=25.0))
+    modes = mw.compute_modes(cs, num_modes=4)
+    te = [m for m in modes if m.te_fraction > 0.5]
+    return (te if len(te) >= 2 else list(modes))[:2]
+
+
 # --------------------------------------------------------------------------
 # optimization step 2: FDE coupling calibration
 # --------------------------------------------------------------------------
@@ -476,6 +591,11 @@ class FaquadFilterDesign:
     design: FaquadDesign = field(repr=False)
     component: gf.Component = field(repr=False)
     extinction_db: float = 0.0
+    opt_trace: OptimizationTrace | None = field(default=None, repr=False)
+    """The AD optimization trace (see :mod:`examples.papers._ad_optimize`) that
+    produced ``w_top``, when built with
+    ``design_faquad_filter(..., use_gradient=True)``; ``None`` for the
+    (default) bisection path."""
 
     @property
     def total_length(self) -> float:
@@ -536,24 +656,41 @@ def design_faquad_filter(
     target_extinction_db: float = 25.0,
     res: float = 0.04,
     compute_modes: Callable | None = None,
+    use_gradient: bool = False,
+    gradient_w0: float = 1.0,
+    gradient_steps: int = 25,
 ) -> FaquadFilterDesign:
     """Design + optimize a FAQUAD FH/SH filter on a thin-film platform.
 
-    1. Pick the nominal single-mode-at-FH top width (unless given).
+    1. Pick the nominal top width (unless given) - either by bisection on
+       feasibility (:func:`optimize_width`, the default) or, when
+       ``use_gradient=True``, by **AD gradient-based optimization**
+       (:func:`optimize_width_gradient`, ``jax.grad`` + Adam through
+       :func:`meow.make_differentiable_neffs`) maximizing the FH/SH coupling
+       contrast directly, from the initial guess ``gradient_w0``.
     2. FDE-calibrate the FH coupling ``kappa(g)`` and mismatch slope.
     3. Choose the shortest constant-gap length meeting the FH extinction target
        within the platform length budget.
     4. Build the Euler-S-bend FAQUAD layout and report the SH coupling.
     """
+    opt_trace = None
     if w_top is None:
-        w_top = optimize_width(
-            platform,
-            fh_wl,
-            theta_max_deg=theta_max_deg,
-            target_extinction_db=target_extinction_db,
-            res=res,
-            compute_modes=compute_modes,
-        )
+        if use_gradient:
+            w_top, opt_trace = optimize_width_gradient(
+                platform, fh_wl, sh_wl,
+                theta_max_deg=theta_max_deg,
+                target_extinction_db=target_extinction_db,
+                w0=gradient_w0, res=res, steps=gradient_steps,
+            )
+        else:
+            w_top = optimize_width(
+                platform,
+                fh_wl,
+                theta_max_deg=theta_max_deg,
+                target_extinction_db=target_extinction_db,
+                res=res,
+                compute_modes=compute_modes,
+            )
 
     kappa_0, g_0, dbeta_dtw = calibrate_coupling(
         platform, w_top, fh_wl, res=res, compute_modes=compute_modes
@@ -607,6 +744,7 @@ def design_faquad_filter(
         design=design,
         component=component,
         extinction_db=extinction_db,
+        opt_trace=opt_trace,
     )
 
 
@@ -1007,6 +1145,112 @@ def spectrum_grid_figure(
     )
 
 
+def _kappa_fh_sh(
+    platform: TFPlatform, w: float, fh_wl: float, sh_wl: float, res: float
+) -> tuple[float, float]:
+    """FH/SH coupling ``(kappa_FH, kappa_SH)`` [1/um] at ``g_m`` for width ``w``."""
+    out = []
+    for wl in (fh_wl, sh_wl):
+        structs, mesh = _two_wg_solve_and_cs(platform, w, wl, res)
+        modes = _te_neffs_modes(structs, wl, mesh)
+        k0 = 2 * np.pi / wl
+        dn = float(np.real(modes[0].neff)) - float(np.real(modes[1].neff))
+        out.append(0.5 * k0 * abs(dn))
+    return out[0], out[1]
+
+
+def ad_optimization_figure(
+    platform: TFPlatform,
+    fh_wl: float,
+    sh_wl: float,
+    res: float,
+    out_path: Path,
+    *,
+    gradient_w0: float = 0.6,
+    gradient_steps: int = 20,
+) -> dict[str, object]:
+    """AD-optimization demo figure: trace + before/after performance + layout.
+
+    Designs a FAQUAD filter by **gradient-based** width optimization
+    (:func:`design_faquad_filter` with ``use_gradient=True``) starting from a
+    deliberately low initial width ``gradient_w0``, at the *fixed* layer stack
+    (``platform``) and target FH/SH wavelengths. Plots:
+
+    - (a) the optimization trace (objective and width vs. iteration);
+    - (b) FH/SH coupling vs. width, before (initial) and after (optimized) width
+      marked, showing the dichroic contrast the optimizer maximizes;
+    - (c) the optimized device layout.
+    """
+    import matplotlib.pyplot as plt
+
+    from examples.papers._ad_optimize import plot_trace
+    from examples.papers._plot import plot_component
+
+    design = design_faquad_filter(
+        platform, fh_wl, sh_wl, res=res,
+        use_gradient=True, gradient_w0=gradient_w0, gradient_steps=gradient_steps,
+    )
+    assert design.opt_trace is not None  # noqa: S101 (use_gradient=True always sets it)
+    trace = design.opt_trace
+    w_init, w_opt = gradient_w0, design.w_top
+
+    fig = plt.figure(figsize=(13, 8))
+    grid = fig.add_gridspec(2, 2)
+    ax_loss = fig.add_subplot(grid[0, 0])
+    ax_params = fig.add_subplot(grid[0, 1])
+    plot_trace(trace, ax_loss, ax_params)
+
+    ax_perf = fig.add_subplot(grid[1, 0])
+    ws = np.linspace(0.5, 1.8, 14)
+    kfh = []
+    ksh = []
+    for w in ws:
+        kf, ks = _kappa_fh_sh(platform, float(w), fh_wl, sh_wl, res)
+        kfh.append(kf * 1e3)
+        ksh.append(max(ks * 1e3, 1e-6))
+    ax_perf.semilogy(ws * 1e3, kfh, "C0o-", label="kappa_FH [1/mm]")
+    ax_perf.semilogy(ws * 1e3, ksh, "C3s-", label="kappa_SH [1/mm]")
+    ax_perf.axvline(
+        w_init * 1e3, color="0.6", ls=":", label=f"initial ({w_init * 1e3:.0f} nm)"
+    )
+    ax_perf.axvline(
+        w_opt * 1e3, color="0.2", ls="--", label=f"optimized ({w_opt * 1e3:.0f} nm)"
+    )
+    ax_perf.set_xlabel("top width [nm]")
+    ax_perf.set_ylabel("coupling [1/mm]")
+    ax_perf.set_title(
+        f"FH/SH contrast at {fh_wl * 1e3:.0f}/{sh_wl * 1e3:.0f} nm vs width"
+    )
+    ax_perf.legend(fontsize=7)
+    ax_perf.grid(visible=True, which="both")
+
+    ax_layout = fig.add_subplot(grid[1, 1])
+    plot_component(design.component, ax_layout)
+    ax_layout.set_aspect("auto")
+    ax_layout.set_title(
+        f"AD-optimized device: w_top={w_opt * 1e3:.0f} nm, "
+        f"l_m={design.design.l_m:.0f} um, L={design.total_length:.0f} um,\n"
+        f"eta={design.eta:.3f}",
+        fontsize=9,
+    )
+
+    fig.suptitle(
+        "Kwolek designer: AD gradient-based width optimization "
+        f"(jax.grad via make_differentiable_neffs, FH/SH "
+        f"{fh_wl * 1e3:.0f}/{sh_wl * 1e3:.0f} nm)"
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return {
+        "figure": str(out_path),
+        "w_init_nm": round(w_init * 1e3, 1),
+        "w_opt_nm": round(w_opt * 1e3, 1),
+        "final_objective": trace.losses[-1],
+        "iterations": len(trace.losses),
+    }
+
+
 def main() -> dict[str, object]:
     """Design the full matrix (a coarse subset at low resolution) and plot it.
 
@@ -1122,11 +1366,21 @@ def main() -> dict[str, object]:
     grid = spectrum_grid_figure(
         designs, analyses_root, FIGDIR / "kwolek_designer_spectrum_grid.png"
     )
+
+    # AD gradient-based width optimization demo (jax.grad via make_differentiable_neffs)
+    fh0, sh0 = pairs[0]
+    ad_demo = ad_optimization_figure(
+        platforms[0], fh0, sh0, res,
+        FIGDIR / "kwolek_designer_ad_optimization.png",
+        gradient_steps=pick(low=15, medium=20, high=20),
+    )
+
     return {
         "designs": summary,
         "analyses": analyses,
         "test_structures": test_structures,
         "spectrum_grid": str(grid) if grid else None,
+        "ad_optimization": ad_demo,
     }
 
 

@@ -38,6 +38,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import gdsfactory as gf
 import numpy as np
@@ -46,6 +47,9 @@ from scipy.optimize import brentq
 import meow as mw
 from examples.papers import _resolution
 from examples.papers.magden2018_dichroic import LAYER_WG, dichroic_filter
+
+if TYPE_CHECKING:
+    from examples.papers._ad_optimize import OptimizationTrace
 
 FIGDIR = Path(__file__).parent / "figures"
 pick = _resolution.pick
@@ -289,6 +293,76 @@ def phase_match_width(
     return float(brentq(mismatch, lo, hi, xtol=2e-4, rtol=1e-4))
 
 
+def _solid_solve_and_cs(
+    platform: Platform, w_a: float, res: float
+) -> tuple[list[mw.Structure3D], mw.Mesh2D]:
+    """Shared structures/mesh builder for the AD forward and eps-Jacobian paths."""
+    span = max(2.5, 3 * w_a)
+    mesh = _mesh(platform, -span, span, res)
+    structs = _ridge_structures(platform, [w_a], [0.0], (-span, span))
+    return structs, mesh
+
+
+def optimize_phase_match_width(
+    platform: Platform,
+    cutoff_wl: float,
+    wgb: WGB,
+    *,
+    w0: float = 0.4,
+    res: float = 0.04,
+    steps: int = 25,
+    lr: float = 0.05,
+    w_bounds: tuple[float, float] = (0.1, 1.5),
+) -> tuple[float, OptimizationTrace]:
+    """Gradient-based (AD) alternative to :func:`phase_match_width`.
+
+    Minimizes the phase-mismatch loss ``(n_WGA(w_a, cutoff_wl) - n_WGB(cutoff_wl))^2``
+    over the *fixed* layer stack (``platform``, ``wgb``) via ``jax.grad`` +
+    projected Adam, using :func:`meow.make_differentiable_neffs` for an exact,
+    single-solve-per-iteration gradient (meow's tidy3d cross-section builder
+    already applies Kottke subpixel smoothing, so the width -> eps map is smooth
+    enough for the default finite-difference eps-Jacobian). Where
+    :func:`phase_match_width` root-finds the crossing, this reaches the same
+    optimum by descending an explicit loss - useful as a template for objectives
+    that are not simple 1D root-finds (e.g. multiple simultaneous targets).
+
+    Returns:
+        ``(w_a_opt, trace)`` - the optimized width and the optimization trace
+        (see :mod:`examples.papers._ad_optimize`).
+    """
+    import jax.numpy as jnp
+
+    from examples.papers._ad_optimize import adam_minimize
+
+    n_b = segmented_neff(platform, wgb, cutoff_wl, res=res)
+
+    def solve(params: np.ndarray) -> list[list[mw.Mode]]:
+        structs, mesh = _solid_solve_and_cs(platform, float(params[0]), res)
+        return [_te_modes(structs, cutoff_wl, mesh)[:1]]
+
+    def cross_sections(params: np.ndarray) -> list[mw.CrossSection]:
+        structs, mesh = _solid_solve_and_cs(platform, float(params[0]), res)
+        cell = mw.Cell(structures=structs, mesh=mesh, z_min=0.0, z_max=1.0)
+        return [mw.CrossSection.from_cell(cell=cell, env=mw.Environment(wl=cutoff_wl))]
+
+    f = mw.make_differentiable_neffs(solve, shape=(1, 1), cross_sections=cross_sections)
+
+    def loss_fn(params: object) -> object:
+        n_a = jnp.real(f(params)[0, 0])
+        return (n_a - n_b) ** 2
+
+    w_opt, trace = adam_minimize(
+        loss_fn,
+        [w0],
+        steps=steps,
+        lr=lr,
+        bounds=[w_bounds],
+        param_names=("w_a [um]",),
+        objective_name="phase-match loss $(n_a - n_b)^2$",
+    )
+    return float(w_opt[0]), trace
+
+
 def coupling_kappa(
     platform: Platform,
     w_a: float,
@@ -349,6 +423,10 @@ class DichroicDesign:
     dn_dw: float
     extinction_db: float
     component: gf.Component = field(repr=False)
+    opt_trace: OptimizationTrace | None = field(default=None, repr=False)
+    """The AD optimization trace (see :mod:`examples.papers._ad_optimize`) that
+    produced ``w_a``, when built with ``design_dichroic(..., use_gradient=True)``;
+    ``None`` for the (default) root-find path."""
 
     @property
     def total_length(self) -> float:
@@ -401,12 +479,22 @@ def design_dichroic(
     target_extinction_db: float = 20.0,
     res: float = 0.04,
     compute_modes: Callable | None = None,
+    *,
+    use_gradient: bool = False,
+    gradient_w0: float = 0.4,
+    gradient_steps: int = 25,
 ) -> DichroicDesign:
     """Design + optimize a dichroic beam splitter for a target cutoff.
 
     1. Choose a default sub-wavelength WGB from the fabrication limits (rails a
        little above ``min_tip``, gaps at ``min_gap``) if none is given.
-    2. Root-find the WGA width that phase-matches WGB at ``cutoff_wl``.
+    2. Set the WGA width that phase-matches WGB at ``cutoff_wl`` - either by
+       root-finding (:func:`phase_match_width`, the default) or, when
+       ``use_gradient=True``, by **AD gradient-based optimization**
+       (:func:`optimize_phase_match_width`, ``jax.grad`` + Adam through
+       :func:`meow.make_differentiable_neffs`) from the initial guess
+       ``gradient_w0``. Both reach the same phase-matched width; the gradient
+       path is the template for objectives that are not simple 1D root-finds.
     3. Pick the **largest coupling gap** (sharpest cutoff) whose Landau-Zener
        phase-matching taper still fits the length budget at ``target_extinction``
        (a larger gap weakens ``kappa`` and lengthens the required taper).
@@ -419,9 +507,15 @@ def design_dichroic(
             n_rails=3,
         )
 
-    w_a = phase_match_width(
-        platform, cutoff_wl, wgb, res=res, compute_modes=compute_modes
-    )
+    opt_trace = None
+    if use_gradient:
+        w_a, opt_trace = optimize_phase_match_width(
+            platform, cutoff_wl, wgb, w0=gradient_w0, res=res, steps=gradient_steps
+        )
+    else:
+        w_a = phase_match_width(
+            platform, cutoff_wl, wgb, res=res, compute_modes=compute_modes
+        )
     # dn_WGA/dw at the design width (for the adiabaticity rate)
     dw = 0.02
     n_hi = solid_neff(
@@ -477,6 +571,7 @@ def design_dichroic(
         dn_dw=dn_dw,
         extinction_db=extinction_db,
         component=component,
+        opt_trace=opt_trace,
     )
 
 
@@ -638,6 +733,93 @@ def tapered_component(
     return tapered_ports(
         design.component, port_widths, taper_lengths, layer=LAYER_WG
     )
+
+
+def ad_optimization_figure(
+    platform: Platform,
+    wgb: WGB,
+    cutoff_wl: float,
+    res: float,
+    out_path: Path,
+    *,
+    gradient_w0: float = 0.60,
+    gradient_steps: int = 25,
+) -> dict[str, object]:
+    """AD-optimization demo figure: trace + before/after performance + layout.
+
+    Designs a device by **gradient-based** phase-match-width optimization
+    (:func:`design_dichroic` with ``use_gradient=True``) starting from a
+    deliberately off-target initial width ``gradient_w0``, at the *fixed*
+    platform/WGB layer stack and the target ``cutoff_wl``. Plots:
+
+    - (a) the optimization trace (loss and width vs. iteration);
+    - (b) the index-crossing performance before (initial width) and after
+      (optimized width) optimization, with the target cutoff marked;
+    - (c) the optimized device layout.
+    """
+    import matplotlib.pyplot as plt
+
+    from examples.papers._ad_optimize import plot_trace
+    from examples.papers._plot import plot_component
+
+    design = design_dichroic(
+        platform, cutoff_wl, wgb=wgb, res=res,
+        use_gradient=True, gradient_w0=gradient_w0, gradient_steps=gradient_steps,
+    )
+    assert design.opt_trace is not None  # noqa: S101 (use_gradient=True always sets it)
+    trace = design.opt_trace
+    w_init, w_opt = gradient_w0, design.w_a
+
+    fig = plt.figure(figsize=(13, 8))
+    grid = fig.add_gridspec(2, 2)
+    ax_loss = fig.add_subplot(grid[0, 0])
+    ax_params = fig.add_subplot(grid[0, 1])
+    plot_trace(trace, ax_loss, ax_params, loss_ylog=True)
+
+    ax_perf = fig.add_subplot(grid[1, 0])
+    wls = np.linspace(cutoff_wl * 0.85, cutoff_wl * 1.15, 25)
+    n_b = [segmented_neff(platform, wgb, wl, res=res) for wl in wls]
+    n_a_init = [solid_neff(platform, w_init, wl, res=res) for wl in wls]
+    n_a_opt = [solid_neff(platform, w_opt, wl, res=res) for wl in wls]
+    ax_perf.plot(wls * 1e3, n_b, "k--", lw=2, label="WGB (fixed)")
+    ax_perf.plot(
+        wls * 1e3, n_a_init, "C3:", label=f"WGA initial ({w_init * 1e3:.0f} nm)"
+    )
+    ax_perf.plot(
+        wls * 1e3, n_a_opt, "C0-", label=f"WGA optimized ({w_opt * 1e3:.0f} nm)"
+    )
+    ax_perf.axvline(cutoff_wl * 1e3, color="0.5", ls=":", lw=1)
+    ax_perf.set_xlabel("wavelength [nm]")
+    ax_perf.set_ylabel("effective index")
+    ax_perf.set_title(f"phase-match performance at target {cutoff_wl * 1e3:.0f} nm")
+    ax_perf.legend(fontsize=8)
+    ax_perf.grid(visible=True)
+
+    ax_layout = fig.add_subplot(grid[1, 1])
+    plot_component(design.component, ax_layout)
+    ax_layout.set_aspect("auto")
+    ax_layout.set_title(
+        f"AD-optimized device: w_a={w_opt * 1e3:.0f} nm, "
+        f"gap={design.gap * 1e3:.0f} nm, L={design.total_length:.0f} um,\n"
+        f"ER~{design.extinction_db:.0f} dB",
+        fontsize=9,
+    )
+
+    fig.suptitle(
+        "Dichroic designer: AD gradient-based phase-match optimization "
+        f"(jax.grad via make_differentiable_neffs, target "
+        f"{cutoff_wl * 1e3:.0f} nm)"
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return {
+        "figure": str(out_path),
+        "w_init_nm": round(w_init * 1e3, 1),
+        "w_opt_nm": round(w_opt * 1e3, 1),
+        "final_loss": trace.losses[-1],
+        "iterations": len(trace.losses),
+    }
 
 
 # shared broad-band grid axis: covers every demo cutoff (1.30 .. 2.00 um)
@@ -848,11 +1030,21 @@ def main() -> dict[str, object]:
     grid = dichroic_spectrum_grid(
         designs, analyses_root, FIGDIR / "dichroic_designer_spectrum_grid.png"
     )
+
+    # AD gradient-based optimization demo (jax.grad through make_differentiable_neffs)
+    ad_demo = ad_optimization_figure(
+        platform, wgb, targets[-1], res,
+        FIGDIR / "dichroic_designer_ad_optimization.png",
+        gradient_w0=pick(low=0.7, medium=0.7, high=0.7),
+        gradient_steps=pick(low=15, medium=25, high=25),
+    )
+
     return {
         "designs": summary,
         "analyses": analyses,
         "test_structures": tests,
         "spectrum_grid": str(grid) if grid else None,
+        "ad_optimization": ad_demo,
     }
 
 

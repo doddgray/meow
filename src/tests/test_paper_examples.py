@@ -349,6 +349,42 @@ def test_dichroic_designer_reproduces_magden_width() -> None:
     assert dd.solid_neff(plat, w_a + 0.03, 1.54, res=0.05) > n_b
 
 
+def test_optimize_phase_match_width_matches_root_find() -> None:
+    """The AD gradient-based optimizer converges near the root-find width.
+
+    Both minimize the same phase-mismatch residual (jax.grad + Adam vs.
+    brentq), so from an off-target initial guess the optimizer should land
+    close to the root-find's answer, with the loss trace strictly improving
+    over the initial value.
+    """
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    wgb = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3)
+    w_root = dd.phase_match_width(plat, 1.54, wgb, res=0.05)
+    w_opt, trace = dd.optimize_phase_match_width(
+        plat, 1.54, wgb, w0=0.6, res=0.05, steps=15
+    )
+    assert abs(w_opt - w_root) < 0.1
+    assert trace.losses[-1] < trace.losses[0]
+    assert trace.param_names == ("w_a [um]",)
+
+
+def test_design_dichroic_gradient_path_populates_trace() -> None:
+    """design_dichroic(use_gradient=True) runs the AD optimizer and stores it."""
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    wgb = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3)
+    d = dd.design_dichroic(
+        plat, 1.54, wgb=wgb, res=0.05,
+        use_gradient=True, gradient_w0=0.6, gradient_steps=6,
+    )
+    assert d.opt_trace is not None
+    assert len(d.opt_trace.losses) == 7
+    assert d.total_length <= plat.max_length + 1.0
+
+
 def test_dichroic_designer_si3n4_platform_and_width() -> None:
     """The Si3N4 example designs a fabricable splitter in the 900-1200 nm band."""
     from examples.papers import dichroic_designer as dd
@@ -994,6 +1030,36 @@ def test_optimize_width_within_bounds() -> None:
     p = kd.tfln_platform(0.30, max_length=1500.0)
     w = kd.optimize_width(p, 1.55, target_extinction_db=18.0, res=0.08)
     assert 0.6 <= w <= 2.0
+
+
+def test_optimize_width_gradient_matches_scale_of_bisection() -> None:
+    """The AD gradient-based width optimizer lands in a physically sane range.
+
+    Both optimizers maximize the same FH/SH contrast subject to a length-budget
+    feasibility constraint (bisection-on-feasibility vs. jax.grad + a soft
+    penalty), so their widths should agree to within a reasonable margin - not
+    exactly (different objectives/tolerances), but the same order.
+    """
+    p = kd.tfln_platform(0.30, max_length=1500.0)
+    w_bisect = kd.optimize_width(p, 1.55, target_extinction_db=18.0, res=0.08)
+    w_grad, trace = kd.optimize_width_gradient(
+        p, 1.55, 0.775, target_extinction_db=18.0, w0=0.8, res=0.08, steps=10
+    )
+    assert 0.4 <= w_grad <= 2.0
+    assert abs(w_grad - w_bisect) < 0.5  # same order of magnitude
+    assert len(trace.losses) == 11  # steps + the final converged point
+    assert trace.objective_name
+
+
+def test_design_faquad_filter_gradient_path_populates_trace() -> None:
+    """design_faquad_filter(use_gradient=True) runs the AD optimizer and stores it."""
+    p = kd.tfln_platform(0.30)
+    d = kd.design_faquad_filter(
+        p, 1.55, 0.775, res=0.08, use_gradient=True, gradient_w0=0.8, gradient_steps=6
+    )
+    assert d.opt_trace is not None
+    assert len(d.opt_trace.losses) == 7
+    assert 0.4 <= d.w_top <= 2.0
 
 
 def test_kwolek_slurm_executor_and_cells(tmp_path) -> None:  # noqa: ANN001
