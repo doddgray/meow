@@ -1,0 +1,21 @@
+{
+  "label": "1550nm",
+  "kind": "dichroic",
+  "cutoff_nm": 1550.0,
+  "w_a_nm": 289.1,
+  "gap_nm": 652.0,
+  "length_um": 2608.0,
+  "short_pass_at_cutoff": 0.0,
+  "long_pass_at_cutoff": 0.9999,
+  "saved_fields": true,
+  "out_dir": "/home/user/meow/examples/papers/figures/dichroic_designer_joint",
+  "files": [
+    "1550nm.gds",
+    "1550nm_design.png",
+    "1550nm_fields.h5",
+    "1550nm_propagation.png",
+    "1550nm_spectrum.csv",
+    "1550nm_spectrum.json",
+    "1550nm_spectrum.png"
+  ]
+}

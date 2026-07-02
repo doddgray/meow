@@ -180,6 +180,7 @@ def main() -> dict[str, object]:
         crosssection_steps=pick(low=12, medium=26, high=30),
         length_steps=pick(low=10, medium=20, high=24),
         analysis_dir=FIGDIR / "dichroic_designer_si3n4_joint",
+        analysis_band=SI3N4_BAND,
     )
     return {
         "designs": summary,

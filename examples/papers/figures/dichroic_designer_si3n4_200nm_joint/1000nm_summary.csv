@@ -1,0 +1,2 @@
+label,kind,cutoff_nm,w_a_nm,gap_nm,length_um,short_pass_at_cutoff,long_pass_at_cutoff,saved_fields,out_dir,files
+1000nm,dichroic,1000.0,383.8,216.0,1776.0,0.0,0.7286,True,/home/user/meow/examples/papers/figures/dichroic_designer_si3n4_200nm_joint,"[""1000nm.gds"", ""1000nm_design.png"", ""1000nm_fields.h5"", ""1000nm_propagation.png"", ""1000nm_spectrum.csv"", ""1000nm_spectrum.json"", ""1000nm_spectrum.png""]"

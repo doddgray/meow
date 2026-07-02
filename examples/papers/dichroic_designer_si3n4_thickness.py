@@ -400,6 +400,7 @@ def main() -> dict[str, object]:
                 crosssection_steps=pick(low=10, medium=20, high=24),
                 length_steps=pick(low=8, medium=16, high=20),
                 analysis_dir=FIGDIR / f"dichroic_designer_si3n4_{name}_joint",
+                analysis_band=SI3N4_BAND,
             )
             out[f"{name}_joint_ad_optimization"] = joint_ad_demo
     return out
