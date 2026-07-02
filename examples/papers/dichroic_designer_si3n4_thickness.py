@@ -35,6 +35,7 @@ from examples.papers.dichroic_designer import (
     analyze_dichroic_design,
     design_dichroic,
     dichroic_test_structures,
+    joint_ad_optimization_figure,
     segmented_neff,
     solid_neff,
 )
@@ -125,9 +126,7 @@ def transmission_spectrum(
     kappa = max(design.kappa, 1e-9)
     if wls is None:
         half = (
-            gamma_span * kappa / abs(slope)
-            if abs(slope) > 1e-12
-            else max_window * wl_c
+            gamma_span * kappa / abs(slope) if abs(slope) > 1e-12 else max_window * wl_c
         )
         half = min(half, max_window * wl_c)
         wls = np.linspace(wl_c - half, wl_c + half, n_fine)
@@ -289,9 +288,7 @@ def grid_figure(
             ax_s.legend(fontsize=6)
     axes[-1, 0].set_xlabel("z [um]")
     axes[-1, 1].set_xlabel("wavelength [nm]")
-    fig.suptitle(
-        f"Dichroic designer {name}: optimized layout + simulated transmission"
-    )
+    fig.suptitle(f"Dichroic designer {name}: optimized layout + simulated transmission")
     fig.tight_layout()
     fig.savefig(FIGDIR / f"dichroic_designer_si3n4_{name}_grid.png", dpi=150)
     plt.close(fig)
@@ -325,7 +322,8 @@ def column_grid_figure(
         row = {
             "label": f"{d.cutoff_wl * 1e3:.0f} nm cutoff",
             "wls": wls,
-            "short_pass_cm": t_short, "long_pass_cm": t_long,
+            "short_pass_cm": t_short,
+            "long_pass_cm": t_long,
             "design_wls": [d.cutoff_wl],
         }
         if eme and d.cutoff_wl in eme:
@@ -343,15 +341,16 @@ def column_grid_figure(
             ("long_pass_cm", "C3", "--", "long (coupled-mode)"),
         ]
         spectrum_grid(
-            rows, FIGDIR / f"dichroic_designer_si3n4_{name}_spectrum_grid.png",
-            db=True, xlim_nm=(band[0] * 1e3, band[1] * 1e3), ports=ports,
+            rows,
+            FIGDIR / f"dichroic_designer_si3n4_{name}_spectrum_grid.png",
+            db=True,
+            xlim_nm=(band[0] * 1e3, band[1] * 1e3),
+            ports=ports,
             title=f"Si3N4 {name}: broad-band short-/long-pass (EME vs coupled-mode)",
         )
 
 
-def thickness_test_structures(
-    name: str, designs: list[DichroicDesign | None]
-) -> None:
+def thickness_test_structures(name: str, designs: list[DichroicDesign | None]) -> None:
     """Per-cutoff cut-back coupler arrays (constant length, 5 mm chip) + GDS."""
     root = FIGDIR / f"dichroic_designer_si3n4_{name}"
     for d in [d for d in designs if d is not None]:
@@ -388,6 +387,21 @@ def main() -> dict[str, object]:
         column_grid_figure(name, plat, wgb, designs, res, eme=eme)
         thickness_test_structures(name, designs)
         out[name] = _summary(designs)
+        if t_nm == 200:
+            # joint AD optimization demo (all practical parameters) at the
+            # representative (200 nm core) thickness only, to bound run time.
+            joint_ad_demo = joint_ad_optimization_figure(
+                plat,
+                float(cutoffs[len(cutoffs) // 2]),
+                FIGDIR / f"dichroic_designer_si3n4_{name}_joint_ad_optimization.png",
+                x0_crosssection=(wgb.rail_width, wgb.gap, 1.0, 1.0),
+                x0_lengths=(0.50, 150.0, 200.0, 600.0, 150.0),
+                res=pick(low=0.09, medium=0.06, high=0.05),
+                crosssection_steps=pick(low=10, medium=20, high=24),
+                length_steps=pick(low=8, medium=16, high=20),
+                analysis_dir=FIGDIR / f"dichroic_designer_si3n4_{name}_joint",
+            )
+            out[f"{name}_joint_ad_optimization"] = joint_ad_demo
     return out
 
 

@@ -308,6 +308,140 @@ spectrum/propagation/design figures, GDS and data into a fresh timestamped
 subfolder. As with the others, `submit_runs` returns immediately and
 `gather_runs` assembles every run in a later session.
 
+## AD gradient-based design optimization
+
+`dichroic_designer.py` and `kwolek_designer.py` can optimize their nominal
+design parameter directly by **`jax.grad`** through
+`meow.make_differentiable_neffs` (see the library's
+[HPC & gradients guide](../../docs/hpc.md)), instead of the default
+root-find/bisection, over the *same fixed layer stack* used everywhere else in
+the module:
+
+- **`dichroic_designer.optimize_phase_match_width`** minimizes the phase-mismatch
+  loss `(n_WGA(w_a, cutoff_wl) - n_WGB(cutoff_wl))^2` over the WGA width `w_a` at
+  the target cutoff - the gradient-descent counterpart of `phase_match_width`'s
+  `brentq` root-find. Pass `design_dichroic(..., use_gradient=True,
+  gradient_w0=...)` to use it in a full design.
+- **`kwolek_designer.optimize_width_gradient`** directly **maximizes the FH/SH
+  coupling contrast** `log(kappa_FH) - log(kappa_SH)` over the nominal top width
+  `w_top` at the fixed minimum gap - the literal Kwolek design goal stated as a
+  scalar objective, with a soft feasibility penalty (so the optimizer finds a
+  genuine interior optimum instead of saturating at the width bound) - the
+  gradient-based counterpart of `optimize_width`'s bisection-on-feasibility. Pass
+  `design_faquad_filter(..., use_gradient=True, gradient_w0=...)` to use it.
+
+Both objectives are built from the effective-index **splitting**/**crossing** of
+a two-waveguide cross-section, which is exactly what `make_differentiable_neffs`
+differentiates exactly from a *single* eigensolve (meow's tidy3d cross-section
+builder already applies Kottke subpixel smoothing, so the width -> permittivity
+map is smooth enough for its default finite-difference `eps` Jacobian) -
+`jax.grad` + a small Adam optimizer (`examples/papers/_ad_optimize.py`) then
+walks the width to the optimum, recording an **optimization trace** (objective
+and parameter value per iteration).
+
+`ad_optimization_figure()` in each module runs the optimizer from a
+deliberately off-target initial width and plots, in one figure: the
+optimization trace, the before/after performance (the index-crossing curve for
+dichroic; FH/SH coupling vs. width for Kwolek) at the initial vs. optimized
+width, and the optimized device layout. `main()` writes these as
+`figures/dichroic_designer_ad_optimization.png` and
+`figures/kwolek_designer_ad_optimization.png`.
+
+This pattern generalizes to any designer whose target quantity is a neff
+crossing or splitting (most of the wavelength-varying designers in this
+directory); `mao2019_designer.py`, `ramadan1998_designer.py` and
+`song2023_designer.py` are not yet converted and remain on their original
+closed-form / bisection designers.
+
+### Two-stage joint optimization over every practical dichroic parameter
+
+`dichroic_designer.design_dichroic_joint` extends the single-parameter
+`optimize_phase_match_width` to a **two-stage joint optimization** over every
+practical degree of freedom of the dichroic beam splitter, each stage driven
+by `jax.grad` through `meow.make_differentiable_objective` (exact central
+finite differences of the whole FDE-based design objective):
+
+1. **`optimize_dichroic_crosssection`** picks the WGB shape - its rail-width
+   scale `w_b`, its **inter-rail gap** `g_b`, and the **fractional
+   middle/outer rail widths** `frac_mid`/`frac_out` (`mid_width = frac_mid *
+   w_b`, `out_width = frac_out * w_b`; `1.0` recovers the uniform-rail-width
+   WGB) - to **maximize the group-velocity mismatch** with WGA, subject to
+   the two being **exactly** phase-matched at the target cutoff. The WGA
+   width `w_a` is *not* a free parameter here: for every candidate WGB it is
+   root-found by `phase_match_width` (the same `brentq` solve
+   `design_dichroic` uses), so every point the optimizer visits - and
+   therefore its result - has a genuine mode crossing at the target
+   wavelength by construction. (An earlier version of this loss instead
+   added the phase-match residual `(n_WGA - n_WGB)^2` as a *soft* penalty
+   alongside the group-velocity-mismatch reward; because that reward is
+   linear and unbounded while the residual is a bounded quadratic, the
+   optimizer could settle at a small nonzero mismatch - trading away an
+   exact crossing for a larger mismatch - so the resulting device did not
+   actually filter at the target wavelength. Root-finding `w_a` inside the
+   loss removes that trade-off entirely.) The loss is
+   `-gvm_weight * sign * (ng_WGA - ng_WGB)`, where the group index `ng = n -
+   wavelength * dn/dwavelength` is a central finite difference over
+   wavelength of the isolated-waveguide effective index, and `sign`
+   (`reference_gvm_sign`, computed once from the original Magden 2018 SOI
+   design: the solid WGA strip has the higher group index - is more
+   dispersive - than the segmented WGB) orients the mismatch to match that
+   design's short-pass (WGA) / long-pass (WGB) convention. A sharper
+   (higher-group-index-mismatch) crossing gives better spectral selectivity
+   away from the cutoff. The WGA-WGB coupling gap is **not** a parameter
+   here either - it has no effect on either isolated-waveguide quantity,
+   only on the coupling `kappa` - so it moves to stage 2 instead.
+2. **`optimize_dichroic_lengths`** then takes that *fixed* cross-section and
+   picks the coupling `gap` and the four section lengths `l1..l4` (up to a
+   5 mm total budget) to **minimize the predicted insertion loss while
+   keeping the phase-matching transition adiabatic**: the loss is `-ER[dB]`
+   (the Landau-Zener extinction, unbounded and always improvable with more
+   length or a smaller/stronger-coupling gap) plus a small compactness
+   preference on the non-critical section lengths (`l1`, `l3`, `l4` - not
+   `l2`, the phase-matching taper whose length is what actually controls the
+   adiabaticity) plus a hard penalty beyond the length budget. With no
+   explicit penalty on the gap itself, this reliably drives it to the
+   tightest coupling that still fits the remaining budget into `l2`. Because
+   `kappa` is a *difference* of two overlapping-but-separated mode fields (a
+   numerically delicate quantity, unlike the isolated-waveguide indices in
+   stage 1), this stage's finite-difference step defaults larger than usual
+   (`fd_step=1e-2`) - the default `1e-3` is small enough that solver noise
+   can flip its sign.
+
+Both stages optimize in **bounds-normalized** coordinates (each parameter
+mapped to `[0, 1]` over its box bound) so a single learning rate is
+meaningful across the mixed micron/dimensionless/length-in-microns parameter
+scales.
+
+`WGB` and `magden2018_dichroic.dichroic_filter` (plus its `lateral_positions`/
+`w_b_total` helpers) were generalized with `frac_mid`/`frac_out` parameters to
+support the heterogeneous-rail-width layout stage 1 can produce; both default
+to `1.0`, so every pre-existing call site (with a uniform-width WGB) is
+unaffected.
+
+`design_dichroic_joint()` runs both stages and builds the resulting
+`DichroicDesign` (`opt_trace` is stage 1's trace, `opt_trace_lengths` stage
+2's); `joint_ad_optimization_figure()` runs it from deliberately off-target
+initial guesses and plots both loss traces, both parameter trajectories, the
+before/after index-crossing performance, and the optimized layout, written as
+`figures/dichroic_designer_joint_ad_optimization.png` (and the
+`_si3n4`/`_si3n4_200nm` counterparts in the Si3N4 variants). Because
+`make_differentiable_objective` re-solves the whole objective (including,
+for stage 1, an inner root-find) per finite-difference step, this
+optimization is substantially more expensive per iteration than the
+single-parameter path; the demo therefore uses a coarser mesh resolution and
+fewer iterations than the discrete-sweep designs in the same module.
+
+Passing `analysis_dir=...` to `joint_ad_optimization_figure()` additionally
+runs `analyze_dichroic_design(..., save_fields=True)` on the optimized
+design, writing its broadband EME short-/long-pass transmission spectrum
+(`*_spectrum.png`) and its propagating-field intensity plot at the cutoff
+wavelength (`*_propagation.png`, plus the raw fields as `*_fields.h5`)
+alongside the GDS/design/summary files - the same distributed-EME machinery
+`dichroic_designer_slurm.py` and `kwolek_designer.analyze_design` use. All
+three `main()`s (`dichroic_designer`, `dichroic_designer_si3n4`,
+`dichroic_designer_si3n4_thickness`'s 200 nm case) pass this so every
+joint-optimized design gets its own `*_joint/` analysis folder.
+
 ## Running
 
 ```sh
