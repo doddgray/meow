@@ -29,6 +29,7 @@ See :func:`solve_scalar_modes` for the array entry point and
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -83,6 +84,25 @@ def scalar_operator(
     return a_op, k0
 
 
+def _solve_scalar_eigsh(
+    n: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    wl: float,
+    num_modes: int,
+    target_neff: float | None,
+) -> tuple[np.ndarray, np.ndarray, sp.csc_matrix, float]:
+    """Shared shift-invert solve; returns ``(vals, vecs, operator, k0)`` (raw)."""
+    n = np.asarray(n, dtype=float)
+    a_op, k0 = scalar_operator(n, x, y, wl)
+    target = float(np.max(n)) if target_neff is None else float(target_neff)
+    sigma = (k0 * target) ** 2  # shift-invert around the target propagation const
+    k = min(num_modes, a_op.shape[0] - 2)
+    vals, vecs = eigsh(a_op, k=k, sigma=sigma, which="LM")
+    order = np.argsort(vals)[::-1]  # most-confined (largest beta^2) first
+    return vals[order], vecs[:, order], a_op, k0
+
+
 def solve_scalar_modes(
     n: np.ndarray,
     x: np.ndarray,
@@ -114,27 +134,46 @@ def solve_scalar_modes(
     """
     n = np.asarray(n, dtype=float)
     ny, nx = n.shape
-    a_op, k0 = scalar_operator(n, x, y, wl)
-    target = float(np.max(n)) if target_neff is None else float(target_neff)
-    sigma = (k0 * target) ** 2  # shift-invert around the target propagation const
-    k = min(num_modes, a_op.shape[0] - 2)
-    vals, vecs = eigsh(a_op, k=k, sigma=sigma, which="LM")
-
-    order = np.argsort(vals)[::-1]  # most-confined (largest beta^2) first
-    vals, vecs = vals[order], vecs[:, order]
+    vals, vecs, _a_op, k0 = _solve_scalar_eigsh(n, x, y, wl, num_modes, target_neff)
     neffs = np.sqrt(np.clip(vals, 0.0, None)) / k0
-    fields = vecs.T.reshape(k, ny, nx)
+    fields = vecs.T.reshape(vecs.shape[1], ny, nx)
     return neffs, fields
 
 
-def eigenvector_sensitivity(
-    operator: sp.spmatrix,
-    eigenvalue: float,
-    eigenvector: np.ndarray,
-    deps: np.ndarray,
-    k0: float,
-) -> tuple[np.ndarray, float]:
-    r"""Exact eigenvector sensitivity ``dv/dp`` via a deflated linear solve.
+def solve_scalar_modes_full(
+    n: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    wl: float,
+    *,
+    num_modes: int = 1,
+    target_neff: float | None = None,
+) -> list[ScalarModeSolution]:
+    """Like :func:`solve_scalar_modes`, bundled for the exact eigenpair adjoint.
+
+    Each returned :class:`ScalarModeSolution` carries the operator/eigenvalue
+    alongside the mode, so calling :meth:`ScalarModeSolution.adjoint` gives an
+    :class:`EigenvectorAdjoint` for that mode with **no second eigensolve**.
+    """
+    n = np.asarray(n, dtype=float)
+    ny, nx = n.shape
+    vals, vecs, a_op, k0 = _solve_scalar_eigsh(n, x, y, wl, num_modes, target_neff)
+    neffs = np.sqrt(np.clip(vals, 0.0, None)) / k0
+    return [
+        ScalarModeSolution(
+            neff=float(neffs[i]),
+            field=np.ascontiguousarray(vecs[:, i]),
+            eigenvalue=float(vals[i]),
+            operator=a_op,
+            k0=k0,
+            shape=(ny, nx),
+        )
+        for i in range(vecs.shape[1])
+    ]
+
+
+class EigenvectorAdjoint:
+    r"""Reusable, factorized exact eigenpair adjoint for one mode.
 
     For the real-symmetric eigenproblem ``A v = lambda v`` (``lambda = beta^2``,
     ``A = L + k0^2 diag(eps)``, ``v`` unit-norm), a permittivity perturbation has
@@ -157,6 +196,66 @@ def eigenvector_sensitivity(
     radiation/continuum content missed by a truncated guided-mode expansion is
     captured because the full operator is inverted on the deflated subspace).
 
+    The bordered matrix depends only on ``(operator, eigenvalue, eigenvector)`` -
+    not on ``deps`` - so it is **factorized once** (a sparse LU) and reused for
+    every subsequent ``deps`` direction via cheap triangular solves. This is what
+    makes a full Jacobian over many design parameters affordable: one
+    factorization (comparable cost to the eigensolve itself) plus ``n_params``
+    fast solves, versus ``n_params`` additional eigensolves for a finite-difference
+    Jacobian.
+    """
+
+    def __init__(
+        self, operator: sp.spmatrix, eigenvalue: float, eigenvector: np.ndarray
+    ) -> None:
+        """Factorize the bordered/deflated system once for this eigenpair."""
+        import scipy.sparse.linalg as spl
+
+        self.v = np.asarray(eigenvector, dtype=float).reshape(-1)
+        self.eigenvalue = float(eigenvalue)
+        self.n_dof = self.v.size
+        a_shift = sp.csc_matrix(operator) - self.eigenvalue * sp.identity(
+            self.n_dof, format="csc"
+        )
+        v_col = sp.csc_matrix(self.v.reshape(self.n_dof, 1))
+        bordered = sp.bmat([[a_shift, v_col], [v_col.T, None]], format="csc")
+        self._lu = spl.splu(bordered)
+
+    def solve(self, deps: np.ndarray, k0: float) -> tuple[np.ndarray, float]:
+        """Eigenpair sensitivity ``(dv, dlambda)`` for one perturbation direction.
+
+        Args:
+            deps: ``d(eps)/dp`` per grid point (same flattening as the operator).
+            k0: the vacuum wavenumber (so ``dA/dp = k0^2 diag(deps)``).
+
+        Returns:
+            ``(dv, dlambda)`` - the eigenvector sensitivity (gauge ``v^T dv = 0``)
+            and the eigenvalue sensitivity ``dlambda/dp``.
+        """
+        deps = np.asarray(deps, dtype=float).reshape(-1)
+        da_v = (k0**2) * deps * self.v  # (dA/dp) v
+        dlambda = float(self.v @ da_v)  # Hellmann-Feynman v^T (dA/dp) v (v^T v=1)
+        rhs = -(da_v - dlambda * self.v)  # -(dA/dp - dlambda I) v
+        sol = self._lu.solve(np.concatenate([rhs, [0.0]]))
+        return sol[: self.n_dof], dlambda
+
+
+def eigenvector_sensitivity(
+    operator: sp.spmatrix,
+    eigenvalue: float,
+    eigenvector: np.ndarray,
+    deps: np.ndarray,
+    k0: float,
+) -> tuple[np.ndarray, float]:
+    """Exact eigenvector sensitivity ``dv/dp`` via a deflated linear solve.
+
+    A convenience one-shot wrapper around :class:`EigenvectorAdjoint` for a
+    single perturbation direction; see its docstring for the method. When many
+    directions are needed for the same eigenpair (e.g. a full parameter
+    Jacobian), construct an :class:`EigenvectorAdjoint` once and call
+    :meth:`EigenvectorAdjoint.solve` repeatedly instead - it factorizes the
+    bordered system only once.
+
     Args:
         operator: the sparse operator ``A`` (e.g. from :func:`scalar_operator`).
         eigenvalue: ``lambda = (k0 neff)^2`` of the mode.
@@ -168,20 +267,29 @@ def eigenvector_sensitivity(
         ``(dv, dlambda)`` - the eigenvector sensitivity (gauge ``v^T dv = 0``) and
         the eigenvalue sensitivity ``dlambda/dp``.
     """
-    import scipy.sparse.linalg as spl
+    return EigenvectorAdjoint(operator, eigenvalue, eigenvector).solve(deps, k0)
 
-    v = np.asarray(eigenvector, dtype=float).reshape(-1)
-    deps = np.asarray(deps, dtype=float).reshape(-1)
-    n_dof = v.size
-    da_v = (k0**2) * deps * v  # (dA/dp) v
-    dlambda = float(v @ da_v)  # Hellmann-Feynman v^T (dA/dp) v  (v^T v = 1)
-    rhs = -(da_v - dlambda * v)  # -(dA/dp - dlambda I) v
 
-    a_shift = sp.csc_matrix(operator) - eigenvalue * sp.identity(n_dof, format="csc")
-    v_col = sp.csc_matrix(v.reshape(n_dof, 1))
-    bordered = sp.bmat([[a_shift, v_col], [v_col.T, None]], format="csc")
-    sol = spl.spsolve(bordered, np.concatenate([rhs, [0.0]]))
-    return sol[:n_dof], dlambda
+@dataclass
+class ScalarModeSolution:
+    """One solved scalar mode, bundled with what its adjoint needs.
+
+    ``field`` is the flattened (row-major, ``index = iy * nx + ix``), unit-norm
+    eigenvector; ``operator``/``eigenvalue``/``k0`` are exactly what
+    :class:`EigenvectorAdjoint` needs to build the exact sensitivity of this mode
+    to any permittivity perturbation - no second eigensolve.
+    """
+
+    neff: float
+    field: np.ndarray
+    eigenvalue: float
+    operator: sp.csc_matrix
+    k0: float
+    shape: tuple[int, int]  # (ny, nx), for reshaping ``field`` back to 2D
+
+    def adjoint(self) -> EigenvectorAdjoint:
+        """A reusable, factorized adjoint operator for this mode."""
+        return EigenvectorAdjoint(self.operator, self.eigenvalue, self.field)
 
 
 def scalar_neffs(

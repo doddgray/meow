@@ -26,12 +26,23 @@ from meow.fde.post_process import (
     orthonormalize_modes,
     post_process_modes,
 )
+from meow.fde.sparse import (
+    EigenvectorAdjoint,
+    ScalarModeSolution,
+    eigenvector_sensitivity,
+    scalar_neffs,
+    scalar_operator,
+    solve_scalar_modes,
+    solve_scalar_modes_full,
+)
 from meow.fde.tidy3d import (
     compute_modes_tidy3d,
 )
 
 __all__ = [
+    "EigenvectorAdjoint",
     "ModeMetrics",
+    "ScalarModeSolution",
     "Sim",
     "compute_modes",
     "compute_modes_lumerical",
@@ -40,10 +51,15 @@ __all__ = [
     "create_lumerical_geometries",
     "dispersion_metrics",
     "effective_area",
+    "eigenvector_sensitivity",
     "filter_modes",
     "get_sim",
     "normalize_modes",
     "orthonormalize_modes",
     "post_process_modes",
+    "scalar_neffs",
+    "scalar_operator",
     "solve_mode",
+    "solve_scalar_modes",
+    "solve_scalar_modes_full",
 ]

@@ -61,8 +61,13 @@ def test_designer_extras_cutback_and_tapers() -> None:
     assert tapered.ports["in_bar"].width == pytest.approx(2.0, abs=2e-3)
     # cut-back array: regularly-spaced ports across a 5 mm chip, equal row length
     arr = dx.coupler_cutback_array(
-        comb, counts=(0, 1, 2), in_port="in_bar", thru_port="out_bar",
-        chip_width=5000.0, pitch=50.0, width=kw.W_TOP,
+        comb,
+        counts=(0, 1, 2),
+        in_port="in_bar",
+        thru_port="out_bar",
+        chip_width=5000.0,
+        pitch=50.0,
+        width=kw.W_TOP,
     )
     assert arr.xmax - arr.xmin == pytest.approx(5000.0, abs=5.0)  # 5 mm wide
     assert {f"in_{n}" for n in (0, 1, 2)} <= {p.name for p in arr.ports}
@@ -74,8 +79,13 @@ def test_designer_extras_spectrum_grid(tmp_path: Path) -> None:
 
     wls = np.linspace(0.62, 1.86, 20)
     rows = [
-        {"label": f"d{i}", "wls": wls, "bar": np.full_like(wls, 0.5),
-         "cross": np.full_like(wls, 0.5), "design_wls": [0.775, 1.55]}
+        {
+            "label": f"d{i}",
+            "wls": wls,
+            "bar": np.full_like(wls, 0.5),
+            "cross": np.full_like(wls, 0.5),
+            "design_wls": [0.775, 1.55],
+        }
         for i in range(2)
     ]
     out = dx.spectrum_grid(rows, tmp_path / "grid.png", db=True)
@@ -347,6 +357,172 @@ def test_dichroic_designer_reproduces_magden_width() -> None:
     assert dd.solid_neff(plat, w_a, 1.54, res=0.05) == pytest.approx(n_b, abs=6e-3)
     # wider WGA -> higher index -> would phase-match at a longer cutoff
     assert dd.solid_neff(plat, w_a + 0.03, 1.54, res=0.05) > n_b
+
+
+def test_optimize_phase_match_width_matches_root_find() -> None:
+    """The AD gradient-based optimizer converges near the root-find width.
+
+    Both minimize the same phase-mismatch residual (jax.grad + Adam vs.
+    brentq), so from an off-target initial guess the optimizer should land
+    close to the root-find's answer, with the loss trace strictly improving
+    over the initial value.
+    """
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    wgb = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3)
+    w_root = dd.phase_match_width(plat, 1.54, wgb, res=0.05)
+    w_opt, trace = dd.optimize_phase_match_width(
+        plat, 1.54, wgb, w0=0.6, res=0.05, steps=15
+    )
+    assert abs(w_opt - w_root) < 0.1
+    assert trace.losses[-1] < trace.losses[0]
+    assert trace.param_names == ("w_a [um]",)
+
+
+def test_design_dichroic_gradient_path_populates_trace() -> None:
+    """design_dichroic(use_gradient=True) runs the AD optimizer and stores it."""
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    wgb = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3)
+    d = dd.design_dichroic(
+        plat,
+        1.54,
+        wgb=wgb,
+        res=0.05,
+        use_gradient=True,
+        gradient_w0=0.6,
+        gradient_steps=6,
+    )
+    assert d.opt_trace is not None
+    assert len(d.opt_trace.losses) == 7
+    assert d.total_length <= plat.max_length + 1.0
+
+
+def test_wgb_heterogeneous_rail_widths() -> None:
+    """WGB.frac_mid/frac_out give heterogeneous mid/outer rail widths.
+
+    ``frac_mid=frac_out=1.0`` (the default) must reproduce the uniform-width
+    WGB exactly; scaling them apart changes only the corresponding rails.
+    """
+    from examples.papers import dichroic_designer as dd
+
+    uniform = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3)
+    assert uniform.widths == pytest.approx([0.25, 0.25, 0.25])
+    assert uniform.total_width == pytest.approx(3 * 0.25 + 2 * 0.10)
+    assert uniform.centers(0.0) == pytest.approx([-0.35, 0.0, 0.35])
+
+    hetero = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3, frac_mid=1.4, frac_out=0.8)
+    out_w, mid_w = 0.8 * 0.25, 1.4 * 0.25
+    assert hetero.widths == pytest.approx([out_w, mid_w, out_w])
+    total = mid_w + 2 * out_w + 2 * 0.10
+    assert hetero.total_width == pytest.approx(total)
+    centers = hetero.centers(0.0)
+    assert centers == pytest.approx(
+        [-(mid_w / 2 + 0.10 + out_w / 2), 0.0, mid_w / 2 + 0.10 + out_w / 2]
+    )
+    # rails are contiguous with the specified gaps, symmetric about x0
+    assert centers[1] - mid_w / 2 - (centers[0] + out_w / 2) == pytest.approx(0.10)
+
+
+def test_dichroic_filter_heterogeneous_rails_matches_uniform_default() -> None:
+    """dichroic_filter(frac_mid=frac_out=1.0) matches the pre-existing layout."""
+    default = md.dichroic_filter()
+    explicit = md.dichroic_filter(frac_mid=1.0, frac_out=1.0)
+    assert default.xmax == pytest.approx(explicit.xmax)
+    assert default.ymin == pytest.approx(explicit.ymin)
+    assert default.ymax == pytest.approx(explicit.ymax)
+
+    # a heterogeneous WGB still builds a valid, wider-than-mid-alone layout
+    hetero = md.dichroic_filter(frac_mid=1.3, frac_out=0.7)
+    assert hetero.ymax - hetero.ymin > 0
+
+
+def test_reference_gvm_sign_matches_original_paper() -> None:
+    """The Magden 2018 SOI design has ng_WGA > ng_WGB (WGA is more dispersive).
+
+    This fixes the sign every cross-section optimization's group-velocity
+    mismatch term is oriented to match.
+    """
+    from examples.papers import dichroic_designer as dd
+
+    assert dd.reference_gvm_sign() == pytest.approx(1.0)
+
+
+def test_optimize_dichroic_crosssection_reduces_loss() -> None:
+    """Stage 1: max-GVM-at-exact-phase-match cross-section optimizer runs."""
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    params, trace = dd.optimize_dichroic_crosssection(
+        plat, 1.54, res=0.09, steps=6, lr=0.03
+    )
+    assert params.shape == (4,)
+    assert trace.param_names == dd.CROSSSECTION_PARAM_NAMES
+    assert len(trace.losses) == 7
+    assert trace.losses[-1] < trace.losses[0]
+
+
+def test_optimize_dichroic_crosssection_always_phase_matched() -> None:
+    """Every iterate - not just the optimum - has an exact WGA/WGB crossing.
+
+    Stage 1 root-finds ``w_a`` for each candidate WGB rather than treating the
+    phase-match residual as a soft penalty, so the design at *every* recorded
+    iterate (not just the final one) must have a genuine mode crossing at the
+    target wavelength.
+    """
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    cutoff_wl = 1.54
+    _, trace = dd.optimize_dichroic_crosssection(
+        plat, cutoff_wl, res=0.09, steps=3, lr=0.05
+    )
+    for p in trace.params:
+        w_b, g_b, frac_mid, frac_out = (float(x) for x in p)
+        wgb = dd.WGB(
+            rail_width=w_b, gap=g_b, n_rails=3, frac_mid=frac_mid, frac_out=frac_out
+        )
+        w_a = dd.phase_match_width(plat, cutoff_wl, wgb, res=0.09)
+        n_a = dd.solid_neff(plat, w_a, cutoff_wl, res=0.09)
+        n_b = dd.segmented_neff(plat, wgb, cutoff_wl, res=0.09)
+        assert n_a == pytest.approx(n_b, abs=5e-3)
+
+
+def test_optimize_dichroic_lengths_reduces_loss() -> None:
+    """Stage 2: gap + lengths adiabatic-loss optimizer runs and improves."""
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    wgb = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3)
+    params, trace = dd.optimize_dichroic_lengths(
+        plat, 1.54, 0.35, wgb, res=0.09, steps=2, lr=0.1
+    )
+    assert params.shape == (5,)
+    assert trace.param_names == dd.LENGTHS_PARAM_NAMES
+    assert len(trace.losses) == 3
+    assert trace.losses[-1] < trace.losses[0]
+
+
+def test_design_dichroic_joint_populates_trace() -> None:
+    """design_dichroic_joint runs both stages and builds a valid design."""
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    d = dd.design_dichroic_joint(
+        plat, 1.54, res=0.09, crosssection_steps=2, length_steps=2
+    )
+    assert d.opt_trace is not None
+    assert d.opt_trace_lengths is not None
+    assert len(d.opt_trace.losses) == 3
+    assert len(d.opt_trace_lengths.losses) == 3
+    assert d.total_length <= 5000.0 + 1.0
+    assert d.component is not None
+    # the design's w_a must genuinely phase-match its wgb at the cutoff
+    n_a = dd.solid_neff(plat, d.w_a, d.cutoff_wl, res=0.09)
+    n_b = dd.segmented_neff(plat, d.wgb, d.cutoff_wl, res=0.09)
+    assert n_a == pytest.approx(n_b, abs=5e-3)
 
 
 def test_dichroic_designer_si3n4_platform_and_width() -> None:
@@ -996,6 +1172,36 @@ def test_optimize_width_within_bounds() -> None:
     assert 0.6 <= w <= 2.0
 
 
+def test_optimize_width_gradient_matches_scale_of_bisection() -> None:
+    """The AD gradient-based width optimizer lands in a physically sane range.
+
+    Both optimizers maximize the same FH/SH contrast subject to a length-budget
+    feasibility constraint (bisection-on-feasibility vs. jax.grad + a soft
+    penalty), so their widths should agree to within a reasonable margin - not
+    exactly (different objectives/tolerances), but the same order.
+    """
+    p = kd.tfln_platform(0.30, max_length=1500.0)
+    w_bisect = kd.optimize_width(p, 1.55, target_extinction_db=18.0, res=0.08)
+    w_grad, trace = kd.optimize_width_gradient(
+        p, 1.55, 0.775, target_extinction_db=18.0, w0=0.8, res=0.08, steps=10
+    )
+    assert 0.4 <= w_grad <= 2.0
+    assert abs(w_grad - w_bisect) < 0.5  # same order of magnitude
+    assert len(trace.losses) == 11  # steps + the final converged point
+    assert trace.objective_name
+
+
+def test_design_faquad_filter_gradient_path_populates_trace() -> None:
+    """design_faquad_filter(use_gradient=True) runs the AD optimizer and stores it."""
+    p = kd.tfln_platform(0.30)
+    d = kd.design_faquad_filter(
+        p, 1.55, 0.775, res=0.08, use_gradient=True, gradient_w0=0.8, gradient_steps=6
+    )
+    assert d.opt_trace is not None
+    assert len(d.opt_trace.losses) == 7
+    assert 0.4 <= d.w_top <= 2.0
+
+
 def test_kwolek_slurm_executor_and_cells(tmp_path) -> None:  # noqa: ANN001
     executor = ks.make_executor(folder=tmp_path / "jobs", cluster="debug")
     assert hasattr(executor, "submit")
@@ -1136,9 +1342,7 @@ def test_ramadan1998_analytic_design_rules() -> None:
     l_full = ram.length_full_optimum(0.01, kappa)
     assert l_3db > l_full
     assert ram.length_3db_optimum(0.005, kappa) == pytest.approx(2 * l_3db, rel=1e-9)
-    assert ram.length_full_optimum(0.0025, kappa) == pytest.approx(
-        2 * l_full, rel=1e-9
-    )
+    assert ram.length_full_optimum(0.0025, kappa) == pytest.approx(2 * l_full, rel=1e-9)
     assert ram.coupling_length(kappa) == pytest.approx(np.pi / (2 * kappa))
 
 

@@ -19,10 +19,13 @@ A simple electromagnetic [EigenMode Expansion (EME)](https://en.wikipedia.org/wi
   coupled to Sellmeier fitting (`meow.ridb`), including anisotropic and
   temperature-dependent dispersion.
 - **Modal gradients & autodiff**: an exact effective-index adjoint
-  (`meow.neff_gradient`, `neff_value_and_grad`), `jax.custom_vjp` plumbing
-  (`make_differentiable_neffs`) so `jax.grad` flows through the solve into the
-  JAX/SAX cascade, and a differentiable level-set/density path for inverse design
-  (`meow.levelset`).
+  (`meow.neff_gradient`, `neff_value_and_grad`), `jax.custom_vjp` plumbing so
+  `jax.grad` flows through the solve into the JAX/SAX cascade — cheap
+  propagation-constant-only gradients on any backend (`make_differentiable_neffs`),
+  an **exact** overlap/field adjoint via the sparse solver at the same O(1)-solve
+  cost (`make_differentiable_modes`), or a full-`dS/dp` finite-difference fallback
+  for any backend/objective (`make_differentiable_objective`) — plus a
+  differentiable level-set/density path for inverse design (`meow.levelset`).
 - **HPC knobs**: solver thread-pinning (`meow.limit_threads`,
   `MEOW_SOLVER_THREADS`), cached wavelength-independent subpixel smoothing, and a
   sparse shift-invert solver for very large grids (`meow.fde.sparse`). See the

@@ -82,9 +82,15 @@ convention-dependent (and the high-index-contrast overlap is only approximate),
 so the absolute coupling is anchored to this design value at the cutoff."""
 
 
-def w_b_total(w_b: float = W_B, g_b: float = G_B) -> float:
-    """Total width of the 3-segment WGB."""
-    return 3 * w_b + 2 * g_b
+def w_b_total(
+    w_b: float = W_B, g_b: float = G_B, frac_mid: float = 1.0, frac_out: float = 1.0
+) -> float:
+    """Total width of the 3-segment WGB.
+
+    ``frac_mid``/``frac_out`` scale the central/outer rail widths as fractions
+    of ``w_b`` (default ``1.0`` recovers the uniform-rail-width WGB).
+    """
+    return (frac_mid + 2 * frac_out) * w_b + 2 * g_b
 
 
 def lateral_positions(
@@ -93,20 +99,24 @@ def lateral_positions(
     g_b: float = G_B,
     gap: float = GAP,
     gap_out: float = GAP_OUT,
+    frac_mid: float = 1.0,
+    frac_out: float = 1.0,
 ) -> tuple[list[float], float, float]:
     """Lateral (meow-x) centres of the device waveguides (paper Fig. 3a).
 
     The three WGB segments are centred on the lateral axis (x=0); WGA sits
     *below* them (negative x), at the coupling gap in section 2 and bending to
-    the final gap in section 3.
+    the final gap in section 3. ``frac_mid``/``frac_out`` scale the central/
+    outer WGB rail widths as fractions of ``w_b``.
 
     Returns:
         ``(seg_centers, y_a_couple, y_a_final)``: the WGB segment centres and
         the WGA centre in the coupling region and after separation.
     """
-    pitch_b = w_b + g_b
-    seg_centers = [(i - 1) * pitch_b for i in range(3)]
-    wgb_left_edge = min(seg_centers) - w_b / 2
+    mid_w, out_w = frac_mid * w_b, frac_out * w_b
+    pitch = mid_w / 2 + g_b + out_w / 2
+    seg_centers = [-pitch, 0.0, pitch]
+    wgb_left_edge = -w_b_total(w_b, g_b, frac_mid, frac_out) / 2
     y_a_couple = wgb_left_edge - gap - w_a / 2
     y_a_final = wgb_left_edge - gap_out - w_a / 2
     return seg_centers, y_a_couple, y_a_final
@@ -125,6 +135,8 @@ def dichroic_filter(
     l2: float = L2,
     l3: float = L3,
     l4: float = L4,
+    frac_mid: float = 1.0,
+    frac_out: float = 1.0,
     points_per_section: int = 30,
 ) -> gf.Component:
     """Parametric 1x2 dichroic filter (paper Fig. 3a).
@@ -134,13 +146,15 @@ def dichroic_filter(
     added at extrusion time. The topology reproduces paper Fig. 3a:
 
     - WGB (long-pass, segmented) runs **straight** on the lateral axis with a
-      **constant total width** (``3 w_b + 2 g_b``) and constant inter-ridge
-      gaps everywhere. Near each end the central and outer ridges taper
-      *simultaneously* - the outer ridges shrink to a ``w_tip`` tip while the
-      central ridge widens to take up the freed width - so the three-ridge WGB
-      smoothly becomes a single ridge. The central ridge then extends a further
-      ``l_ext`` past the outer-ridge tips, so the WGB ports (z=0, z=z4) are
-      single-ridge waveguides.
+      **constant total width** (``frac_mid w_b + 2 frac_out w_b + 2 g_b``) and
+      constant inter-ridge gaps everywhere. Near each end the central and
+      outer ridges taper *simultaneously* - the outer ridges shrink to a
+      ``w_tip`` tip while the central ridge widens to take up the freed width
+      - so the three-ridge WGB smoothly becomes a single ridge. The central
+      ridge then extends a further ``l_ext`` past the outer-ridge tips, so the
+      WGB ports (z=0, z=z4) are single-ridge waveguides. ``frac_mid``/
+      ``frac_out`` scale the central/outer rail widths as fractions of
+      ``w_b`` (default ``1.0`` recovers the uniform-rail-width WGB).
     - WGA (short-pass, solid strip) is **absent until section 2**, where it
       tapers up from a ``w_tip`` tip at a **constant edge-to-edge gap** to WGB
       (its centre shifts as it widens); in section 3 it bends away from WGB
@@ -151,8 +165,11 @@ def dichroic_filter(
     """
     c = gf.Component()
     z1, z2, z3, z4 = l1, l1 + l2, l1 + l2 + l3, l1 + l2 + l3 + l4
-    _, y_a_couple, y_a_final = lateral_positions(w_a, w_b, g_b, gap, gap_out)
-    total = w_b_total(w_b, g_b)  # constant WGB total width
+    _, y_a_couple, y_a_final = lateral_positions(
+        w_a, w_b, g_b, gap, gap_out, frac_mid, frac_out
+    )
+    out_w = frac_out * w_b  # outer-rail width in the coupling region
+    total = w_b_total(w_b, g_b, frac_mid, frac_out)  # constant WGB total width
     wgb_left_edge = -total / 2  # constant WGA-facing edge of WGB
     z_ol, z_or = l_ext, z4 - l_ext  # outer-ridge tip locations
 
@@ -181,7 +198,7 @@ def dichroic_filter(
         return 0.0
 
     def outer_w(z: float) -> float:
-        return w_tip + (w_b - w_tip) * outer_t(z)
+        return w_tip + (out_w - w_tip) * outer_t(z)
 
     def central_w(z: float) -> float:
         # constant total width: central takes up whatever the outer ridges
