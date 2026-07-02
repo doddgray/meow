@@ -561,9 +561,7 @@ def make_differentiable_modes(
     def _fwd_np(params: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         modes = _solve(np.asarray(params))
         neffs = np.array([[m.neff for m in row] for row in modes], dtype=np.float64)
-        fields = np.array(
-            [[m.field for m in row] for row in modes], dtype=np.float64
-        )
+        fields = np.array([[m.field for m in row] for row in modes], dtype=np.float64)
         return neffs, fields
 
     def _grad_np(

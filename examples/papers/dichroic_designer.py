@@ -243,9 +243,7 @@ def solid_neff(
     mesh = _mesh(platform, -span, span, res)
     structs = _ridge_structures(platform, [w_a], [0.0], (-span, span))
     return float(
-        np.real(
-            _te_modes(structs, wl, mesh, compute_modes=compute_modes)[0].neff
-        )
+        np.real(_te_modes(structs, wl, mesh, compute_modes=compute_modes)[0].neff)
     )
 
 
@@ -262,9 +260,7 @@ def segmented_neff(
     mesh = _mesh(platform, -span, span, res)
     structs = _ridge_structures(platform, wgb.widths, wgb.centers(x0), (-span, span))
     return float(
-        np.real(
-            _te_modes(structs, wl, mesh, compute_modes=compute_modes)[0].neff
-        )
+        np.real(_te_modes(structs, wl, mesh, compute_modes=compute_modes)[0].neff)
     )
 
 
@@ -649,8 +645,16 @@ def optimize_dichroic_crosssection(
     def objective(params: np.ndarray) -> np.ndarray:
         w_a, w_b, g_b, frac_mid, frac_out = (float(p) for p in params)
         n_a, n_b, ng_a, ng_b = _dispersion_quantities(
-            platform, cutoff_wl, res, w_a, w_b, g_b, frac_mid, frac_out,
-            compute_modes=compute_modes, dwl=dwl,
+            platform,
+            cutoff_wl,
+            res,
+            w_a,
+            w_b,
+            g_b,
+            frac_mid,
+            frac_out,
+            compute_modes=compute_modes,
+            dwl=dwl,
         )
         phase_loss = (n_a - n_b) ** 2
         gvm = sign * (ng_a - ng_b)
@@ -680,7 +684,11 @@ def optimize_dichroic_crosssection(
 
 
 LENGTHS_PARAM_NAMES: tuple[str, ...] = (
-    "gap [um]", "l1 [um]", "l2 [um]", "l3 [um]", "l4 [um]",
+    "gap [um]",
+    "l1 [um]",
+    "l2 [um]",
+    "l3 [um]",
+    "l4 [um]",
 )
 """Parameter order of :func:`optimize_dichroic_lengths`."""
 
@@ -1065,9 +1073,7 @@ def tapered_component(
     """
     from examples.papers._designer_extras import tapered_ports
 
-    return tapered_ports(
-        design.component, port_widths, taper_lengths, layer=LAYER_WG
-    )
+    return tapered_ports(design.component, port_widths, taper_lengths, layer=LAYER_WG)
 
 
 def ad_optimization_figure(
@@ -1098,8 +1104,13 @@ def ad_optimization_figure(
     from examples.papers._plot import plot_component
 
     design = design_dichroic(
-        platform, cutoff_wl, wgb=wgb, res=res,
-        use_gradient=True, gradient_w0=gradient_w0, gradient_steps=gradient_steps,
+        platform,
+        cutoff_wl,
+        wgb=wgb,
+        res=res,
+        use_gradient=True,
+        gradient_w0=gradient_w0,
+        gradient_steps=gradient_steps,
     )
     assert design.opt_trace is not None  # noqa: S101 (use_gradient=True always sets it)
     trace = design.opt_trace
@@ -1185,16 +1196,28 @@ def design_dichroic_joint(
     and ``opt_trace_lengths`` (stage 2) both populated.
     """
     cs_params, cs_trace = optimize_dichroic_crosssection(
-        platform, cutoff_wl, x0=x0_crosssection, res=res,
-        steps=crosssection_steps, lr=crosssection_lr, compute_modes=compute_modes,
+        platform,
+        cutoff_wl,
+        x0=x0_crosssection,
+        res=res,
+        steps=crosssection_steps,
+        lr=crosssection_lr,
+        compute_modes=compute_modes,
     )
     w_a, w_b, g_b, frac_mid, frac_out = (float(p) for p in cs_params)
     wgb = WGB(rail_width=w_b, gap=g_b, n_rails=3, frac_mid=frac_mid, frac_out=frac_out)
 
     len_params, len_trace = optimize_dichroic_lengths(
-        platform, cutoff_wl, w_a, wgb, x0=x0_lengths,
-        max_total_length=max_total_length, res=res,
-        steps=length_steps, lr=length_lr, compute_modes=compute_modes,
+        platform,
+        cutoff_wl,
+        w_a,
+        wgb,
+        x0=x0_lengths,
+        max_total_length=max_total_length,
+        res=res,
+        steps=length_steps,
+        lr=length_lr,
+        compute_modes=compute_modes,
     )
     gap, l1, l2, l3, l4 = (float(p) for p in len_params)
 
@@ -1292,8 +1315,13 @@ def joint_ad_optimization_figure(
     from examples.papers._plot import plot_component
 
     design = design_dichroic_joint(
-        platform, cutoff_wl, x0_crosssection=x0_crosssection, x0_lengths=x0_lengths,
-        res=res, crosssection_steps=crosssection_steps, length_steps=length_steps,
+        platform,
+        cutoff_wl,
+        x0_crosssection=x0_crosssection,
+        x0_lengths=x0_lengths,
+        res=res,
+        crosssection_steps=crosssection_steps,
+        length_steps=length_steps,
     )
     assert design.opt_trace is not None  # noqa: S101 (always set here)
     assert design.opt_trace_lengths is not None  # noqa: S101 (always set here)
@@ -1320,8 +1348,11 @@ def joint_ad_optimization_figure(
     ax_perf = fig.add_subplot(grid[2, 0])
     wls = np.linspace(cutoff_wl * 0.85, cutoff_wl * 1.15, 25)
     wgb_init = WGB(
-        rail_width=float(cs_init[1]), gap=float(cs_init[2]),
-        n_rails=3, frac_mid=float(cs_init[3]), frac_out=float(cs_init[4]),
+        rail_width=float(cs_init[1]),
+        gap=float(cs_init[2]),
+        n_rails=3,
+        frac_mid=float(cs_init[3]),
+        frac_out=float(cs_init[4]),
     )
     n_b_init = [segmented_neff(platform, wgb_init, wl, res=res) for wl in wls]
     n_a_init = [solid_neff(platform, float(cs_init[0]), wl, res=res) for wl in wls]
@@ -1420,8 +1451,11 @@ def analyze_dichroic_design(
         return ThreadPoolExecutor(max_workers=workers)
 
     run = _analysis.submit_dichroic_run(
-        to_params(design), settings, executor_factory=executor_factory,
-        out_dir=out_dir, save_fields=False,
+        to_params(design),
+        settings,
+        executor_factory=executor_factory,
+        out_dir=out_dir,
+        save_fields=False,
     )
     return run.gather()
 
@@ -1449,8 +1483,13 @@ def dichroic_test_structures(
     stem = f"{design.cutoff_wl * 1e3:.0f}nm"
     w_port = float(design.component.ports["in0"].width)
     array = coupler_cutback_array(
-        design.component, counts=counts, in_port="in0", thru_port="long_pass",
-        chip_width=chip_width, pitch=8.0 * w_port + 4.0, width=w_port,
+        design.component,
+        counts=counts,
+        in_port="in0",
+        thru_port="long_pass",
+        chip_width=chip_width,
+        pitch=8.0 * w_port + 4.0,
+        width=w_port,
         layer=LAYER_WG,
     )
     gpath = out / f"dichroic_{stem}_cutback_array.gds"
@@ -1491,17 +1530,22 @@ def dichroic_spectrum_grid(
         if not jpath.exists():
             continue
         spec = json.loads(jpath.read_text())
-        rows.append({
-            "label": f"{d.cutoff_wl * 1e3:.0f} nm cutoff",
-            "wls": np.asarray(spec["wavelength_um"]),
-            "short_pass": np.asarray(spec["t_short"]),
-            "long_pass": np.asarray(spec["t_long"]),
-            "design_wls": [d.cutoff_wl],
-        })
+        rows.append(
+            {
+                "label": f"{d.cutoff_wl * 1e3:.0f} nm cutoff",
+                "wls": np.asarray(spec["wavelength_um"]),
+                "short_pass": np.asarray(spec["t_short"]),
+                "long_pass": np.asarray(spec["t_long"]),
+                "design_wls": [d.cutoff_wl],
+            }
+        )
     if not rows:
         return None
     return spectrum_grid(
-        rows, out_path, db=True, xlim_nm=(band[0] * 1e3, band[1] * 1e3),
+        rows,
+        out_path,
+        db=True,
+        xlim_nm=(band[0] * 1e3, band[1] * 1e3),
         ports=(("short_pass", "C0"), ("long_pass", "C3")),
         title="Dichroic designer: broad-band short-/long-pass spectra",
     )
@@ -1590,7 +1634,10 @@ def main() -> dict[str, object]:
 
     # single-parameter AD demo (jax.grad through make_differentiable_neffs)
     ad_demo = ad_optimization_figure(
-        platform, wgb, targets[-1], res,
+        platform,
+        wgb,
+        targets[-1],
+        res,
         FIGDIR / "dichroic_designer_ad_optimization.png",
         gradient_w0=pick(low=0.7, medium=0.7, high=0.7),
         gradient_steps=pick(low=15, medium=25, high=25),
@@ -1601,7 +1648,8 @@ def main() -> dict[str, object]:
     # than the discrete-sweep designs above bounds its ~2 * n_params re-solve
     # cost per gradient step)
     joint_ad_demo = joint_ad_optimization_figure(
-        platform, targets[-1],
+        platform,
+        targets[-1],
         FIGDIR / "dichroic_designer_joint_ad_optimization.png",
         res=pick(low=0.08, medium=0.05, high=0.04),
         crosssection_steps=pick(low=12, medium=26, high=30),

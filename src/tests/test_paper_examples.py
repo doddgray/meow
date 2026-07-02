@@ -61,8 +61,13 @@ def test_designer_extras_cutback_and_tapers() -> None:
     assert tapered.ports["in_bar"].width == pytest.approx(2.0, abs=2e-3)
     # cut-back array: regularly-spaced ports across a 5 mm chip, equal row length
     arr = dx.coupler_cutback_array(
-        comb, counts=(0, 1, 2), in_port="in_bar", thru_port="out_bar",
-        chip_width=5000.0, pitch=50.0, width=kw.W_TOP,
+        comb,
+        counts=(0, 1, 2),
+        in_port="in_bar",
+        thru_port="out_bar",
+        chip_width=5000.0,
+        pitch=50.0,
+        width=kw.W_TOP,
     )
     assert arr.xmax - arr.xmin == pytest.approx(5000.0, abs=5.0)  # 5 mm wide
     assert {f"in_{n}" for n in (0, 1, 2)} <= {p.name for p in arr.ports}
@@ -74,8 +79,13 @@ def test_designer_extras_spectrum_grid(tmp_path: Path) -> None:
 
     wls = np.linspace(0.62, 1.86, 20)
     rows = [
-        {"label": f"d{i}", "wls": wls, "bar": np.full_like(wls, 0.5),
-         "cross": np.full_like(wls, 0.5), "design_wls": [0.775, 1.55]}
+        {
+            "label": f"d{i}",
+            "wls": wls,
+            "bar": np.full_like(wls, 0.5),
+            "cross": np.full_like(wls, 0.5),
+            "design_wls": [0.775, 1.55],
+        }
         for i in range(2)
     ]
     out = dx.spectrum_grid(rows, tmp_path / "grid.png", db=True)
@@ -377,8 +387,13 @@ def test_design_dichroic_gradient_path_populates_trace() -> None:
     plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
     wgb = dd.WGB(rail_width=0.25, gap=0.10, n_rails=3)
     d = dd.design_dichroic(
-        plat, 1.54, wgb=wgb, res=0.05,
-        use_gradient=True, gradient_w0=0.6, gradient_steps=6,
+        plat,
+        1.54,
+        wgb=wgb,
+        res=0.05,
+        use_gradient=True,
+        gradient_w0=0.6,
+        gradient_steps=6,
     )
     assert d.opt_trace is not None
     assert len(d.opt_trace.losses) == 7
@@ -1297,9 +1312,7 @@ def test_ramadan1998_analytic_design_rules() -> None:
     l_full = ram.length_full_optimum(0.01, kappa)
     assert l_3db > l_full
     assert ram.length_3db_optimum(0.005, kappa) == pytest.approx(2 * l_3db, rel=1e-9)
-    assert ram.length_full_optimum(0.0025, kappa) == pytest.approx(
-        2 * l_full, rel=1e-9
-    )
+    assert ram.length_full_optimum(0.0025, kappa) == pytest.approx(2 * l_full, rel=1e-9)
     assert ram.coupling_length(kappa) == pytest.approx(np.pi / (2 * kappa))
 
 

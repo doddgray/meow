@@ -85,8 +85,12 @@ def scalar_operator(
 
 
 def _solve_scalar_eigsh(
-    n: np.ndarray, x: np.ndarray, y: np.ndarray, wl: float,
-    num_modes: int, target_neff: float | None,
+    n: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    wl: float,
+    num_modes: int,
+    target_neff: float | None,
 ) -> tuple[np.ndarray, np.ndarray, sp.csc_matrix, float]:
     """Shared shift-invert solve; returns ``(vals, vecs, operator, k0)`` (raw)."""
     n = np.asarray(n, dtype=float)
@@ -157,8 +161,12 @@ def solve_scalar_modes_full(
     neffs = np.sqrt(np.clip(vals, 0.0, None)) / k0
     return [
         ScalarModeSolution(
-            neff=float(neffs[i]), field=np.ascontiguousarray(vecs[:, i]),
-            eigenvalue=float(vals[i]), operator=a_op, k0=k0, shape=(ny, nx),
+            neff=float(neffs[i]),
+            field=np.ascontiguousarray(vecs[:, i]),
+            eigenvalue=float(vals[i]),
+            operator=a_op,
+            k0=k0,
+            shape=(ny, nx),
         )
         for i in range(vecs.shape[1])
     ]

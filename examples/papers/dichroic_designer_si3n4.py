@@ -162,14 +162,17 @@ def main() -> dict[str, object]:
         analyze_dichroic_design(d, analyses_root / label, band=SI3N4_BAND)
         dichroic_test_structures(d, analyses_root / label)
     grid = dichroic_spectrum_grid(
-        designs, analyses_root,
-        FIGDIR / "dichroic_designer_si3n4_spectrum_grid.png", band=SI3N4_BAND,
+        designs,
+        analyses_root,
+        FIGDIR / "dichroic_designer_si3n4_spectrum_grid.png",
+        band=SI3N4_BAND,
     )
 
     # joint AD optimization demo over every practical design parameter, at the
     # mid-band cutoff (jax.grad through make_differentiable_objective)
     joint_ad_demo = joint_ad_optimization_figure(
-        platform, float(cutoffs[len(cutoffs) // 2]),
+        platform,
+        float(cutoffs[len(cutoffs) // 2]),
         FIGDIR / "dichroic_designer_si3n4_joint_ad_optimization.png",
         x0_crosssection=(0.35, 0.20, 0.06, 1.0, 1.0),
         x0_lengths=(0.50, 150.0, 200.0, 600.0, 150.0),

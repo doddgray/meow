@@ -177,9 +177,7 @@ def test_multi_param_gradient_reuses_one_factorization() -> None:
     def solve2(params: np.ndarray) -> list[list[sparse.ScalarModeSolution]]:
         calls["n"] += 1
         return [
-            sparse.solve_scalar_modes_full(
-                n_of_two(params), X_, Y_, WL, num_modes=1
-            )
+            sparse.solve_scalar_modes_full(n_of_two(params), X_, Y_, WL, num_modes=1)
         ]
 
     def eps_jac2(params: np.ndarray, j: int) -> list[np.ndarray]:

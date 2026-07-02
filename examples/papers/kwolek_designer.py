@@ -568,9 +568,7 @@ def calibrate_coupling(
     isolated-waveguide ``d(neff)/d(width)`` times ``k0``.
     """
     gaps = (platform.g_m, 0.5 * (platform.g_m + 1.2), 1.2)
-    return _calibrate_cached(
-        platform, round(w_top, 4), wl, gaps, res, compute_modes
-    )
+    return _calibrate_cached(platform, round(w_top, 4), wl, gaps, res, compute_modes)
 
 
 # --------------------------------------------------------------------------
@@ -677,10 +675,14 @@ def design_faquad_filter(
     if w_top is None:
         if use_gradient:
             w_top, opt_trace = optimize_width_gradient(
-                platform, fh_wl, sh_wl,
+                platform,
+                fh_wl,
+                sh_wl,
                 theta_max_deg=theta_max_deg,
                 target_extinction_db=target_extinction_db,
-                w0=gradient_w0, res=res, steps=gradient_steps,
+                w0=gradient_w0,
+                res=res,
+                steps=gradient_steps,
             )
         else:
             w_top = optimize_width(
@@ -946,9 +948,7 @@ MATERIALS = {"TFLN": tfln_platform, "TFLT": tflt_platform}
 
 def platform_matrix() -> list[TFPlatform]:
     """Every (material, thickness) platform in the design matrix."""
-    return [
-        factory(t) for factory in MATERIALS.values() for t in CORE_THICKNESSES
-    ]
+    return [factory(t) for factory in MATERIALS.values() for t in CORE_THICKNESSES]
 
 
 def design_matrix(
@@ -1074,9 +1074,14 @@ def design_test_structures(
     gdsdir.mkdir(exist_ok=True)
 
     cutback = coupler_cutback_array(
-        design.component, counts=counts, in_port="in_bar", thru_port="out_bar",
-        chip_width=chip_width, pitch=2.0 * design.platform.g_f + 4.0 * design.w_top,
-        width=design.w_top, layer=LAYER_RIB,
+        design.component,
+        counts=counts,
+        in_port="in_bar",
+        thru_port="out_bar",
+        chip_width=chip_width,
+        pitch=2.0 * design.platform.g_f + 4.0 * design.w_top,
+        width=design.w_top,
+        layer=LAYER_RIB,
     )
     resonators = {
         "allpass": kts.all_pass_ring(),
@@ -1130,17 +1135,21 @@ def spectrum_grid_figure(
         if not jpath.exists():
             continue
         spec = json.loads(jpath.read_text())
-        rows.append({
-            "label": faquad_label(d),
-            "wls": np.asarray(spec["wavelength_um"]),
-            "bar": np.asarray(spec["bar"]),
-            "cross": np.asarray(spec["cross"]),
-            "design_wls": [d.sh_wl, d.fh_wl],
-        })
+        rows.append(
+            {
+                "label": faquad_label(d),
+                "wls": np.asarray(spec["wavelength_um"]),
+                "bar": np.asarray(spec["bar"]),
+                "cross": np.asarray(spec["cross"]),
+                "design_wls": [d.sh_wl, d.fh_wl],
+            }
+        )
     if not rows:
         return None
     return spectrum_grid(
-        rows, out_path, db=True,
+        rows,
+        out_path,
+        db=True,
         title="FAQUAD designer: broad-band bar/cross spectra (>1 octave)",
     )
 
@@ -1187,8 +1196,13 @@ def ad_optimization_figure(
     from examples.papers._plot import plot_component
 
     design = design_faquad_filter(
-        platform, fh_wl, sh_wl, res=res,
-        use_gradient=True, gradient_w0=gradient_w0, gradient_steps=gradient_steps,
+        platform,
+        fh_wl,
+        sh_wl,
+        res=res,
+        use_gradient=True,
+        gradient_w0=gradient_w0,
+        gradient_steps=gradient_steps,
     )
     assert design.opt_trace is not None  # noqa: S101 (use_gradient=True always sets it)
     trace = design.opt_trace
@@ -1276,9 +1290,7 @@ def main() -> dict[str, object]:
         pairs = WAVELENGTH_PAIRS
 
     designs = [
-        design_faquad_filter(p, fh, sh, res=res)
-        for p in platforms
-        for fh, sh in pairs
+        design_faquad_filter(p, fh, sh, res=res) for p in platforms for fh, sh in pairs
     ]
     summary = _summary(designs)
 
@@ -1340,9 +1352,7 @@ def main() -> dict[str, object]:
     )
     ax.set_aspect("auto")
 
-    fig.suptitle(
-        "Generalized FAQUAD wavelength-filter designer (X-cut TFLN / TFLT)"
-    )
+    fig.suptitle("Generalized FAQUAD wavelength-filter designer (X-cut TFLN / TFLT)")
     fig.tight_layout()
     fig.savefig(FIGDIR / "kwolek_designer.png", dpi=150)
     plt.close(fig)
@@ -1370,7 +1380,10 @@ def main() -> dict[str, object]:
     # AD gradient-based width optimization demo (jax.grad via make_differentiable_neffs)
     fh0, sh0 = pairs[0]
     ad_demo = ad_optimization_figure(
-        platforms[0], fh0, sh0, res,
+        platforms[0],
+        fh0,
+        sh0,
+        res,
         FIGDIR / "kwolek_designer_ad_optimization.png",
         gradient_steps=pick(low=15, medium=20, high=20),
     )
