@@ -394,11 +394,12 @@ def main() -> dict[str, object]:
                 plat,
                 float(cutoffs[len(cutoffs) // 2]),
                 FIGDIR / f"dichroic_designer_si3n4_{name}_joint_ad_optimization.png",
-                x0_crosssection=(0.35, wgb.rail_width, wgb.gap, 1.0, 1.0),
+                x0_crosssection=(wgb.rail_width, wgb.gap, 1.0, 1.0),
                 x0_lengths=(0.50, 150.0, 200.0, 600.0, 150.0),
                 res=pick(low=0.09, medium=0.06, high=0.05),
                 crosssection_steps=pick(low=10, medium=20, high=24),
                 length_steps=pick(low=8, medium=16, high=20),
+                analysis_dir=FIGDIR / f"dichroic_designer_si3n4_{name}_joint",
             )
             out[f"{name}_joint_ad_optimization"] = joint_ad_demo
     return out

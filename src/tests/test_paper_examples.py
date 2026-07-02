@@ -451,17 +451,43 @@ def test_reference_gvm_sign_matches_original_paper() -> None:
 
 
 def test_optimize_dichroic_crosssection_reduces_loss() -> None:
-    """Stage 1: phase-match + max-GVM cross-section optimizer runs and improves."""
+    """Stage 1: max-GVM-at-exact-phase-match cross-section optimizer runs."""
     from examples.papers import dichroic_designer as dd
 
     plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
     params, trace = dd.optimize_dichroic_crosssection(
-        plat, 1.54, res=0.09, steps=2, lr=0.05
+        plat, 1.54, res=0.09, steps=6, lr=0.03
     )
-    assert params.shape == (5,)
+    assert params.shape == (4,)
     assert trace.param_names == dd.CROSSSECTION_PARAM_NAMES
-    assert len(trace.losses) == 3
+    assert len(trace.losses) == 7
     assert trace.losses[-1] < trace.losses[0]
+
+
+def test_optimize_dichroic_crosssection_always_phase_matched() -> None:
+    """Every iterate - not just the optimum - has an exact WGA/WGB crossing.
+
+    Stage 1 root-finds ``w_a`` for each candidate WGB rather than treating the
+    phase-match residual as a soft penalty, so the design at *every* recorded
+    iterate (not just the final one) must have a genuine mode crossing at the
+    target wavelength.
+    """
+    from examples.papers import dichroic_designer as dd
+
+    plat = dd.Platform(core=mw.silicon, clad=mw.silicon_oxide, core_thickness=0.22)
+    cutoff_wl = 1.54
+    _, trace = dd.optimize_dichroic_crosssection(
+        plat, cutoff_wl, res=0.09, steps=3, lr=0.05
+    )
+    for p in trace.params:
+        w_b, g_b, frac_mid, frac_out = (float(x) for x in p)
+        wgb = dd.WGB(
+            rail_width=w_b, gap=g_b, n_rails=3, frac_mid=frac_mid, frac_out=frac_out
+        )
+        w_a = dd.phase_match_width(plat, cutoff_wl, wgb, res=0.09)
+        n_a = dd.solid_neff(plat, w_a, cutoff_wl, res=0.09)
+        n_b = dd.segmented_neff(plat, wgb, cutoff_wl, res=0.09)
+        assert n_a == pytest.approx(n_b, abs=5e-3)
 
 
 def test_optimize_dichroic_lengths_reduces_loss() -> None:
@@ -493,6 +519,10 @@ def test_design_dichroic_joint_populates_trace() -> None:
     assert len(d.opt_trace_lengths.losses) == 3
     assert d.total_length <= 5000.0 + 1.0
     assert d.component is not None
+    # the design's w_a must genuinely phase-match its wgb at the cutoff
+    n_a = dd.solid_neff(plat, d.w_a, d.cutoff_wl, res=0.09)
+    n_b = dd.segmented_neff(plat, d.wgb, d.cutoff_wl, res=0.09)
+    assert n_a == pytest.approx(n_b, abs=5e-3)
 
 
 def test_dichroic_designer_si3n4_platform_and_width() -> None:
