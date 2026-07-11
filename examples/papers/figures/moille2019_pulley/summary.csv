@@ -1,0 +1,2 @@
+platform,ring_R_um,ring_W_um,bus_W_um,gap_um,kappa0_per_um,delta_per_um,phase_match_bus_width_um,supermode_split,Lc=15um,Lc=17um,Lc=26um,Lc=40um,Qc_pump_Lc26_phasematched,eta_pump_Lc26,Qc_flatness_octave
+SiN-780nm,23.3,1.5,0.55,0.7,0.01161,-0.04411,0.708,0.022505,0.0259,0.0318,0.0557,0.0607,133000.0,0.9575,115.04

@@ -1,0 +1,18 @@
+{
+  "platform": "SiN-780nm",
+  "ring_R_um": 23.3,
+  "ring_W_um": 1.5,
+  "bus_W_um": 0.55,
+  "gap_um": 0.7,
+  "kappa0_per_um": 0.01161,
+  "delta_per_um": -0.04411,
+  "phase_match_bus_width_um": 0.708,
+  "supermode_split": 0.022505,
+  "Lc=15um": 0.0259,
+  "Lc=17um": 0.0318,
+  "Lc=26um": 0.0557,
+  "Lc=40um": 0.0607,
+  "Qc_pump_Lc26_phasematched": 133000.0,
+  "eta_pump_Lc26": 0.9575,
+  "Qc_flatness_octave": 115.04
+}

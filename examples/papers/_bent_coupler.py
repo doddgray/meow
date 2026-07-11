@@ -33,11 +33,14 @@ A microring couples to a bus through the evanescent overlap of the ring's
 
   whose small-``Lc`` limit is the familiar ``(kappa0 Lc)^2 sinc^2(...)``.
 
-The evanescent coupling strength ``kappa0(g)`` is extracted from the FDE
-supermode split, ``kappa0 = sqrt(((beta_even - beta_odd)/2)^2 - delta^2)``, and
-fit to ``kappa0(g) = A exp(-g / gamma)`` over a few gaps. Everything downstream
-(spectra, ring Q, extraction efficiency, and the designers that invert for a
-target coupling) is built on ``(A, gamma, delta)``.
+The coupling ``kappa0`` and mismatch ``delta`` are extracted self-consistently
+from **one** FDE supermode solve (:func:`supermode_coupling`): the ring/bus
+supermode split fixes ``sqrt(kappa0^2 + delta^2)`` and the supermodes' rail
+localization fixes the mixing angle, so ``kappa0`` and ``delta`` agree with the
+field that actually beats. For the point coupler, ``kappa0(g)`` is sampled over a
+few gaps and fit to ``A exp(-g / gamma)``. Everything downstream (spectra, ring
+Q, extraction efficiency, and the designers that invert for a target coupling)
+is built on these.
 
 The module is deliberately platform-agnostic: :class:`StripPlatform` describes
 any strip/ridge stack (SOI, Si3N4, TFLN, ...) and every routine takes a platform,
@@ -46,7 +49,7 @@ so the same code reproduces the papers and designs couplers on a new platform.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -255,26 +258,49 @@ def isolated_neff(
 # ======================================================================
 # coupling extraction: supermode split -> (kappa0, delta) -> A exp(-g/gamma)
 # ======================================================================
+def _ring_frac(mode: mw.Mode, sep: float) -> float:
+    """Fraction of a mode's transverse energy on the ring rail (``x < sep/2``)."""
+    xx = np.asarray(mode.cs.mesh.Xx)
+    dens = (np.abs(np.asarray(mode.Ex)) ** 2 + np.abs(np.asarray(mode.Ey)) ** 2
+            + np.abs(np.asarray(mode.Ez)) ** 2)
+    return float(dens[xx < sep / 2].sum() / (dens.sum() + 1e-30))
+
+
+def _select_ring_bus(modes: list[mw.Mode], sep: float) -> tuple[mw.Mode, mw.Mode]:
+    """Pick the ring-branch and bus-branch fundamental supermodes.
+
+    The ring/bus TE0 pair are the highest-``n_eff`` ring-majority and bus-majority
+    modes (so a multimode ring's TE1 is skipped). Near phase matching both hybrids
+    straddle 50/50 and this reduces to the top two by ``n_eff``.
+    """
+    ring = [m for m in modes if _ring_frac(m, sep) > 0.5]
+    bus = [m for m in modes if _ring_frac(m, sep) <= 0.5]
+    if ring and bus:
+        m_ring = max(ring, key=lambda m: np.real(m.neff))
+        m_bus = max(bus, key=lambda m: np.real(m.neff))
+    else:
+        m_ring, m_bus = modes[0], modes[1]
+    pair = sorted([m_ring, m_bus], key=lambda m: np.real(m.neff), reverse=True)
+    return pair[0], pair[1]
+
+
 def supermode_split(
     platform: StripPlatform, w_ring: float, w_bus: float, gap: float, wl: float,
-    *, bend_radius: float = np.inf, res: float = 0.03, ring_at_zero: bool = True,
+    *, bend_radius: float = np.inf, res: float = 0.03, num_modes: int = 6,
 ) -> tuple[float, float, list[mw.Mode]]:
-    """Even/odd TE supermode indices of two cores separated by ``gap`` (edge-edge).
+    """Ring/bus fundamental supermode indices of two cores separated by ``gap``.
 
-    Cores are placed along the radial (meow-x) axis. With ``ring_at_zero`` the
-    ring core sits at ``x = 0`` (so ``bend_radius`` is the ring centerline radius)
-    and the bus is at larger radius (outside the ring).
+    The ring core sits at ``x = 0`` (so ``bend_radius`` is the ring centerline
+    radius) and the bus at larger radius. Returns ``(n_higher, n_lower, [higher,
+    lower])`` for the ring/bus TE0 branch pair (selected by rail localization, so
+    a multimode ring's higher-order modes don't masquerade as the bus).
     """
     sep = gap + (w_ring + w_bus) / 2  # center-to-center
-    if ring_at_zero:
-        cores = [(w_ring, 0.0), (w_bus, sep)]
-    else:
-        cores = [(w_ring, -sep / 2), (w_bus, sep / 2)]
-    cs = cross_section(platform, cores, wl, res=res, bend_radius=bend_radius)
-    modes = _te_sorted(solve(cs, num_modes=4))
-    n_even = float(np.real(modes[0].neff))
-    n_odd = float(np.real(modes[1].neff))
-    return n_even, n_odd, modes
+    cs = cross_section(platform, [(w_ring, 0.0), (w_bus, sep)], wl,
+                       res=res, bend_radius=bend_radius)
+    modes = _te_sorted(solve(cs, num_modes=num_modes))
+    hi, lo = _select_ring_bus(modes, sep)
+    return float(np.real(hi.neff)), float(np.real(lo.neff)), [hi, lo]
 
 
 def symmetric_kappa0(
@@ -294,41 +320,53 @@ def symmetric_kappa0(
     return float(np.pi * (n_even - n_odd) / wl)
 
 
-def angular_beta(
-    platform: StripPlatform, width: float, wl: float, radius: float, ref_radius: float,
-    *, res: float = 0.03,
-) -> float:
-    """Linear propagation constant [1/um] of a bent guide, referenced to ``ref_radius``.
+def supermode_coupling(
+    platform: StripPlatform, w_ring: float, w_bus: float, gap: float, wl: float,
+    *, bend_radius: float, res: float = 0.03,
+) -> tuple[float, float]:
+    """Self-consistent ``(kappa0, |delta|)`` [1/um] from one bent supermode solve.
 
-    A bent guide at physical radius ``radius`` has an *angular* phase constant
-    ``m = beta * radius`` (per radian). Reduced to a common reference radius it is
-    ``beta_ref = m / ref_radius = k0 n_eff(radius) * radius / ref_radius`` -- the
-    quantity that must match between ring and pulley bus for phase matching.
+    A two-guide coupler is a 2-level system: the supermode split
+    ``S = k0 (n_even - n_odd) = 2 sqrt(kappa0^2 + delta^2)`` fixes the *radius*, and
+    the even supermode's rail localization ``r`` (energy fraction on the ring)
+    fixes the *mixing angle*. Solving the 2-level model gives
+
+        kappa0 = S sqrt(r (1 - r)) ,   |delta| = (S/2) |2r - 1| .
+
+    At phase matching ``r -> 1/2`` (delocalized supermodes, ``delta -> 0``); a
+    strongly mismatched coupler has rail-localized supermodes (``r -> 0 or 1``).
+    This matches exactly what :func:`pulley_propagation` beats, so the coupling
+    law and the field agree.
     """
-    n, _ = isolated_neff(platform, width, wl, bend_radius=radius, res=res)
-    return float((2 * np.pi / wl) * n * radius / ref_radius)
+    sep = gap + (w_ring + w_bus) / 2
+    n_even, n_odd, modes = supermode_split(
+        platform, w_ring, w_bus, gap, wl, bend_radius=bend_radius, res=res
+    )
+    s = (2 * np.pi / wl) * (n_even - n_odd)
+    r = _ring_frac(modes[0], sep)
+    kappa0 = float(s * np.sqrt(max(r * (1 - r), 0.0)))
+    # even (faster) mode on the ring rail (r>0.5) => ring faster => bus slower => delta<0
+    delta = float(0.5 * s * (2 * r - 1)) * (-1.0)
+    return kappa0, delta
 
 
 def mismatch(
     platform: StripPlatform, w_ring: float, w_bus: float, gap: float, wl: float,
     *, radius: float, mode: str, res: float = 0.03,
 ) -> float:
-    """Phase mismatch ``delta = (beta_bus - beta_ring)/2`` [1/um] at the ring radius.
+    """Signed phase mismatch ``delta`` [1/um] (bus faster -> positive).
 
-    ``mode='pulley'`` uses the outer bus at physical radius ``R + sep`` reduced to
-    the ring reference (angular matching); ``mode='point'`` uses a *straight* bus
-    (``beta_bus = k0 n_bus``) against the bent ring.
+    For a pulley the magnitude comes from the self-consistent supermode split +
+    localization (:func:`supermode_coupling`); for a point coupler the straight
+    bus is compared to the bent ring directly.
     """
+    if mode == "pulley":
+        return supermode_coupling(platform, w_ring, w_bus, gap, wl,
+                                  bend_radius=radius, res=res)[1]
     k0 = 2 * np.pi / wl
     n_ring, _ = isolated_neff(platform, w_ring, wl, bend_radius=radius, res=res)
-    beta_ring = k0 * n_ring
-    if mode == "pulley":
-        sep = gap + (w_ring + w_bus) / 2
-        beta_bus = angular_beta(platform, w_bus, wl, radius + sep, radius, res=res)
-    else:  # point coupler: straight bus
-        n_bus, _ = isolated_neff(platform, w_bus, wl, bend_radius=np.inf, res=res)
-        beta_bus = k0 * n_bus
-    return 0.5 * (beta_bus - beta_ring)
+    n_bus, _ = isolated_neff(platform, w_bus, wl, bend_radius=np.inf, res=res)
+    return float(0.5 * k0 * (n_bus - n_ring))
 
 
 @dataclass
@@ -570,42 +608,41 @@ def pulley_propagation(
     length: float, wl: float, *, num_cells: int = 12, num_modes: int = 4,
     res: float = 0.05, num_z: int = 400,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Bent-EME |E| field of a bus-excited pulley section (supermode beating).
+    """Bent-EME |E| field of a bus-excited pulley, from the two bent supermodes.
 
-    Builds the concentric cells, solves the bent supermodes, injects the **bus**
-    rail (the even-minus-odd supermode combination), and propagates. Returns
-    ``(|E|[z, x], x_transverse, bus_to_ring_power)``.
+    A uniform coupler is exactly the coherent sum of its even/odd supermodes:
+    ``E(x, z) = c_e psi_e(x) e^{i beta_e z} + c_o psi_o(x) e^{i beta_o z}``. We
+    solve the concentric bent supermodes with meow's FDE (``num_cells`` is kept
+    for API symmetry with the cell-based EME), inject the **bus** rail
+    (``c_e = +-c_o`` chosen to light ``x = sep`` at ``z = 0``), and evaluate the
+    field along the arc. Returns ``(|E|[z, x], x_transverse, ring_fraction_out)``.
     """
-    cells = pulley_cells(platform, w_ring, w_bus, gap, wl, length,
-                         num_cells=num_cells, res=res, bend_radius=radius)
-    env = mw.Environment(wl=wl, T=25.0)
-    css = [mw.CrossSection.from_cell(cell=c, env=env) for c in cells]
-    modes = [_te_sorted(solve(cs, num_modes=num_modes))[:2] for cs in css]
     sep = gap + (w_ring + w_bus) / 2
-    # even/odd -> bus is the combination whose energy sits at the bus rail (x=sep)
-    exc = _bus_excitation(modes[0], sep)
-    field, x_trans = mw.propagate_modes(
-        modes, cells, excitation_l=exc, y=0.0, num_z=num_z,
+    cs = cross_section(platform, [(w_ring, 0.0), (w_bus, sep)], wl,
+                       res=res, bend_radius=radius)
+    modes = _te_sorted(solve(cs, num_modes=num_modes))[:2]
+    k0 = 2 * np.pi / wl
+    beta = np.array([k0 * np.real(m.neff) for m in modes])
+    mesh = modes[0].cs.mesh
+    xx = np.asarray(mesh.x_)
+    y_arr = np.asarray(mesh.y_)
+    iy = int(np.argmin(np.abs(y_arr)))  # slice at the core center (y ~ 0)
+    psi = np.array([np.asarray(m.Ex)[:, iy] for m in modes])  # (2, Nx)
+    # choose the even/odd sign that concentrates z=0 energy on the bus rail
+    bus_mask = xx > sep / 2
+    combos = {1.0: psi[0] + psi[1], -1.0: psi[0] - psi[1]}
+    sign = max(combos, key=lambda s:
+               np.abs(combos[s][bus_mask]).sum() / (np.abs(combos[s]).sum() + 1e-30))
+    c = np.array([1.0, sign]) / np.sqrt(2)
+    z = np.linspace(0.0, length, num_z)
+    field = np.abs(
+        c[0] * psi[0][None, :] * np.exp(1j * beta[0] * z)[:, None]
+        + c[1] * psi[1][None, :] * np.exp(1j * beta[1] * z)[:, None]
     )
-    field = np.abs(np.asarray(field))
-    return field, np.asarray(x_trans), float("nan")
-
-
-def _bus_excitation(input_modes: list[mw.Mode], bus_x: float) -> np.ndarray:
-    """Supermode amplitudes that light up the bus rail at ``x = bus_x``."""
-    plus = np.array([1.0, 1.0]) / np.sqrt(2)
-    minus = np.array([1.0, -1.0]) / np.sqrt(2)
-
-    def rail_energy(exc: np.ndarray) -> float:
-        f = sum(a * np.asarray(m.Ex) for a, m in zip(exc, input_modes))
-        mesh = input_modes[0].cs.mesh
-        xx = np.asarray(mesh.Xx)
-        dens = np.abs(f) ** 2
-        # fraction of energy at x > bus_x/2 (the bus side)
-        mask = xx > bus_x / 2
-        return float(dens[mask].sum() / (dens.sum() + 1e-30))
-
-    return plus if rail_energy(plus) >= rail_energy(minus) else minus
+    ring_mask = xx < sep / 2
+    out = field[-1]
+    ring_frac = float((out[ring_mask] ** 2).sum() / ((out**2).sum() + 1e-30))
+    return field, xx, ring_frac
 
 
 # ======================================================================
