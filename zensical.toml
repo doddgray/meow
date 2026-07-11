@@ -23,6 +23,7 @@ nav = [
     {"tensor smoothing & full gradients" = "nbs/08_kottke_and_full_gradients.md"}
   ]},
   {"algorithm" = "algorithm.md"},
+  {"bent-waveguide couplers" = "bent_couplers.md"},
   {"HPC & gradients" = "hpc.md"},
   {"api" = "api.md"},
   {"changelog" = "changelog.md"}
