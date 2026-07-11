@@ -1,0 +1,13 @@
+{
+  "platform": "SOI-220nm",
+  "kappa0_A_per_um": 0.1853,
+  "gamma_nm": 116.5,
+  "kappa2_gap125nm_R10": 0.0291,
+  "kappa2_gap200nm_R10": 0.0081,
+  "group_index": 4.3174,
+  "xu2008_R_um": 1.5,
+  "xu2008_kappa2_critical": 0.0065,
+  "xu2008_Qi": 25300.0,
+  "xu2008_Qc_critical": 12700.0,
+  "xu2008_QL_critical": 8500.0
+}
