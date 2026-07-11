@@ -94,6 +94,9 @@ actions = ["add-all", "commit", "tag", "push"]
 addopts = '--tb=short'
 norecursedirs = ["scripts"]
 testpaths = ["src/tests"]
+markers = [
+  "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
 
 [tool.ruff]
 fix = true

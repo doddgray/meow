@@ -308,6 +308,45 @@ spectrum/propagation/design figures, GDS and data into a fresh timestamped
 subfolder. As with the others, `submit_runs` returns immediately and
 `gather_runs` assembles every run in a later session.
 
+## Bent-waveguide ring–bus couplers (point & pulley)
+
+Two experimentally-validated **microring bus couplers**, built on MEOW's *bent*
+FDE mode solver (`Mesh2D.bend_radius`) + EME + coupled-mode theory, plus
+arbitrary-platform designers. Shared engine: `_bent_coupler.py`. Full physics
+write-up in [`docs/bent_couplers.md`](../../docs/bent_couplers.md).
+
+The ring guides a **bent** whispering-gallery mode; coupling is its evanescent
+overlap with the bus. From one bent supermode solve, `supermode_coupling`
+extracts the coupling `kappa0` and phase mismatch `delta` self-consistently (the
+supermode split fixes `sqrt(kappa0²+delta²)`, the supermode rail-localization
+fixes the mixing angle), so the coupling law and the propagating field agree.
+
+- **Point coupler** — `bogaerts2012_point_coupler.py`. A straight bus tangent to
+  a 220 nm SOI ring; the gap opens as `g(z)=g0+z²/(2R)` so the coupling is the
+  parabolic-gap integral of `kappa0(g)=A e^{-g/gamma}`, `|kappa|²=sin²(∫kappa0 dz)`.
+  Reproduces Bogaerts et al., *Laser Photonics Rev.* **6**, 47 (2012)
+  gap↔coupling (`~1%` at a 200 nm gap) and Xu, Fattal & Beausoleil, *Opt.
+  Express* **16**, 4309 (2008) — the R = 1.5 µm ring at critical coupling
+  (`kappa² ≈ 0.8%`, `Q_i ≈ 2×10⁴`, `Q_L ≈ 9×10³`).
+- **Pulley coupler** — `moille2019_pulley.py`. A bus bent to wrap a 780 nm
+  Si₃N₄ ring over `Lc=R_bus·θ`; concentric bent supermodes give the
+  phase-mismatched directional-coupler law
+  `|kappa|²=kappa0²/(kappa0²+delta²)·sin²(√(kappa0²+delta²)·Lc)`. Reproduces
+  Moille et al., *Opt. Lett.* **44**, 4737 (2019): the `sinc²` law (coupling
+  saturates at the paper's mismatched `W=550 nm`, grows monotonically when the
+  bus is narrowed to phase-match), the bent-EME bus→ring beat over the beat
+  length, and the broadband `Q_c`/extraction spectrum (`Q_i=3×10⁶`).
+- **Designers** — `point_coupler_designer.py` (invert for the ring–bus gap) and
+  `pulley_coupler_designer.py` (phase-match the bus width, then solve the wrap
+  length/angle) hit a **target `|kappa|²` at a target wavelength on any
+  platform**. `pulley_coupler_slurm.py` distributes the broadband spectrum one
+  wavelength per job.
+
+Each script emits the standard plot suite (cross-section, mode/supermode fields,
+`n_eff(R)` curvature dispersion, `kappa0(g)` calibration, `|kappa|²` design curve
+with target/solution marked, coupling/`Q_c`/extraction spectrum, bent-EME
+propagation field, ring transfer functions, layout).
+
 ## Running
 
 ```sh
@@ -321,6 +360,11 @@ uv run python -m examples.papers.dichroic_designer_slurm
 uv run python -m examples.papers.dichroic_coupler_slurm
 uv run python -m examples.papers.kwolek_designer
 uv run python -m examples.papers.kwolek_designer_slurm
+uv run python -m examples.papers.bogaerts2012_point_coupler
+uv run python -m examples.papers.moille2019_pulley
+uv run python -m examples.papers.point_coupler_designer
+uv run python -m examples.papers.pulley_coupler_designer
+uv run python -m examples.papers.pulley_coupler_slurm
 ```
 
 Figures for the non-slurm examples are written to `examples/papers/figures/`.
