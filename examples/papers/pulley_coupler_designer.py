@@ -55,10 +55,12 @@ class PulleyDesign:
 
     @property
     def sep(self) -> float:
+        """Ring-bus center-to-center separation [um]."""
         return self.gap + (self.ring_width + self.bus_width) / 2
 
     @property
     def wrap_deg(self) -> float:
+        """Pulley wrap angle [deg] = arc length / bus radius."""
         return float(np.rad2deg(self.length / (self.radius + self.sep)))
 
 
@@ -106,7 +108,7 @@ def _plots(design: PulleyDesign, out: Any, res_um: float) -> list[str]:
     tag = design.label
     pf, wl = design.platform, design.wl
 
-    n_even, n_odd, sup = bc.supermode_split(pf, design.ring_width, design.bus_width,
+    _n_even, _n_odd, sup = bc.supermode_split(pf, design.ring_width, design.bus_width,
                                             design.gap, wl, bend_radius=design.radius,
                                             res=res_um)
     bc.plot_modes(sup[:2], ["ring-branch supermode", "bus-branch supermode"],
@@ -165,7 +167,8 @@ def _plots(design: PulleyDesign, out: Any, res_um: float) -> list[str]:
     return figs
 
 
-def _plot_pm(widths, deltas, w_pm, path, tag):
+def _plot_pm(widths: np.ndarray, deltas: np.ndarray, w_pm: float, path: Any,
+             tag: str) -> None:
     plt = bc._agg()
     fig, ax = plt.subplots(figsize=(6.6, 4.2))
     ax.plot(widths * 1000, deltas, "o-", ms=4)

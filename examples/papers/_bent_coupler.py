@@ -16,7 +16,8 @@ A microring couples to a bus through the evanescent overlap of the ring's
   lumped: the edge-to-edge gap opens quadratically away from the tangent point,
   ``g(z) = g0 + z**2 / (2 R)``, so the coupling is a single localized event with
 
-      kappa_field = integral kappa0(g(z)) dz  (phase-matched)  ->  |kappa|^2 = sin^2(kappa_field).
+      kappa_field = integral kappa0(g(z)) dz  (phase-matched)
+      |kappa|^2 = sin^2(kappa_field).
 
   The ring mode is solved **bent** (radius ``R``); the bus mode is solved
   *straight*, so their phase mismatch ``delta = (beta_bus - beta_ring)/2`` is a
@@ -29,7 +30,8 @@ A microring couples to a bus through the evanescent overlap of the ring's
   phase-mismatched directional-coupler law (Moille 2019, Eq. cited in the
   example)
 
-      |kappa|^2(Lc) = kappa0^2 / (kappa0^2 + delta^2) * sin^2(sqrt(kappa0^2 + delta^2) * Lc),
+      |kappa|^2(Lc) = kappa0^2 / (kappa0^2 + delta^2)
+                      * sin^2(sqrt(kappa0^2 + delta^2) * Lc),
 
   whose small-``Lc`` limit is the familiar ``(kappa0 Lc)^2 sinc^2(...)``.
 
@@ -49,9 +51,10 @@ so the same code reproduces the papers and designs couplers on a new platform.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -178,8 +181,8 @@ def cross_section(
     xs = [xc for _, xc in cores]
     ws = [w for w, _ in cores]
     if x_span is None:
-        lo = min(x - w for x, w in zip(xs, ws)) - 1.6
-        hi = max(x + w for x, w in zip(xs, ws)) + 1.6
+        lo = min(x - w for x, w in zip(xs, ws, strict=True)) - 1.6
+        hi = max(x + w for x, w in zip(xs, ws, strict=True)) + 1.6
         x_span = (lo, hi)
     span = max(abs(x_span[0]), abs(x_span[1])) + 2.0
 
@@ -234,7 +237,7 @@ def solve(cs: mw.CrossSection, num_modes: int = 2) -> list[mw.Mode]:
 
 def _te_sorted(modes: list[mw.Mode]) -> list[mw.Mode]:
     te = [m for m in modes if float(mw.te_fraction(m)) >= 0.5]
-    return te if te else modes
+    return te or modes
 
 
 def isolated_neff(
@@ -345,7 +348,7 @@ def supermode_coupling(
     s = (2 * np.pi / wl) * (n_even - n_odd)
     r = _ring_frac(modes[0], sep)
     kappa0 = float(s * np.sqrt(max(r * (1 - r), 0.0)))
-    # even (faster) mode on the ring rail (r>0.5) => ring faster => bus slower => delta<0
+    # even (faster) mode on the ring rail (r>0.5) => ring faster => bus slower
     delta = float(0.5 * s * (2 * r - 1)) * (-1.0)
     return kappa0, delta
 
@@ -468,7 +471,9 @@ def point_cross_power(
     return _cmt_cross_power(kz, model.delta, z[1] - z[0])
 
 
-def point_cross_power_analytic(model: CouplingModel, gap: float, radius: float) -> float:
+def point_cross_power_analytic(
+    model: CouplingModel, gap: float, radius: float,
+) -> float:
     """Phase-matched closed form ``sin^2(A e^{-gap/gamma} sqrt(2 pi R gamma))``.
 
     The Gaussian integral of ``kappa0(g(z))`` over the parabolic gap gives the
@@ -503,7 +508,7 @@ def pulley_cross_power_sinc(kappa0: float, delta: float, length: float) -> float
 # ring-resonator observables (transfer functions, Q, extraction efficiency)
 # ======================================================================
 def all_pass_transmission(t: float, a: float, phi: np.ndarray) -> np.ndarray:
-    """|Through|^2 of an all-pass ring: ``(a^2-2at cos phi+t^2)/(1-2at cos phi+a^2 t^2)``."""
+    """|Through|^2 of an all-pass ring (Bogaerts Eq.: t, a, round-trip phase phi)."""
     num = a**2 - 2 * a * t * np.cos(phi) + t**2
     den = 1 - 2 * a * t * np.cos(phi) + (a * t) ** 2
     return num / den
@@ -520,14 +525,14 @@ def add_drop_through_drop(
 
 
 def q_coupling(kappa2: float, ng: float, radius: float, wl: float) -> float:
-    """Coupling (external) quality factor ``Q_c = pi n_g (2 pi R) / (lambda kappa^2)``."""
+    """Coupling (external) Q: ``Q_c = pi n_g (2 pi R) / (lambda kappa^2)``."""
     if kappa2 <= 0:
         return np.inf
     return float(np.pi * ng * (2 * np.pi * radius) / (wl * kappa2))
 
 
 def q_intrinsic(loss_db_per_cm: float, ng: float, wl_um: float) -> float:
-    """Intrinsic Q from a propagation loss ``alpha`` [dB/cm]: ``2 pi n_g / (lambda alpha)``."""
+    """Intrinsic Q from loss ``alpha`` [dB/cm]: ``2 pi n_g / (lambda alpha)``."""
     alpha_per_um = loss_db_per_cm / (10 * np.log10(np.e)) / 1e4  # dB/cm -> 1/um (power)
     if alpha_per_um <= 0:
         return np.inf
@@ -605,15 +610,14 @@ def pulley_cells(
 
 def pulley_propagation(
     platform: StripPlatform, w_ring: float, w_bus: float, gap: float, radius: float,
-    length: float, wl: float, *, num_cells: int = 12, num_modes: int = 4,
+    length: float, wl: float, *, num_modes: int = 4,
     res: float = 0.05, num_z: int = 400,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Bent-EME |E| field of a bus-excited pulley, from the two bent supermodes.
 
     A uniform coupler is exactly the coherent sum of its even/odd supermodes:
     ``E(x, z) = c_e psi_e(x) e^{i beta_e z} + c_o psi_o(x) e^{i beta_o z}``. We
-    solve the concentric bent supermodes with meow's FDE (``num_cells`` is kept
-    for API symmetry with the cell-based EME), inject the **bus** rail
+    solve the concentric bent supermodes with meow's FDE, inject the **bus** rail
     (``c_e = +-c_o`` chosen to light ``x = sep`` at ``z = 0``), and evaluate the
     field along the arc. Returns ``(|E|[z, x], x_transverse, ring_fraction_out)``.
     """
@@ -648,7 +652,7 @@ def pulley_propagation(
 # ======================================================================
 # the standard plot suite
 # ======================================================================
-def _agg():
+def _agg() -> Any:
     import matplotlib as mpl
 
     mpl.use("Agg")
@@ -678,7 +682,7 @@ def plot_modes(
     plt = _agg()
     n = len(modes)
     fig, axes = plt.subplots(1, n, figsize=(3.4 * n, 3.4), squeeze=False)
-    for ax, m, lbl in zip(axes[0], modes, labels):
+    for ax, m, lbl in zip(axes[0], modes, labels, strict=False):
         xx = np.asarray(m.cs.mesh.Xx)
         yy = np.asarray(m.cs.mesh.Yy)
         f = np.abs(np.asarray(getattr(m, field)))

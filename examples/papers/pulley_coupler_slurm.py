@@ -26,7 +26,9 @@ from typing import Any
 import numpy as np
 
 import meow as mw
-from examples.papers import _backends, _bent_coupler as bc, _resolution as res
+from examples.papers import _backends
+from examples.papers import _bent_coupler as bc
+from examples.papers import _resolution as res
 from examples.papers import pulley_coupler_designer as pd
 
 JOB_FOLDER = Path(os.environ.get("MEOW_SLURM_FOLDER", "meow_pulley_jobs"))
@@ -78,9 +80,10 @@ def gather_design(record: dict[str, Any], out: Path) -> dict[str, Any]:
     design = record["design"]
     wls = record["wls"]
     ks, ds, ngs = zip(*[j.result() for j in record["jobs"]], strict=True)
-    k2 = np.array([bc.pulley_cross_power(k, d, design.length) for k, d in zip(ks, ds)])
+    k2 = np.array([bc.pulley_cross_power(k, d, design.length)
+                   for k, d in zip(ks, ds, strict=True)])
     qc = np.array([bc.q_coupling(float(k), float(n), design.radius, float(w))
-                   for k, n, w in zip(k2, ngs, wls)])
+                   for k, n, w in zip(k2, ngs, wls, strict=True)])
     qi = bc.q_intrinsic(design.loss_db_cm, float(np.mean(ngs)), design.wl)
     eta = np.array([bc.extraction_efficiency(float(q), qi) for q in qc])
     out.mkdir(parents=True, exist_ok=True)

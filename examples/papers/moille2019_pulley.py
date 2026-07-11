@@ -67,7 +67,7 @@ def main() -> dict[str, Any]:
                                             bend_radius=R, res=device_res)
     bc.plot_modes(sup[:2], ["even supermode", "odd supermode"],
                   FIGDIR / "01_supermodes.png",
-                  title=f"Concentric bent supermodes (R={R} um, gap {GAP * 1e3:.0f} nm)")
+                  title=f"Concentric bent supermodes (gap {GAP * 1e3:.0f} nm)")
     figs.append("01_supermodes.png")
 
     # -- 2. cross-section ------------------------------------------------------
@@ -116,7 +116,7 @@ def main() -> dict[str, Any]:
 
     # -- 6. bent-EME propagation field (bus-excited supermode beating) ---------
     lc_field = 2.0 * lpi  # ~one full bus->ring->bus oscillation
-    field, x_trans, ring_out = bc.pulley_propagation(
+    field, x_trans, _ring_out = bc.pulley_propagation(
         platform, RW, w_pm, GAP, R, lc_field, WL,
         num_modes=res.num_modes(low=3, medium=4, high=4),
         res=res.pick(low=0.06, medium=0.05, high=0.04),
@@ -172,7 +172,8 @@ def main() -> dict[str, Any]:
     return {"out_dir": str(FIGDIR), "summary": summary, "figures": figs}
 
 
-def _plot_phasematch(widths, deltas, w_pm, w_paper, path):
+def _plot_phasematch(widths: np.ndarray, deltas: np.ndarray, w_pm: float,
+                     w_paper: float, path: Any) -> None:
     plt = bc._agg()
     fig, ax = plt.subplots(figsize=(6.6, 4.2))
     ax.plot(widths * 1000, deltas, "o-", ms=4)

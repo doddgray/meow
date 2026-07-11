@@ -56,6 +56,7 @@ class PointDesign:
 
     @property
     def ng(self) -> float:
+        """Ring group index at the design wavelength."""
         return bc.group_index(self.platform, self.width, self.wl,
                               bend_radius=self.radius, res=0.03)
 
@@ -100,9 +101,9 @@ def _plots(design: PointDesign, out: Any, res_um: float) -> list[str]:
     figs: list[str] = []
     tag = design.label
 
-    cs = bc.cross_section(design.platform,
-                          [(design.width, 0.0), (design.width, design.gap + design.width)],
-                          design.wl, res=res_um, bend_radius=design.radius)
+    cores = [(design.width, 0.0), (design.width, design.gap + design.width)]
+    cs = bc.cross_section(design.platform, cores, design.wl, res=res_um,
+                          bend_radius=design.radius)
     bc.plot_cross_section(cs, out / f"{tag}_01_cross_section.png",
                           title=f"{tag}: coupler cross-section "
                                 f"(gap {design.gap * 1e3:.0f} nm)")

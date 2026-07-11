@@ -160,7 +160,7 @@ def main() -> dict[str, Any]:
     }
     bc_save_summary(FIGDIR / "summary", summary)
     bc_save_table(FIGDIR / "kappa2_vs_gap",
-                  {"gap_nm": gg * 1000, **{k: v for k, v in curves.items()}})
+                  {"gap_nm": gg * 1000, **dict(curves)})
     return {"out_dir": str(FIGDIR), "summary": summary, "figures": figs}
 
 
